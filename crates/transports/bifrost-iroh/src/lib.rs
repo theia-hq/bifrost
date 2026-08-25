@@ -26,17 +26,34 @@ impl Endpoint {
     /// Bind with a fresh identity, using n0 discovery and relays so it is reachable by [`NodeId`]
     /// across NATs.
     pub async fn bind() -> Result<Self, BindError> {
-        Self::finish(iroh::Endpoint::builder(presets::N0)).await
+        Self::finish(iroh::Endpoint::builder(presets::N0), SecretKey::generate()).await
+    }
+
+    /// Bind with a persisted identity, from a raw 32-byte ed25519 secret key, so the [`NodeId`] is
+    /// stable across runs. Uses n0 discovery and relays like [`bind`](Self::bind).
+    pub async fn bind_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
+        Self::finish(
+            iroh::Endpoint::builder(presets::N0),
+            SecretKey::from_bytes(&secret),
+        )
+        .await
     }
 
     /// Bind a local-only endpoint (no discovery, no relays) for same-host and LAN use.
     pub async fn bind_local() -> Result<Self, BindError> {
-        Self::finish(iroh::Endpoint::builder(presets::Minimal)).await
+        Self::finish(
+            iroh::Endpoint::builder(presets::Minimal),
+            SecretKey::generate(),
+        )
+        .await
     }
 
-    async fn finish(builder: iroh::endpoint::Builder) -> Result<Self, BindError> {
+    async fn finish(
+        builder: iroh::endpoint::Builder,
+        secret: SecretKey,
+    ) -> Result<Self, BindError> {
         let inner = builder
-            .secret_key(SecretKey::generate())
+            .secret_key(secret)
             .alpns(vec![ALPN.to_vec()])
             .bind()
             .await
