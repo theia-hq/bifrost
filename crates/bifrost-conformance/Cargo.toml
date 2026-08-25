@@ -1,0 +1,13 @@
+[package]
+name = "bifrost-conformance"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bifrost.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+bifrost-iroh.workspace = true
+bifrost-mem.workspace = true

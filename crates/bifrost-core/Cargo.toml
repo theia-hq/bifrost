@@ -1,0 +1,9 @@
+[package]
+name = "bifrost-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+data-encoding.workspace = true
+thiserror.workspace = true

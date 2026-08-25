@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/bifrost",
+    "crates/bifrost-core",
+    "crates/bifrost-transport",
+    "crates/bifrost-wire",
+    "crates/bifrost-conformance",
+    "crates/transports/bifrost-iroh",
+    "crates/transports/bifrost-mem",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+bifrost = { path = "crates/bifrost" }
+bifrost-core = { path = "crates/bifrost-core" }
+bifrost-transport = { path = "crates/bifrost-transport" }
+bifrost-iroh = { path = "crates/transports/bifrost-iroh" }
+bifrost-mem = { path = "crates/transports/bifrost-mem" }
+bifrost-wire = { path = "crates/bifrost-wire" }
+
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+data-encoding = "2"
+eyre = "0.6"
+iroh = "1.0"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
