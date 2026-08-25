@@ -1,11 +1,11 @@
-//! The Bifrost transport seam.
+//! The Bifrost transport interface.
 //!
 //! A [`Transport`] establishes authenticated, encrypted [`Session`]s to a peer identified by its
 //! [`NodeId`]. This is the pluggable boundary: iroh today, a raw-QUIC transport next, others later,
 //! all interchangeable and all held to the same behaviour by the conformance suite. Everything
-//! above this seam (the wire, the products) is transport-blind.
+//! above this boundary (the wire, the products) is transport-blind.
 //!
-//! Streams are exposed as associated types bounded by [`AsyncRead`]/[`AsyncWrite`], so the seam is a
+//! Streams are exposed as associated types bounded by [`AsyncRead`]/[`AsyncWrite`], so the boundary is a
 //! plain byte-stream interface with no boxing: a transport differs only in how a session is
 //! established, never in how bytes flow once it is.
 

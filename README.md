@@ -1,8 +1,9 @@
 # bifrost
 
 Pubkey-addressed overlay networking. Identity is an ed25519 public key: you dial a peer by *who* they
-are, not *where* they are, over any transport, across NAT. `bifrost` is the **reach** seam — open an
-authenticated, bidirectional byte-stream to a `NodeId` and stay agnostic to whatever crosses it.
+are, not *where* they are, over any transport, across NAT. `bifrost` gives you **reach**: an
+authenticated, bidirectional byte-stream to a `NodeId` over any transport, agnostic to whatever
+crosses it.
 
 > Experimental. APIs will change and it is not ready for production use.
 
@@ -18,7 +19,7 @@ let session = node.connect(peer_id).await?;
 let (mut writer, mut reader) = session.open_bi().await?;
 ```
 
-`Transport`, `Session`, and `Discovery` are the pluggable seams. Implement `Transport` to add a
+`Transport`, `Session`, and `Discovery` are the pluggable interfaces. Implement `Transport` to add a
 backend; every implementation is held to one behaviour by the conformance suite.
 
 ## Layout
@@ -27,7 +28,7 @@ backend; every implementation is held to one behaviour by the conformance suite.
 | --------------------- | ------------------------------------------------------------ |
 | `bifrost`             | facade — the reach API (`Node`, `Transport`, `Session`, `Discovery`) |
 | `bifrost-core`        | identity (`NodeId`, crypto-versioned)                        |
-| `bifrost-transport`   | the transport seam + `Node` / `Discovery`                    |
+| `bifrost-transport`   | the transport interface + `Node` / `Discovery`               |
 | `bifrost-iroh`        | transport backend over iroh (QUIC + hole-punching)           |
 | `bifrost-mem`         | in-process transport backend (tests)                         |
 | `bifrost-conformance` | transport-agnostic reach test suite                          |

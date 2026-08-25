@@ -1,9 +1,9 @@
-//! iroh-backed implementation of the Bifrost transport seam.
+//! iroh-backed implementation of the Bifrost transport interface.
 //!
 //! iroh does the hard parts (QUIC, NAT traversal, relay fallback, raw-public-key TLS) so a session
 //! to a [`NodeId`] works across the internet. This crate maps iroh's endpoint, connection, and
 //! streams onto the [`Transport`] and [`Session`] traits, and keeps iroh's own address type from
-//! leaking past this seam.
+//! leaking past this boundary.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

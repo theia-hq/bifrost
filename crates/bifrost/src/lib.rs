@@ -1,6 +1,6 @@
 //! Bifrost: the pubkey-addressed overlay substrate.
 //!
-//! This umbrella is what applications depend on. It re-exports the transport + discovery seam and the
+//! This umbrella is what applications depend on. It re-exports the transport + discovery interface and the
 //! wire, so an app speaks only `bifrost::` and names a concrete transport exactly once, at its
 //! composition root, for example:
 //!

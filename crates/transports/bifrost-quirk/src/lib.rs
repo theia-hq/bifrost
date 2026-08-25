@@ -1,4 +1,4 @@
-//! quirk-backed implementation of the Bifrost transport seam.
+//! quirk-backed implementation of the Bifrost transport interface.
 //!
 //! Maps quirk's endpoint, connection, and streams onto the [`Transport`] and [`Session`] traits, so
 //! our own from-scratch QUIC is interchangeable with every other transport and held to the same

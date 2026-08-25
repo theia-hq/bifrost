@@ -1,9 +1,9 @@
-//! In-process implementation of the Bifrost transport seam.
+//! In-process implementation of the Bifrost transport interface.
 //!
 //! Sessions ride in-memory channels, not sockets. This exists for two reasons: it makes tests of
 //! everything above the transport hermetic and instant, and it is the strongest anti-overfit check
-//! on the seam. If a channels-only transport, iroh's QUIC, and a future raw-QUIC transport all pass
-//! the same conformance suite, the seam is genuinely transport-agnostic and not iroh-shaped.
+//! on the interface. If a channels-only transport, iroh's QUIC, and a future raw-QUIC transport all pass
+//! the same conformance suite, the interface is genuinely transport-agnostic and not iroh-shaped.
 //!
 //! Discovery is built in via a process-global registry keyed by [`NodeId`], so this is a
 //! self-discovering transport: `connect` resolves the peer with no external `Discovery` object,
