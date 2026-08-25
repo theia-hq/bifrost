@@ -8,6 +8,7 @@ members = [
     "crates/bifrost-conformance",
     "crates/transports/bifrost-iroh",
     "crates/transports/bifrost-mem",
+    "crates/transports/bifrost-quirk",
 ]
 
 [workspace.package]
@@ -21,6 +22,7 @@ bifrost-core = { path = "crates/bifrost-core" }
 bifrost-transport = { path = "crates/bifrost-transport" }
 bifrost-iroh = { path = "crates/transports/bifrost-iroh" }
 bifrost-mem = { path = "crates/transports/bifrost-mem" }
+bifrost-quirk = { path = "crates/transports/bifrost-quirk" }
 bifrost-wire = { path = "crates/bifrost-wire" }
 
 blake3 = "1"

@@ -11,3 +11,4 @@ tokio.workspace = true
 [dev-dependencies]
 bifrost-iroh.workspace = true
 bifrost-mem.workspace = true
+bifrost-quirk.workspace = true
