@@ -47,6 +47,7 @@ impl Transport for Endpoint {
     }
 
     async fn connect(&self, addr: Addr) -> Result<QuirkSession, Error> {
+        let dialed = addr.node;
         let peer = addr
             .hints
             .into_iter()
@@ -57,6 +58,18 @@ impl Transport for Endpoint {
             .connect(peer)
             .await
             .map_err(|err| Error::Connect(Box::new(err)))?;
+
+        // The peer announces its own key in the plaintext handshake. Bind the dialed-vs-reached
+        // invariant that every layer above assumes: the identity we reached must be the one we dialed.
+        // A plaintext MITM still defeats this (phase 1 Noise closes that); it closes the accidental
+        // mismatch and makes the invariant explicit rather than silently trusting a self-announced key.
+        let reached = NodeId::new(CryptoKind::Ed25519, conn.peer_key());
+        if reached != dialed {
+            return Err(Error::Connect(Box::new(IdentityMismatch {
+                dialed,
+                reached,
+            })));
+        }
         Ok(QuirkSession { conn })
     }
 
@@ -69,6 +82,11 @@ impl Transport for Endpoint {
         Ok(QuirkSession { conn })
     }
 
+    /// quirk drains per session, not per endpoint: each connection's send engine retransmits until its
+    /// data and FIN are acked, and [`QuirkSession::wait_closed`] resolves only once that drain
+    /// completes. The endpoint holds no separate buffered state to flush, so closing it is nothing
+    /// beyond dropping it. A caller that needs delivery guaranteed awaits `wait_closed` on the session
+    /// first, which is the wire's contract and what `bifrost-conformance::close_drains` enforces.
     async fn close(&self) {}
 }
 
@@ -120,3 +138,15 @@ fn missing_hint() -> BoxError {
 #[derive(Debug, thiserror::Error)]
 #[error("bind quirk endpoint")]
 pub struct BindError(#[source] quirk::Error);
+
+/// The peer reached did not present the identity that was dialed.
+///
+/// nauthy and every authorization layer above the transport rest on `session.peer()` being the peer
+/// that was addressed. This guards the invariant at the boundary so a mismatch surfaces as a connect
+/// error instead of a session that silently speaks for the wrong key.
+#[derive(Debug, thiserror::Error)]
+#[error("reached peer {reached} does not match dialed peer {dialed}")]
+pub struct IdentityMismatch {
+    dialed: NodeId,
+    reached: NodeId,
+}

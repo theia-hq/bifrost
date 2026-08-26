@@ -9,3 +9,6 @@ bifrost-core.workspace = true
 bifrost-transport.workspace = true
 quirk = { path = "../../../../quirk" }
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
