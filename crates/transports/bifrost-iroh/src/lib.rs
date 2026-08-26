@@ -5,7 +5,7 @@
 //! streams onto the [`Transport`] and [`Session`] traits, and keeps iroh's own address type from
 //! leaking past this boundary.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bifrost_core::CryptoKind;
 pub use bifrost_core::NodeId;

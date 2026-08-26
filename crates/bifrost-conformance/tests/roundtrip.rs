@@ -4,6 +4,8 @@ use bifrost_iroh::Endpoint;
 
 /// Compose an iroh sender that dials `receiver` by NodeId via a StaticDiscovery resolving it to its
 /// local addresses, hermetically over loopback.
+// A test helper, not a `#[test]` fn, so `allow-expect-in-tests` does not reach the expect inside it.
+#[allow(clippy::expect_used)]
 async fn dialing(receiver: &Endpoint) -> Node<Endpoint, StaticDiscovery> {
     let sender_transport = Endpoint::bind_local().await.expect("bind sender");
     let mut discovery = StaticDiscovery::new();

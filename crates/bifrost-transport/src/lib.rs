@@ -9,8 +9,8 @@
 //! plain byte-stream interface with no boxing: a transport differs only in how a session is
 //! established, never in how bytes flow once it is.
 
+use core::net::SocketAddr;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 pub use bifrost_core::NodeId;
 use tokio::io;
@@ -109,7 +109,7 @@ pub enum Error {
 }
 
 /// A boxed underlying error, kept as the source of an [`Error`].
-pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+pub type BoxError = Box<dyn core::error::Error + Send + Sync + 'static>;
 
 /// Resolves a [`NodeId`] to reachable address hints.
 ///

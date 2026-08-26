@@ -9,3 +9,6 @@ bifrost-core.workspace = true
 bifrost-transport.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[lints]
+workspace = true

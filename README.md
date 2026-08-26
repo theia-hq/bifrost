@@ -26,7 +26,7 @@ backend; every implementation is held to one behaviour by the conformance suite.
 
 | crate                 | role                                                          |
 | --------------------- | ------------------------------------------------------------ |
-| `bifrost`             | facade — the reach API (`Node`, `Transport`, `Session`, `Discovery`) |
+| `bifrost`             | facade: the reach API (`Node`, `Transport`, `Session`, `Discovery`) |
 | `bifrost-core`        | identity (`NodeId`, crypto-versioned)                        |
 | `bifrost-transport`   | the transport interface + `Node` / `Discovery`               |
 | `bifrost-iroh`        | transport backend over iroh (QUIC + hole-punching)           |

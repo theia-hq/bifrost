@@ -5,7 +5,7 @@
 //! behaviour by the conformance suite. quirk dials by address, so this pairs with a discovery that
 //! resolves a [`NodeId`] to direct hints.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bifrost_core::CryptoKind;
 pub use bifrost_core::NodeId;

@@ -12,3 +12,6 @@ tokio.workspace = true
 bifrost-iroh.workspace = true
 bifrost-mem.workspace = true
 bifrost-quirk.workspace = true
+
+[lints]
+workspace = true

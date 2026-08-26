@@ -9,8 +9,8 @@
 //! self-discovering transport: `connect` resolves the peer with no external `Discovery` object,
 //! exactly as the design intends.
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use bifrost_core::CryptoKind;

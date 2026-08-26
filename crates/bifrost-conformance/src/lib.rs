@@ -5,6 +5,10 @@
 //! a stream, and bytes echo back byte-identical. Transfer, hashing, files: not bifrost's job, not
 //! tested here. iroh (QUIC) and the in-process mem transport both pass it unchanged.
 
+// This crate is test scaffolding: every public function is a conformance assertion invoked from other
+// crates' tests, so `expect` is the assertion mechanism, not production error handling.
+#![allow(clippy::expect_used)]
+
 use bifrost::{Discovery, Node, Session, Transport};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
