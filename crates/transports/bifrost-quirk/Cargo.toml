@@ -11,6 +11,7 @@ quirk = { path = "../../../../quirk" }
 thiserror.workspace = true
 
 [dev-dependencies]
+bifrost-iroh.workspace = true
 tokio.workspace = true
 
 [lints]

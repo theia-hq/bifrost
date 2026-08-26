@@ -46,3 +46,25 @@ async fn connect_accepts_the_dialed_identity() {
         async { receiver.accept().await.expect("accept") }
     );
 }
+
+/// The same 32-byte secret yields the same NodeId over quirk and over iroh. This is the property the
+/// transport-swap demo rests on: one persisted key, one address, whichever transport is bound under it.
+/// Both adapters derive the identity as the ed25519 verifying key of the secret tagged `Ed25519`, so a
+/// node that serves over iroh and a node that serves over quirk from the same key are the same peer.
+#[tokio::test]
+async fn bind_with_secret_matches_the_iroh_node_id() {
+    let secret = [0x5a; 32];
+
+    let quirk = Endpoint::bind_with_secret(secret)
+        .await
+        .expect("bind quirk");
+    let iroh = bifrost_iroh::Endpoint::bind_with_secret(secret)
+        .await
+        .expect("bind iroh");
+
+    assert_eq!(
+        quirk.node_id(),
+        iroh.node_id(),
+        "the same secret must yield the same NodeId across transports"
+    );
+}

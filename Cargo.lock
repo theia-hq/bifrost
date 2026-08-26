@@ -202,6 +202,7 @@ name = "bifrost-quirk"
 version = "0.0.0"
 dependencies = [
  "bifrost-core",
+ "bifrost-iroh",
  "bifrost-transport",
  "quirk",
  "thiserror 2.0.20",

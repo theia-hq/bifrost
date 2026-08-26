@@ -24,6 +24,19 @@ impl Endpoint {
             inner: quirk::Endpoint::bind().await.map_err(BindError)?,
         })
     }
+
+    /// Bind with a persisted identity, from a raw 32-byte ed25519 secret, so the [`NodeId`] is stable
+    /// across runs. Mirrors [`bifrost_iroh::Endpoint::bind_with_secret`]: both derive the ed25519
+    /// verifying key from the same secret, so the same key yields the same [`NodeId`] over either
+    /// transport. That identical-identity-across-transports property is what the transport-swap demo
+    /// rests on.
+    pub async fn bind_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
+        Ok(Self {
+            inner: quirk::Endpoint::bind_with_secret(secret)
+                .await
+                .map_err(BindError)?,
+        })
+    }
 }
 
 impl Transport for Endpoint {
