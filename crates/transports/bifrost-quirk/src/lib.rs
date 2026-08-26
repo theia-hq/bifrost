@@ -130,12 +130,17 @@ impl Session for QuirkSession {
         // stream work (iroh, mem, where a second `accept_bi` pends) tear the session down mid-exchange.
         // This is the single-stream shape of "no more streams"; connection ids and multi-stream retire
         // it (quirk phase after Noise), at which point a real second stream can resolve this instead.
+        // Honest limitation: a wedged peer that neither opens a new stream nor closes leaves this task
+        // parked until the connection ends; the per-operation timeout on the future-work list bounds it.
+        // Match `Closed` (the taken-stream case) explicitly so that once multi-stream lands, a genuine
+        // stream error surfaces as `Stream` instead of being folded into a graceful close.
         match self.conn.accept_bi() {
             Ok(stream) => Ok(stream),
-            Err(_) => {
+            Err(quirk::Error::Closed) => {
                 self.conn.wait_closed().await;
                 Err(Error::Closed)
             }
+            Err(err) => Err(Error::Stream(Box::new(err))),
         }
     }
 
