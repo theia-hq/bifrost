@@ -123,9 +123,20 @@ impl Session for QuirkSession {
     }
 
     async fn accept_bi(&self) -> Result<(quirk::SendStream, quirk::RecvStream), Error> {
-        self.conn
-            .accept_bi()
-            .map_err(|err| Error::Stream(Box::new(err)))
+        // quirk carries one stream per connection today, so it is available exactly once. The bifrost
+        // contract is "accept the NEXT stream": once the one stream is taken there is no next stream
+        // until the connection ends, so block until it does rather than reporting `Closed` immediately.
+        // Returning eagerly here would make a serve loop that races `accept_bi` against its in-flight
+        // stream work (iroh, mem, where a second `accept_bi` pends) tear the session down mid-exchange.
+        // This is the single-stream shape of "no more streams"; connection ids and multi-stream retire
+        // it (quirk phase after Noise), at which point a real second stream can resolve this instead.
+        match self.conn.accept_bi() {
+            Ok(stream) => Ok(stream),
+            Err(_) => {
+                self.conn.wait_closed().await;
+                Err(Error::Closed)
+            }
+        }
     }
 
     async fn wait_closed(&self) {
