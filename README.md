@@ -1,9 +1,9 @@
 # bifrost
 
-Pubkey-addressed overlay networking. Identity is an ed25519 public key: you dial a peer by *who* they
-are, not *where* they are, over any transport, across NAT. `bifrost` gives you **reach**: an
-authenticated, bidirectional byte-stream to a `NodeId` over any transport, agnostic to whatever
-crosses it.
+Open a byte-stream to a machine identified by its public key, wherever it is on the internet, across
+NATs, without knowing its address. Identity is an ed25519 public key (a `NodeId`): you address *who* a
+peer is, not *where*. bifrost gives you the connection and nothing more; what you send over it is up to
+you.
 
 > Experimental. APIs will change and it is not ready for production use.
 
@@ -20,27 +20,30 @@ let (mut writer, mut reader) = session.open_bi().await?;
 ```
 
 `Transport`, `Session`, and `Discovery` are the pluggable interfaces. Implement `Transport` to add a
-backend; every implementation is held to one behaviour by the conformance suite.
+backend; every backend is held to the same behaviour by the conformance suite, so the code above runs
+unchanged over any of them.
 
 ## Layout
 
-| crate                 | role                                                          |
-| --------------------- | ------------------------------------------------------------ |
-| `bifrost`             | facade: the reach API (`Node`, `Transport`, `Session`, `Discovery`) |
-| `bifrost-core`        | identity (`NodeId`, crypto-versioned)                        |
-| `bifrost-transport`   | the transport interface + `Node` / `Discovery`               |
-| `bifrost-iroh`        | transport backend over iroh (QUIC + hole-punching)           |
-| `bifrost-mem`         | in-process transport backend (tests)                         |
-| `bifrost-conformance` | transport-agnostic reach test suite                          |
-| `bifrost-wire`        | verified one-shot blob transfer over a stream                |
+| crate                 | role                                                                |
+| --------------------- | ------------------------------------------------------------------- |
+| `bifrost`             | facade: the connection API (`Node`, `Transport`, `Session`, `Discovery`) |
+| `bifrost-core`        | identity: `NodeId`, an ed25519 public key with a crypto-suite tag   |
+| `bifrost-transport`   | the `Transport` / `Session` / `Discovery` traits and `Node`         |
+| `bifrost-iroh`        | transport backend over iroh (QUIC with NAT hole-punching)           |
+| `bifrost-mem`         | in-process transport backend for hermetic tests                     |
+| `bifrost-quirk`       | transport backend over quirk, a from-scratch QUIC                   |
+| `bifrost-mdns`        | discovery over mDNS on the local network                            |
+| `bifrost-conformance` | transport-agnostic test suite every backend must pass               |
+| `bifrost-wire`        | one-shot blob transfer over a stream, BLAKE3-verified end to end    |
 
 ## Things to know
 
-- bifrost is **reach only**: it establishes sessions and hands you byte-streams. It says nothing about
-  what those bytes mean.
+- bifrost establishes the connection and hands you a byte-stream. It says nothing about what those bytes
+  mean; that is the caller's protocol.
 - Verified blob transfer lives one layer up in `bifrost-wire`, a sibling crate, not in the facade.
-- Transports are interchangeable. iroh and an in-process transport ship in-tree; others (our own QUIC)
-  live out-of-tree and still pass the same conformance suite.
+- Transports are interchangeable: iroh, an in-process backend, and a from-scratch QUIC all pass the same
+  conformance suite, so an app dialing a given identity runs unchanged across them.
 
 ## License
 
