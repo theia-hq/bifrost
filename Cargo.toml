@@ -4,6 +4,7 @@ members = [
     "crates/bifrost",
     "crates/bifrost-conformance",
     "crates/bifrost-core",
+    "crates/bifrost-mdns",
     "crates/bifrost-transport",
     "crates/bifrost-wire",
     "crates/transports/bifrost-iroh",
@@ -20,6 +21,7 @@ license = "MIT OR Apache-2.0"
 bifrost = { path = "crates/bifrost" }
 bifrost-core = { path = "crates/bifrost-core" }
 bifrost-iroh = { path = "crates/transports/bifrost-iroh" }
+bifrost-mdns = { path = "crates/bifrost-mdns" }
 bifrost-mem = { path = "crates/transports/bifrost-mem" }
 bifrost-quirk = { path = "crates/transports/bifrost-quirk" }
 bifrost-transport = { path = "crates/bifrost-transport" }
@@ -30,6 +32,7 @@ clap = { version = "4", features = ["derive"] }
 data-encoding = "2"
 eyre = "0.6"
 iroh = "1.0"
+swarm-discovery = "0.6"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
 tracing = "0.1"

@@ -1,0 +1,20 @@
+[package]
+name = "bifrost-mdns"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bifrost-core.workspace = true
+bifrost-transport.workspace = true
+
+swarm-discovery.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true
