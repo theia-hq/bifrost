@@ -2,10 +2,10 @@
 resolver = "3"
 members = [
     "crates/bifrost",
+    "crates/bifrost-conformance",
     "crates/bifrost-core",
     "crates/bifrost-transport",
     "crates/bifrost-wire",
-    "crates/bifrost-conformance",
     "crates/transports/bifrost-iroh",
     "crates/transports/bifrost-mem",
     "crates/transports/bifrost-quirk",
@@ -19,10 +19,10 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 bifrost = { path = "crates/bifrost" }
 bifrost-core = { path = "crates/bifrost-core" }
-bifrost-transport = { path = "crates/bifrost-transport" }
 bifrost-iroh = { path = "crates/transports/bifrost-iroh" }
 bifrost-mem = { path = "crates/transports/bifrost-mem" }
 bifrost-quirk = { path = "crates/transports/bifrost-quirk" }
+bifrost-transport = { path = "crates/bifrost-transport" }
 bifrost-wire = { path = "crates/bifrost-wire" }
 
 blake3 = "1"
