@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 data-encoding.workspace = true
+ed25519-dalek.workspace = true
 thiserror.workspace = true
 
 [lints]

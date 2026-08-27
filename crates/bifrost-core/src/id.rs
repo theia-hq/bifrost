@@ -50,6 +50,15 @@ impl NodeId {
         Self { kind, key }
     }
 
+    /// The node id an ed25519 secret binds under: its public (verifying) key, tagged
+    /// [`CryptoKind::Ed25519`]. This is the same id the iroh and quirk backends derive when they bind the
+    /// secret, so it can be computed offline, with no transport stood up, to pre-provision an identity a
+    /// machine will later adopt.
+    pub fn from_ed25519_secret(secret: &[u8; Self::KEY_LEN]) -> Self {
+        let signing = ed25519_dalek::SigningKey::from_bytes(secret);
+        Self::new(CryptoKind::Ed25519, signing.verifying_key().to_bytes())
+    }
+
     /// The cryptographic suite this identity belongs to.
     pub const fn kind(self) -> CryptoKind {
         self.kind

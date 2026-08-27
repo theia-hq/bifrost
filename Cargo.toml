@@ -30,6 +30,7 @@ bifrost-wire = { path = "crates/bifrost-wire" }
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 data-encoding = "2"
+ed25519-dalek = "2"
 eyre = "0.6"
 iroh = "1.0"
 swarm-discovery = "0.6"
