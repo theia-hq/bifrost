@@ -13,7 +13,7 @@ use core::net::SocketAddr;
 use core::time::Duration;
 use std::collections::HashMap;
 
-pub use bifrost_core::NodeId;
+pub use bifrost_core::{NodeId, NodeIdParseError};
 use tokio::io;
 
 /// How to reach a peer: its identity, plus optional direct-address hints.
