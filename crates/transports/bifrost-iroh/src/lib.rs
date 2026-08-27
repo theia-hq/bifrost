@@ -48,6 +48,18 @@ impl Endpoint {
         .await
     }
 
+    /// Bind an OFFLINE endpoint: a persisted identity, no n0 discovery and no relays, at a fixed local
+    /// address. Reachable ONLY via direct address hints (a `--peer`), so two nodes on a LAN or a Docker
+    /// network connect directly with nothing crossing the internet. The fixed port is what makes the
+    /// address hardcodable: a peer names `host:port` and reaches it, no discovery service in the loop.
+    pub async fn bind_offline(secret: [u8; 32], bind_addr: SocketAddr) -> Result<Self, BindError> {
+        Self::finish(
+            iroh::Endpoint::builder(presets::Minimal).bind_addr(bind_addr)?,
+            SecretKey::from_bytes(&secret),
+        )
+        .await
+    }
+
     async fn finish(
         builder: iroh::endpoint::Builder,
         secret: SecretKey,
@@ -56,8 +68,7 @@ impl Endpoint {
             .secret_key(secret)
             .alpns(vec![ALPN.to_vec()])
             .bind()
-            .await
-            .map_err(BindError)?;
+            .await?;
         Ok(Self { inner })
     }
 }
@@ -205,5 +216,11 @@ fn to_endpoint_addr(addr: Addr) -> Result<EndpointAddr, iroh::KeyParsingError> {
 
 /// Binding the local endpoint failed.
 #[derive(Debug, thiserror::Error)]
-#[error("bind iroh endpoint")]
-pub struct BindError(#[source] iroh::endpoint::BindError);
+pub enum BindError {
+    /// The underlying iroh endpoint failed to bind (port in use, socket error).
+    #[error("bind iroh endpoint")]
+    Bind(#[from] iroh::endpoint::BindError),
+    /// The requested fixed bind address was not a valid socket address.
+    #[error("invalid bind address")]
+    Addr(#[from] iroh::endpoint::InvalidSocketAddr),
+}
