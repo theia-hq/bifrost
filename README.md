@@ -32,7 +32,7 @@ unchanged over any of them.
 | `bifrost-transport`   | the `Transport` / `Session` / `Discovery` traits and `Node`         |
 | `bifrost-iroh`        | transport backend over iroh (QUIC with NAT hole-punching)           |
 | `bifrost-mem`         | in-process transport backend for hermetic tests                     |
-| `bifrost-quirk`       | transport backend over quirk, a from-scratch QUIC                   |
+| `bifrost-quirk`       | transport backend over [quirk](https://github.com/theia-hq/quirk), a from-scratch QUIC |
 | `bifrost-mdns`        | discovery over mDNS on the local network                            |
 | `bifrost-conformance` | transport-agnostic test suite every backend must pass               |
 | `bifrost-wire`        | one-shot blob transfer over a stream, BLAKE3-verified end to end    |
