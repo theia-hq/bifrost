@@ -5,6 +5,10 @@ NATs, without knowing its address. Identity is an ed25519 public key (a `NodeId`
 peer is, not *where*. bifrost gives you the connection and nothing more; what you send over it is up to
 you.
 
+It is the substrate the other tools reach over. It carries the connection on its own backends: iroh
+(QUIC with NAT hole-punching), an in-process backend for tests, and [quirk](https://github.com/theia-hq/quirk),
+a from-scratch QUIC.
+
 > Experimental. APIs will change and it is not ready for production use.
 
 ## Usage
