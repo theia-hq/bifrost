@@ -9,7 +9,7 @@
 // crates' tests, so `expect` is the assertion mechanism, not production error handling.
 #![allow(clippy::expect_used)]
 
-use bifrost::{Discovery, Node, Session, Transport};
+use bifrost::{Discovery, Node, Path, Session, Transport};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// A message sent to a peer reached by key over a bidirectional stream echoes back byte-identical.
@@ -92,4 +92,65 @@ where
         received, message,
         "receiver drained every byte to a clean end"
     );
+}
+
+/// A direct transport reports [`Path::Direct`] and names the remote over an established session.
+///
+/// This is the `conn_info` contract for a transport with no relay in the path (quirk today, iroh over
+/// loopback): the dialer's session must report the current path as [`Path::Direct`] and carry a remote
+/// socket address, since that is exactly the reassuring "am I peer-to-peer?" answer `swoosh status`
+/// renders. Panics with a descriptive message on failure, so it reads as a test assertion.
+pub async fn direct_conn_info<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let target = receiver.node_id();
+    let accepting = async { receiver.accept().await.expect("accept session") };
+    let dialing = async { sender.connect(target).await.expect("connect") };
+    let (_accepted, session) = tokio::join!(accepting, dialing);
+
+    let info = session.conn_info();
+    assert_eq!(
+        info.path,
+        Path::Direct,
+        "a direct transport reports a direct path, got {:?}",
+        info.path
+    );
+    assert!(
+        info.remote.is_some(),
+        "a direct path names its remote address, got none"
+    );
+
+    sender.close().await;
+}
+
+/// A transport that does not expose its path reports the [`Path::Unknown`] default with no remote.
+///
+/// This pins the additive, best-effort contract: an uninstrumented transport (in-process mem) inherits
+/// the trait default rather than fabricating a path, so `conn_info` is honest about what it cannot know.
+/// Panics with a descriptive message on failure, so it reads as a test assertion.
+pub async fn unknown_conn_info<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let target = receiver.node_id();
+    let accepting = async { receiver.accept().await.expect("accept session") };
+    let dialing = async { sender.connect(target).await.expect("connect") };
+    let (_accepted, session) = tokio::join!(accepting, dialing);
+
+    let info = session.conn_info();
+    assert_eq!(
+        info.path,
+        Path::Unknown,
+        "an uninstrumented transport reports Unknown, got {:?}",
+        info.path
+    );
+    assert!(
+        info.remote.is_none() && info.rtt.is_none(),
+        "an unknown path carries no remote or rtt"
+    );
+
+    sender.close().await;
 }

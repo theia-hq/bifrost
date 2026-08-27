@@ -9,7 +9,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bifrost_core::CryptoKind;
 pub use bifrost_core::NodeId;
-use bifrost_transport::{Addr, BoxError, Error};
+use bifrost_transport::{Addr, BoxError, ConnInfo, Error, Path};
 pub use bifrost_transport::{Session, Transport};
 
 /// A quirk-backed endpoint.
@@ -146,6 +146,18 @@ impl Session for QuirkSession {
 
     async fn wait_closed(&self) {
         self.conn.wait_closed().await;
+    }
+
+    /// quirk is direct-only (no relay yet), so the path is always [`Path::Direct`] and the remote is
+    /// the peer's socket address. It carries no rtt estimator of its own yet, so `rtt` stays `None`;
+    /// a caller that wants an rtt over quirk measures one with a diag ping. Reads Direct honestly today
+    /// and gains Relayed once derpie lands.
+    fn conn_info(&self) -> ConnInfo {
+        ConnInfo {
+            path: Path::Direct,
+            rtt: None,
+            remote: Some(self.conn.peer_addr()),
+        }
     }
 }
 

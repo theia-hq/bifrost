@@ -9,10 +9,10 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bifrost_core::CryptoKind;
 pub use bifrost_core::NodeId;
-use bifrost_transport::{Addr, Error};
+use bifrost_transport::{Addr, ConnInfo, Error, Path};
 pub use bifrost_transport::{Session, Transport};
-use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
-use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey};
+use iroh::endpoint::{Connection, PathList, RecvStream, SendStream, presets};
+use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, TransportAddr};
 
 /// The ALPN that identifies the Bifrost substrate protocol during the handshake.
 pub const ALPN: &[u8] = b"bifrost/0";
@@ -132,6 +132,51 @@ impl Session for IrohSession {
 
     async fn wait_closed(&self) {
         self.conn.closed().await;
+    }
+
+    /// Map iroh's live path set onto a best-effort [`ConnInfo`]. iroh tracks every open path and marks
+    /// one as selected for transmission; hole-punching means a session can start [`Path::Relayed`] and
+    /// upgrade to [`Path::Direct`] as a direct path opens, so this reports the CURRENT state honestly.
+    /// The rtt and remote come from the selected path (the one actually carrying bytes).
+    fn conn_info(&self) -> ConnInfo {
+        conn_info(&self.conn.paths())
+    }
+}
+
+/// Reduce iroh's open-path snapshot to a [`ConnInfo`]. The [`Path`] classifies the set: all-direct is
+/// [`Path::Direct`], all-relay is [`Path::Relayed`], a mix of both is [`Path::Mixed`], and no open path
+/// yet is [`Path::Unknown`]. The rtt and remote describe the selected path (falling back to the first
+/// open one), since that is the path bytes actually take.
+fn conn_info(paths: &PathList<'_>) -> ConnInfo {
+    let mut direct = false;
+    let mut relayed = false;
+    for path in paths {
+        direct |= path.is_ip();
+        relayed |= path.is_relay();
+    }
+    let path = match (direct, relayed) {
+        (true, false) => Path::Direct,
+        (false, true) => Path::Relayed,
+        (true, true) => Path::Mixed,
+        (false, false) => Path::Unknown,
+    };
+
+    let selected = paths.iter().find(|path| path.is_selected());
+    let carrying = selected.or_else(|| paths.iter().next());
+    ConnInfo {
+        path,
+        rtt: carrying.as_ref().map(|path| path.rtt()),
+        remote: carrying.and_then(|path| direct_addr(path.remote_addr())),
+    }
+}
+
+/// The direct socket address of a path, if it is an IP path. A relay path (or any future non-IP path
+/// variant of iroh's `non_exhaustive` address) has no direct socket address to report, so it yields
+/// `None` and [`ConnInfo::remote`] stays absent.
+fn direct_addr(addr: &TransportAddr) -> Option<SocketAddr> {
+    match addr {
+        TransportAddr::Ip(socket) => Some(*socket),
+        _ => None,
     }
 }
 

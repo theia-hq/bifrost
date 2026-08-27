@@ -1,5 +1,5 @@
 use bifrost::{Node, StaticDiscovery, Transport};
-use bifrost_conformance::{close_drains, reach_roundtrip};
+use bifrost_conformance::{close_drains, direct_conn_info, reach_roundtrip};
 use bifrost_iroh::Endpoint;
 
 /// Compose an iroh sender that dials `receiver` by NodeId via a StaticDiscovery resolving it to its
@@ -28,4 +28,14 @@ async fn iroh_close_drains() {
     let receiver = Endpoint::bind_local().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
     close_drains(sender, receiver).await;
+}
+
+/// iroh over loopback hole-punches straight to a direct path, so `conn_info` reports
+/// [`bifrost::Path::Direct`] and names the remote. This exercises the real path-set reduction, not the
+/// default: the mapping from iroh's live `PathList` down to a `ConnInfo` runs here end to end.
+#[tokio::test]
+async fn iroh_direct_conn_info() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    direct_conn_info(sender, receiver).await;
 }

@@ -1,5 +1,5 @@
 use bifrost::{Node, StaticDiscovery, Transport};
-use bifrost_conformance::{close_drains, reach_roundtrip};
+use bifrost_conformance::{close_drains, direct_conn_info, reach_roundtrip};
 use bifrost_quirk::Endpoint;
 
 /// Compose a quirk sender that dials `receiver` by NodeId via a StaticDiscovery resolving it to its
@@ -30,4 +30,12 @@ async fn quirk_close_drains() {
     let receiver = Endpoint::bind().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
     close_drains(sender, receiver).await;
+}
+
+/// quirk is direct-only, so a session reports [`bifrost::Path::Direct`] and names the peer's address.
+#[tokio::test]
+async fn quirk_direct_conn_info() {
+    let receiver = Endpoint::bind().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    direct_conn_info(sender, receiver).await;
 }

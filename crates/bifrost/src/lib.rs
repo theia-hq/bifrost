@@ -12,5 +12,6 @@
 //! with `bifrost::wire`, over whatever transport was composed in.
 
 pub use bifrost_transport::{
-    Addr, Discovery, Error, NoDiscovery, Node, NodeId, Session, StaticDiscovery, Transport,
+    Addr, ConnInfo, Discovery, Error, NoDiscovery, Node, NodeId, Path, Session, StaticDiscovery,
+    Transport,
 };
