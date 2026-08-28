@@ -49,6 +49,13 @@ pub struct MdnsDiscovery {
 /// The shared table of LAN peers, written by the browse callback and read by [`MdnsDiscovery::resolve`].
 type Peers = Arc<Mutex<HashMap<NodeId, Vec<SocketAddr>>>>;
 
+/// The maximum number of distinct peers held in the discovery cache. A LAN has a handful of peers, so
+/// this is generous; the cap stops an on-LAN flood of distinct fake NodeIds (which anyone can emit, no
+/// secret needed) from growing this map without bound. It bounds OUR map only; the wrapped
+/// `swarm-discovery` keeps its own unbounded map, which needs a dependency-level fix (patch, fork, or
+/// replace) — see notes/reviews/2026-08-28-adversary-mdns.md.
+const MAX_PEERS: usize = 1024;
+
 impl MdnsDiscovery {
     /// Start advertising `node` at its local `addrs` and browsing the LAN for other theia nodes.
     ///
@@ -135,6 +142,11 @@ fn record(peers: &Peers, peer_id: &str, peer: &Peer) {
     };
     if peer.is_expiry() {
         peers.remove(&node);
+        return;
+    }
+    // Bound the cache: refuse a NEW entry past the cap so an on-LAN flood of distinct fake NodeIds cannot
+    // grow this map without bound. A known peer still updates, so real churn is unaffected.
+    if peers.len() >= MAX_PEERS && !peers.contains_key(&node) {
         return;
     }
     let addrs = peer
