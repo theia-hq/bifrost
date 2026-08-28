@@ -5,7 +5,7 @@
 
 mod id;
 
-pub use id::{CryptoKind, NodeId, NodeIdParseError};
+pub use id::{CryptoKind, NodeId, NodeIdParseError, derive_ed25519_child_secret};
 
 #[cfg(test)]
 mod id_tests;

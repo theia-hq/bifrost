@@ -59,6 +59,21 @@ impl NodeId {
         Self::new(CryptoKind::Ed25519, signing.verifying_key().to_bytes())
     }
 
+    /// The node id of a *device* identity derived from a root secret and a label.
+    ///
+    /// The owner holds `root` and can compute any device's id offline from `(root, label)`: instant
+    /// addressing with no registry and no network round-trip. The machine adopts the matching child
+    /// secret (see [`derive_ed25519_child_secret`]) and binds under it, so it comes up *as* this id.
+    ///
+    /// Derivation is *hardened*: the child mixes the root SECRET, so only the owner (who holds `root`)
+    /// can compute or predict a child. ed25519 has no sound public (secret-free) derivation, so we do
+    /// not pretend to offer lineage a third party can check from public keys alone; that is a
+    /// non-requirement here, because the only party who must recognize a device as yours is your own
+    /// gate, and it does so because you derived the device and put it in your family set.
+    pub fn derive_ed25519(root: &[u8; Self::KEY_LEN], label: &str) -> Self {
+        Self::from_ed25519_secret(&derive_ed25519_child_secret(root, label))
+    }
+
     /// The cryptographic suite this identity belongs to.
     pub const fn kind(self) -> CryptoKind {
         self.kind
@@ -73,6 +88,22 @@ impl NodeId {
     pub fn short(&self) -> String {
         self.to_string().chars().take(16).collect()
     }
+}
+
+/// The child ed25519 secret derived from a root secret and a label: a domain-separated BLAKE3 KDF over
+/// the root, keyed on the label. This is the identity a machine ADOPTS to become
+/// [`NodeId::derive_ed25519(root, label)`] — theia's `--authkey` payload.
+///
+/// The KDF context binds both the purpose and the label, and the root is the key material, so a device
+/// seed and any other derivation over the same root (e.g. the ssh host seed, `"theia sshh host key v1"`)
+/// never coincide, and two distinct labels never collide. Any 32 bytes is a valid ed25519 seed (the
+/// scalar is hashed and clamped internally by [`ed25519_dalek::SigningKey`]), so the KDF output is used
+/// directly with no rejection. Hardened: recovering or predicting a child needs the root secret.
+pub fn derive_ed25519_child_secret(
+    root: &[u8; NodeId::KEY_LEN],
+    label: &str,
+) -> [u8; NodeId::KEY_LEN] {
+    blake3::derive_key(&format!("theia device identity v1: {label}"), root)
 }
 
 impl fmt::Display for NodeId {
