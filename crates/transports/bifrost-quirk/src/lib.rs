@@ -7,9 +7,8 @@
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use bifrost_core::CryptoKind;
 pub use bifrost_core::NodeId;
-use bifrost_transport::{Addr, BoxError, ConnInfo, Error, Path};
+use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, Path};
 pub use bifrost_transport::{Session, Transport};
 
 /// A quirk-backed endpoint.

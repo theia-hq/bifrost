@@ -5,7 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bifrost-core.workspace = true
 bifrost-transport.workspace = true
+bifrost-wire.workspace = true
 
 [lints]
 workspace = true

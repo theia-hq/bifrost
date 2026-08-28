@@ -8,8 +8,7 @@
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::time::Duration;
 
-use bifrost_core::{CryptoKind, NodeId};
-use bifrost_transport::Discovery;
+use bifrost_core::{CryptoKind, Discovery, NodeId};
 
 use super::MdnsDiscovery;
 

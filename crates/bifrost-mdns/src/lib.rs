@@ -1,6 +1,6 @@
 //! mDNS discovery for the local network.
 //!
-//! [`MdnsDiscovery`] is a [`bifrost::Discovery`](bifrost_transport::Discovery) that both ADVERTISES
+//! [`MdnsDiscovery`] is a [`bifrost::Discovery`](bifrost_core::Discovery) that both ADVERTISES
 //! this node and RESOLVES peers over multicast DNS, so two nodes on the same LAN reach each other
 //! directly with no relay and no hand-fed `--peer` hint. It is transport-blind: composed into a
 //! `Node` beside any transport, it feeds the same `SocketAddr` hints a static table would, only
@@ -18,7 +18,7 @@ use core::net::{IpAddr, SocketAddr};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use bifrost_transport::{Discovery, Error, NodeId};
+use bifrost_core::{Discovery, Error, NodeId};
 use swarm_discovery::{Discoverer, Peer};
 use tokio::runtime::Handle;
 

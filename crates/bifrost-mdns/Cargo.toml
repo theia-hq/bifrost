@@ -6,7 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 bifrost-core.workspace = true
-bifrost-transport.workspace = true
 
 swarm-discovery.workspace = true
 thiserror.workspace = true

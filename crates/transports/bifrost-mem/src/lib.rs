@@ -13,9 +13,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use bifrost_core::CryptoKind;
 pub use bifrost_core::NodeId;
-use bifrost_transport::{Addr, Error};
+use bifrost_core::{Addr, CryptoKind, Error};
 pub use bifrost_transport::{Session, Transport};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};

@@ -5,9 +5,9 @@
 //! `connect` must reject a session whose reached key is not the dialed key. This is the interim guard
 //! until phase 1 Noise makes the identity cryptographically real.
 
-use bifrost_core::CryptoKind;
+use bifrost_core::{Addr, CryptoKind, Error};
 use bifrost_quirk::{Endpoint, NodeId};
-use bifrost_transport::{Addr, Error, Transport};
+use bifrost_transport::Transport;
 
 /// Dialing a real quirk endpoint at its real address but under the wrong NodeId is rejected with a
 /// connect error, rather than yielding a session that speaks for an identity that was never reached.

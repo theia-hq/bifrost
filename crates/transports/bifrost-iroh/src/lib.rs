@@ -7,9 +7,8 @@
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use bifrost_core::CryptoKind;
 pub use bifrost_core::NodeId;
-use bifrost_transport::{Addr, ConnInfo, Error, Path};
+use bifrost_core::{Addr, ConnInfo, CryptoKind, Error, Path};
 pub use bifrost_transport::{Session, Transport};
 use iroh::endpoint::{Connection, PathList, RecvStream, SendStream, presets};
 use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, TransportAddr};

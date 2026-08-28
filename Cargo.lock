@@ -170,7 +170,9 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 name = "bifrost"
 version = "0.0.0"
 dependencies = [
+ "bifrost-core",
  "bifrost-transport",
+ "bifrost-wire",
 ]
 
 [[package]]
@@ -209,7 +211,6 @@ name = "bifrost-mdns"
 version = "0.0.0"
 dependencies = [
  "bifrost-core",
- "bifrost-transport",
  "swarm-discovery",
  "thiserror 2.0.20",
  "tokio",
@@ -243,7 +244,6 @@ name = "bifrost-transport"
 version = "0.0.0"
 dependencies = [
  "bifrost-core",
- "thiserror 2.0.20",
  "tokio",
 ]
 
@@ -4214,3 +4214,15 @@ dependencies = [
  "quote",
  "syn 3.0.3",
 ]
+
+[[patch.unused]]
+name = "tightbeam"
+version = "0.0.0"
+
+[[patch.unused]]
+name = "nauthy"
+version = "0.0.0"
+
+[[patch.unused]]
+name = "sshh"
+version = "0.0.0"
