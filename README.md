@@ -9,6 +9,10 @@ It is the substrate the other tools reach over. It carries the connection on its
 (QUIC with NAT hole-punching), an in-process backend for tests, and [quirk](https://github.com/theia-hq/quirk),
 a from-scratch QUIC.
 
+**The name.** Bifröst is the burning rainbow bridge of Norse myth, the span that reaches from one
+world to any other. This crate is the bridge to a peer: name a public key and it carries a
+connection there, wherever the peer sits on the network.
+
 > Experimental. APIs will change and it is not ready for production use.
 
 ## Usage

@@ -79,6 +79,7 @@ _The doc voice, proven across every repo. A README, crate description, or `--hel
 - **Describe what ships, not what is planned.** Planned work goes in a clearly-marked section ("Not yet", "Planned"), never mixed into the description of what the thing does today.
 - **Terse. KISS.** Every sentence earns its place. Long enough to be clear, not one word longer.
 - **The one-line help / crate `about` states the action in the reader's terms,** no metaphor that needs decoding. Rich rationale lives in the `//!` module note or the README, never in the `about` line.
+- **If the name is a metaphor, a "The name." note earns it** after the reader already knows what the thing does. State the what plainly first; then, in one to three sentences, say why it carries that name. The payoff comes after the what, never as the lead.
 
 ## Code layout & readability
 - **Top-down story.** Lay items out so meaning is discovered reading downward: a high-level item on line 1 references helpers defined below it, so a reader chasing a detail reads *on* until satisfied, then exits, never scrolls up to assemble context first.
