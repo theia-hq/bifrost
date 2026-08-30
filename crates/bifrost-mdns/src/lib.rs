@@ -53,7 +53,7 @@ type Peers = Arc<Mutex<HashMap<NodeId, Vec<SocketAddr>>>>;
 /// this is generous; the cap stops an on-LAN flood of distinct fake NodeIds (which anyone can emit, no
 /// secret needed) from growing this map without bound. It bounds OUR map only; the wrapped
 /// `swarm-discovery` keeps its own unbounded map, which needs a dependency-level fix (patch, fork, or
-/// replace) — see notes/reviews/2026-08-28-adversary-mdns.md.
+/// replace); see notes/reviews/2026-08-28-adversary-mdns.md.
 const MAX_PEERS: usize = 1024;
 
 impl MdnsDiscovery {

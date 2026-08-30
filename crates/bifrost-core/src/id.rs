@@ -92,7 +92,7 @@ impl NodeId {
 
 /// The child ed25519 secret derived from a root secret and a label: a domain-separated BLAKE3 KDF over
 /// the root, keyed on the label. This is the identity a machine ADOPTS to become
-/// [`NodeId::derive_ed25519(root, label)`] — theia's `--authkey` payload.
+/// [`NodeId::derive_ed25519(root, label)`], theia's `--authkey` payload.
 ///
 /// The KDF context binds both the purpose and the label, and the root is the key material, so a device
 /// seed and any other derivation over the same root (e.g. the ssh host seed, `"theia sshh host key v1"`)
