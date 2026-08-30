@@ -4216,7 +4216,7 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "tightbeam"
+name = "sshh"
 version = "0.0.0"
 
 [[patch.unused]]
@@ -4224,5 +4224,5 @@ name = "nauthy"
 version = "0.0.0"
 
 [[patch.unused]]
-name = "sshh"
-version = "0.0.0"
+name = "tightbeam"
+version = "0.3.0"

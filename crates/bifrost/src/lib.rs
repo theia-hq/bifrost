@@ -14,8 +14,8 @@
 mod node;
 
 pub use bifrost_core::{
-    Addr, ConnInfo, Discovery, Error, Layered, NoDiscovery, NodeId, NodeIdParseError, Path,
-    StaticDiscovery,
+    Addr, ConnInfo, CryptoKind, Discovery, Error, Layered, NoDiscovery, NodeId, NodeIdParseError,
+    Path, StaticDiscovery,
 };
 pub use bifrost_transport::{Session, Transport};
 pub use bifrost_wire as wire;
