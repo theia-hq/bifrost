@@ -21,7 +21,7 @@ pub enum Path {
     Unknown,
 }
 
-/// A best-effort snapshot of how a session reaches its peer, for diagnostics like `swoosh status`.
+/// A best-effort snapshot of how a session reaches its peer, for a status or diagnostics consumer.
 ///
 /// Best-effort by design: every field a transport cannot determine is absent (the [`Path`] is
 /// [`Unknown`](Path::Unknown), the rest are `None`), so this never fabricates a reassuring answer it

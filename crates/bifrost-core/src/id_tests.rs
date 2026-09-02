@@ -25,7 +25,7 @@ fn derives_a_device_identity_from_a_root_and_label() {
     let root = [3u8; NodeId::KEY_LEN];
     let device = NodeId::derive_ed25519(&root, "ci-runner");
     // The derived id is exactly the identity of the derived child secret: the owner computes it offline,
-    // the machine adopts the secret and comes up as this id. This is the whole `--authkey` mechanic.
+    // the machine adopts the secret and comes up as this id. This is the whole derived-identity mechanic.
     let child = derive_ed25519_child_secret(&root, "ci-runner");
     assert_eq!(device, NodeId::from_ed25519_secret(&child));
     assert_eq!(device.kind(), CryptoKind::Ed25519);

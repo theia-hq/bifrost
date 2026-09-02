@@ -48,7 +48,7 @@ impl Endpoint {
     }
 
     /// Bind an OFFLINE endpoint: a persisted identity, no n0 discovery and no relays, at a fixed local
-    /// address. Reachable ONLY via direct address hints (a `--peer`), so two nodes on a LAN or a Docker
+    /// address. Reachable ONLY via direct address hints, so two nodes on a LAN or a Docker
     /// network connect directly with nothing crossing the internet. The fixed port is what makes the
     /// address hardcodable: a peer names `host:port` and reaches it, no discovery service in the loop.
     pub async fn bind_offline(secret: [u8; 32], bind_addr: SocketAddr) -> Result<Self, BindError> {

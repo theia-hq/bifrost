@@ -53,8 +53,8 @@ impl Discovery for StaticDiscovery {
 /// Two discovery sources tried together, their hints unioned (duplicates removed).
 ///
 /// This is how an app composes an explicit source with a learned one: a [`StaticDiscovery`] of hand-
-/// fed `--peer` hints layered over a network resolver (mDNS), so a dial reaches a peer whether it was
-/// named on the command line, heard on the LAN, or both. A source that finds nothing contributes
+/// fed direct address hints layered over a network resolver (mDNS), so a dial reaches a peer whether it
+/// was supplied explicitly, heard on the LAN, or both. A source that finds nothing contributes
 /// nothing, so an empty union means "let the transport try", exactly as a bare source would.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Layered<P, S> {

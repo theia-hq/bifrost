@@ -2,7 +2,7 @@
 //!
 //! [`MdnsDiscovery`] is a [`bifrost::Discovery`](bifrost_core::Discovery) that both ADVERTISES
 //! this node and RESOLVES peers over multicast DNS, so two nodes on the same LAN reach each other
-//! directly with no relay and no hand-fed `--peer` hint. It is transport-blind: composed into a
+//! directly with no relay and no hand-fed direct address hint. It is transport-blind: composed into a
 //! `Node` beside any transport, it feeds the same `SocketAddr` hints a static table would, only
 //! learned from the network instead of typed by hand.
 //!
@@ -59,7 +59,7 @@ const MAX_PEERS: usize = 1024;
 impl MdnsDiscovery {
     /// Start advertising `node` at its local `addrs` and browsing the LAN for other theia nodes.
     ///
-    /// `addrs` are the sockets this node is bound to (what swoosh has after bind). Every address must
+    /// `addrs` are the sockets this node is bound to (the addresses a caller has after bind). Every address must
     /// share one port: mDNS advertises a service instance as one port plus a set of IPs, so a single
     /// call maps one port to many addresses. Peers are learned in the background; a freshly started
     /// node may need a discovery cycle before [`resolve`](Self::resolve) sees a given peer.
@@ -85,8 +85,8 @@ impl MdnsDiscovery {
 
         let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
         let sink = Arc::clone(&peers);
-        // `new_interactive` sets a human-facing cadence (tau=0.7s, phi=2.5): a person waits on `swoosh
-        // ping`, so bias toward finding a peer within a second over minimizing multicast chatter.
+        // `new_interactive` sets a human-facing cadence (tau=0.7s, phi=2.5): a person is waiting on an
+        // interactive probe, so bias toward finding a peer within a second over minimizing multicast chatter.
         let service = Discoverer::new_interactive(SERVICE.to_owned(), node.to_string())
             .with_addrs(port, ips)
             .with_multicast_interfaces_v4(interfaces)

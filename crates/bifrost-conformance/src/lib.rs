@@ -98,7 +98,7 @@ where
 ///
 /// This is the `conn_info` contract for a transport with no relay in the path (quirk today, iroh over
 /// loopback): the dialer's session must report the current path as [`Path::Direct`] and carry a remote
-/// socket address, since that is exactly the reassuring "am I peer-to-peer?" answer `swoosh status`
+/// socket address, since that is exactly the reassuring "am I peer-to-peer?" answer a status readout
 /// renders. Panics with a descriptive message on failure, so it reads as a test assertion.
 pub async fn direct_conn_info<T, D>(sender: Node<T, D>, receiver: T)
 where
