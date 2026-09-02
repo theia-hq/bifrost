@@ -55,14 +55,14 @@ fn a_child_secret_is_domain_separated_from_the_root_and_other_derivations() {
     let root = [9u8; NodeId::KEY_LEN];
     let child = derive_ed25519_child_secret(&root, "desk");
     // The child is never the root itself: the root stays on the owner's laptop; only a scoped child is
-    // handed out as an authkey.
+    // handed out as the derived-key payload a device adopts.
     assert_ne!(child, root);
-    // Domain-separated from any other KDF over the same root. The ssh host seed uses the same BLAKE3
-    // primitive with a different context; a device seed and a host seed for one root must never coincide,
-    // or adopting a device would leak its host key (and vice versa). This pins the separation so a
-    // refactor that collapses the contexts trips here.
-    let host_seed = blake3::derive_key("theia sshh host key v1", &root);
-    assert_ne!(child, host_seed);
+    // Domain-separated from any other KDF over the same root. A sibling derivation uses the same BLAKE3
+    // primitive with a DIFFERENT context; a device seed and any sibling seed for one root must never
+    // coincide, or adopting a device would leak the sibling seed (and vice versa). This pins the separation
+    // so a refactor that collapses the contexts trips here.
+    let sibling_seed = blake3::derive_key("theia sibling derivation v1", &root);
+    assert_ne!(child, sibling_seed);
 }
 
 #[test]

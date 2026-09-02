@@ -149,8 +149,8 @@ impl Session for QuirkSession {
 
     /// quirk is direct-only (no relay yet), so the path is always [`Path::Direct`] and the remote is
     /// the peer's socket address. It carries no rtt estimator of its own yet, so `rtt` stays `None`;
-    /// a caller that wants an rtt over quirk measures one with a diag ping. Reads Direct honestly today
-    /// and gains Relayed once derpie lands.
+    /// a caller that wants an rtt over quirk measures one with an application-level round-trip probe. Reads
+    /// Direct honestly today and gains Relayed once derpie lands.
     fn conn_info(&self) -> ConnInfo {
         ConnInfo {
             path: Path::Direct,

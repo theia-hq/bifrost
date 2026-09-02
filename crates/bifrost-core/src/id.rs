@@ -95,7 +95,7 @@ impl NodeId {
 /// [`NodeId::derive_ed25519(root, label)`], the derived-key payload it is provisioned with.
 ///
 /// The KDF context binds both the purpose and the label, and the root is the key material, so a device
-/// seed and any other derivation over the same root (e.g. the ssh host seed, `"theia sshh host key v1"`)
+/// seed and any other domain-separated derivation over the same root (one keyed on a different context)
 /// never coincide, and two distinct labels never collide. Any 32 bytes is a valid ed25519 seed (the
 /// scalar is hashed and clamped internally by [`ed25519_dalek::SigningKey`]), so the KDF output is used
 /// directly with no rejection. Hardened: recovering or predicting a child needs the root secret.
