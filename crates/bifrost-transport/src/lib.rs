@@ -5,7 +5,7 @@
 //! all interchangeable and all held to the same behaviour by the conformance suite. Everything
 //! above this boundary (the wire, the products) is transport-blind.
 //!
-//! This crate is the byte-moving seam and nothing else: implement [`Transport`] + [`Session`] to add
+//! This crate is the byte-moving interface and nothing else: implement [`Transport`] + [`Session`] to add
 //! a transport. The transport-neutral vocabulary it speaks ([`Addr`], [`Error`], [`ConnInfo`],
 //! [`Path`], and the [`Discovery`](bifrost_core::Discovery) contract) lives in `bifrost-core`.
 //!
