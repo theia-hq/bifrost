@@ -12,12 +12,14 @@ mod conn;
 mod discovery;
 mod error;
 mod id;
+mod refusal;
 
 pub use addr::Addr;
 pub use conn::{ConnInfo, Path};
 pub use discovery::{Discovery, Layered, NoDiscovery, StaticDiscovery};
 pub use error::{BoxError, Error};
 pub use id::{CryptoKind, NodeId, NodeIdParseError, derive_ed25519_child_secret};
+pub use refusal::{Refusal, RefusalDetail, RefusalDetailError};
 
 #[cfg(test)]
 mod id_tests;
