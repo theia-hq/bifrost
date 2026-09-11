@@ -2510,6 +2510,7 @@ dependencies = [
 [[package]]
 name = "quirk"
 version = "0.0.0"
+source = "git+https://github.com/theia-hq/quirk?rev=5d65de65390b9422052659560128c2fe54df4ae0#5d65de65390b9422052659560128c2fe54df4ae0"
 dependencies = [
  "bytes",
  "ed25519-dalek 2.2.0",
@@ -4214,11 +4215,3 @@ dependencies = [
  "quote",
  "syn 3.0.3",
 ]
-
-[[patch.unused]]
-name = "nauthy"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "tightbeam"
-version = "0.3.0"
