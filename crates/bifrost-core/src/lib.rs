@@ -5,7 +5,7 @@
 //! ([`Error`]); how a session travels ([`Path`]/[`ConnInfo`]); and the [`Discovery`] contract that
 //! resolves an identity to address hints. Everything here is async-free vocabulary: no tokio, no
 //! byte-moving contract, no storage or codec concerns. The one thing that genuinely needs async IO,
-//! the `Transport` + `Session` seam, lives in `bifrost-transport`.
+//! the `Transport` + `Session` interface, lives in `bifrost-transport`.
 
 mod addr;
 mod conn;
