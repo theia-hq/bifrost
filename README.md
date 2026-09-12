@@ -5,39 +5,49 @@ NATs, without knowing its address. Identity is an ed25519 public key (a `NodeId`
 peer is, not *where*. bifrost gives you the connection and nothing more; what you send over it is up to
 you.
 
-It is the substrate the other tools reach over. It carries the connection on its own backends: iroh
-(QUIC with NAT hole-punching), an in-process backend for tests, and [quirk](https://github.com/theia-hq/quirk),
-a from-scratch QUIC.
+It carries the connection over its own backends: iroh (QUIC with NAT hole-punching), an in-process
+backend for tests, and [quirk](https://github.com/theia-hq/quirk), a from-scratch QUIC.
 
 **The name.** Bifröst is the burning rainbow bridge of Norse myth, the span that reaches from one
 world to any other. This crate is the bridge to a peer: name a public key and it carries a
-connection there, wherever the peer sits on the network.
+connection there.
 
 > Experimental. APIs will change and it is not ready for production use.
 
-## Usage
+## Add it as a dependency
+
+Git-only for now, not published to crates.io. Point at the repo:
+
+```toml
+[dependencies]
+bifrost = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost" }
+```
+
+## Compose a node, dial by key
 
 Compose a transport with a discovery mechanism into a `Node`, then dial peers by identity:
 
 ```rust
 use bifrost::{Node, NoDiscovery, Session};
+use bifrost_iroh::Endpoint;
 
-let node = Node::new(transport, NoDiscovery);
+let node = Node::new(Endpoint::bind().await?, NoDiscovery);
 let session = node.connect(peer_id).await?;
 let (mut writer, mut reader) = session.open_bi().await?;
 ```
 
 `Transport`, `Session`, and `Discovery` are the pluggable interfaces. Implement `Transport` to add a
-backend; every backend is held to the same behaviour by the conformance suite, so the code above runs
-unchanged over any of them.
+backend; every backend is held to the same behaviour by the conformance suite, so a dial written against
+these interfaces runs unchanged over any of them.
 
-## Layout
+## The crates
 
 | crate                 | role                                                                |
 | --------------------- | ------------------------------------------------------------------- |
 | `bifrost`             | facade: the connection API (`Node`, `Transport`, `Session`, `Discovery`) |
 | `bifrost-core`        | identity: `NodeId`, an ed25519 public key with a crypto-suite tag   |
-| `bifrost-transport`   | the `Transport` / `Session` / `Discovery` traits and `Node`         |
+| `bifrost-transport`   | the `Transport` and `Session` traits                                |
 | `bifrost-iroh`        | transport backend over iroh (QUIC with NAT hole-punching)           |
 | `bifrost-mem`         | in-process transport backend for hermetic tests                     |
 | `bifrost-quirk`       | transport backend over [quirk](https://github.com/theia-hq/quirk), a from-scratch QUIC |
@@ -49,7 +59,7 @@ unchanged over any of them.
 
 - bifrost establishes the connection and hands you a byte-stream. It says nothing about what those bytes
   mean; that is the caller's protocol.
-- Verified blob transfer lives one layer up in `bifrost-wire`, a sibling crate, not in the facade.
+- Verified blob transfer lives in `bifrost-wire`, a sibling crate the facade re-exports as `bifrost::wire`.
 - Transports are interchangeable: iroh, an in-process backend, and a from-scratch QUIC all pass the same
   conformance suite, so an app dialing a given identity runs unchanged across them.
 
