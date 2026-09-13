@@ -8,14 +8,18 @@
 //! a dial to a fabricated key at the receiver's real address yields no session
 //! ([`wrong_key_rejected`]).
 //!
-//! What this suite cannot prove, stated plainly. Identity attribution is falsified for a fabricating
-//! transport, never proven for an honest one. The suite inspects no artifacts, so it cannot tell a
-//! sealed channel from a plaintext one: the channel guarantee rests on the backing implementation
-//! (iroh inherits QUIC and TLS, which this suite does not exercise) and on protocol review. Forward
-//! secrecy, nonce discipline, replay resistance against an active attacker, and entropy quality are
-//! protocol review of the handshake and its library, not black-box assertions. iroh (QUIC), the
-//! in-process mem transport, and quirk all pass the suite unchanged; that is the byte contract plus
-//! the identity cases, and the security profile is what each backend declares beside them.
+//! What this suite cannot prove, stated plainly. The assertions pass for a transport that echoes the
+//! dialed key back without proving it, so they falsify a mis-attributing fabricator, never prove an
+//! honest transport. Where the wire can be driven by a hostile peer,
+//! [`claimed_identity_not_attributed`] is the accept-side case: a dialer presenting a foreign
+//! `NodeId` is refused or attributed its true key, never the claim. The suite inspects no artifacts,
+//! so it cannot tell a sealed channel from a plaintext one: the channel guarantee rests on the
+//! backing implementation (iroh inherits QUIC and TLS, which this suite does not exercise) and on
+//! protocol review. Forward secrecy, nonce discipline, replay resistance against an active
+//! attacker, and entropy quality are protocol review of the handshake and its library, not
+//! black-box assertions. iroh (QUIC), the in-process mem transport, and quirk all pass the suite
+//! unchanged; that is the byte contract plus the identity cases, and the security profile is what
+//! each backend declares beside them.
 
 // This crate is test scaffolding: every public function is a conformance assertion invoked from other
 // crates' tests, so `expect` is the assertion mechanism, not production error handling.
@@ -109,8 +113,10 @@ where
 /// A session attributes the dialed identity on both ends: the dialer's [`Session::peer`] is the key
 /// it dialed, and the acceptor's is the dialer's own identity.
 ///
-/// A transport that fabricates `peer()` passes the byte-parity cases and fails here. Panics with a
-/// descriptive message on failure, so it reads as a test assertion.
+/// This catches a transport whose attribution has no basis: a wrong constant, or a session created
+/// for a key nobody reached. It does not catch a transport that echoes the dialed key back without
+/// proving it; attribution consistency is not key possession. Panics with a descriptive message on
+/// failure, so it reads as a test assertion.
 pub async fn identity_binding<T: Transport>(sender: T, receiver: T) {
     let target = receiver.node_id();
     let dialer = sender.node_id();
@@ -138,8 +144,9 @@ pub async fn identity_binding<T: Transport>(sender: T, receiver: T) {
 
 /// A dial to a fabricated identity at the receiver's real address yields no session.
 ///
-/// The strongest identity statement a black-box test can make: a transport that accepts whatever key
-/// it is handed, or answers with a session for a key the receiver does not hold, fails here. Panics
+/// This catches a transport that accepts the key it is handed, or answers with a session for a key
+/// the receiver does not hold. A transport that refuses keys it has no endpoint for passes; the
+/// accept-side case is [`claimed_identity_not_attributed`], where the wire can be driven. Panics
 /// with a descriptive message on failure, so it reads as a test assertion.
 pub async fn wrong_key_rejected<T: Transport>(sender: T, receiver: T, fabricated: NodeId) {
     let target = receiver.node_id();
@@ -159,6 +166,50 @@ pub async fn wrong_key_rejected<T: Transport>(sender: T, receiver: T, fabricated
     }
 
     sender.close().await;
+}
+
+/// A dialer presenting an identity it does not hold is never attributed that identity.
+///
+/// `liar` dials `receiver` claiming `claimed`, a key that is neither endpoint's own. The receiver
+/// must refuse the session or attribute its true peer, never `claimed`. This is the accept-side
+/// case the shared assertions cannot reach: [`identity_binding`] passes for a transport that
+/// echoes keys with no handshake, and [`wrong_key_rejected`] passes when the echoer refuses keys it
+/// has no endpoint for. Run it where the transport's wire can be driven by a hostile peer (a
+/// byte-carrying wrapper inner, a plaintext UDP handshake); a stack whose handshake lives inside a
+/// dependency (iroh's RPK TLS) cannot be driven by a foreign claim at all, and that is the
+/// guarantee itself, held by review of that stack rather than by this suite. The receiver's
+/// `accept` is joined with the dial, so a transport whose handshake has no deadline can park here.
+/// Panics with a descriptive message on failure, so it reads as a test assertion.
+pub async fn claimed_identity_not_attributed<L, R>(liar: L, receiver: R, claimed: NodeId)
+where
+    L: Transport,
+    R: Transport,
+{
+    assert_ne!(
+        claimed,
+        receiver.node_id(),
+        "the claimed identity must differ from the receiver's"
+    );
+    assert_ne!(
+        claimed,
+        liar.node_id(),
+        "the claimed identity must differ from the liar's own"
+    );
+    let addr = Addr {
+        node: receiver.node_id(),
+        hints: receiver.local_addr().hints,
+    };
+
+    let (accepted, _dialed) = tokio::join!(receiver.accept(), liar.connect(addr));
+    if let Ok(session) = accepted {
+        assert_ne!(
+            session.peer(),
+            claimed,
+            "the acceptor attributed an identity the dialer never proved"
+        );
+    }
+
+    liar.close().await;
 }
 
 /// A direct transport reports [`Path::Direct`] and names the remote over an established session.

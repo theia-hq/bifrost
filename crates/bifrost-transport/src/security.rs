@@ -8,12 +8,14 @@
 //!
 //! The profile is a claim, not a proof. The type system forces every transport to state what it
 //! provides and stops a bounded consumer from accepting less; it cannot make an implementation
-//! honest. What backs [`Sealed`] is the handshake binding the peer to its `NodeId` (the conformance
-//! suite falsifies a fabricator: a dial to a key the receiver does not hold yields no session) plus
-//! the channel guarantees of the backing implementation (for iroh, QUIC with TLS 1.3 and raw public
-//! keys). Forward secrecy, nonce discipline, replay resistance against an active attacker, and
-//! post-compromise posture are protocol review of the handshake and its library, not properties a
-//! black-box test can establish.
+//! honest. What backs [`Sealed`] is the handshake binding the peer to its `NodeId` plus the channel
+//! guarantees of the backing implementation (for iroh, QUIC with TLS 1.3 and raw public keys). The
+//! conformance suite falsifies a mis-attributing fabricator and refuses a dial to a key the receiver
+//! does not hold; it cannot catch a transport that echoes the dialed key back without proving it,
+//! and it inspects no bytes. Declaration honesty, forward secrecy, nonce discipline, replay
+//! resistance against an active attacker, and post-compromise posture are protocol review of the
+//! handshake and its library, not properties a black-box test can establish. Admitting a new
+//! transport is the checklist in the crate docs.
 //!
 //! | marker | peer identity | channel | carries |
 //! | --- | --- | --- | --- |
@@ -57,6 +59,19 @@ pub struct Security {
     pub channel: ChannelProtection,
 }
 
+impl Security {
+    /// Whether this declaration says the peer's identity is proven.
+    ///
+    /// The one runtime predicate for a consumer whose transport is chosen dynamically; a consumer
+    /// whose transport is static requires [`PeerProven`] as a bound instead. [`PeerProof::Proven`]
+    /// is a completed handshake, [`PeerProof::InProcess`] is exact by construction, and
+    /// [`PeerProof::Announced`] is a claim the peer made about itself.
+    #[must_use]
+    pub const fn proves_peer(self) -> bool {
+        matches!(self.peer, PeerProof::Proven | PeerProof::InProcess)
+    }
+}
+
 /// How a transport establishes the peer's identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerProof {
@@ -79,58 +94,67 @@ pub enum ChannelProtection {
     Plain,
 }
 
-/// A handshake proves the peer key and the channel is end-to-end AEAD.
+/// The sealed profile set, declared as one table so a marker's [`Security`] value and its capability
+/// impls are emitted from the same row and cannot drift apart.
 ///
-/// It is a declaration: the compiler cannot verify the handshake, so a lying implementation is caught
-/// by conformance (identity binding) and protocol review, not by the type.
-pub enum Sealed {}
+/// Each row is the marker (with its docs), the properties it declares, and the capability traits a
+/// bounded consumer may rely on. [`Secure`] follows from the two capabilities rather than a row of
+/// its own, so a profile cannot claim it without both. Adding a profile is adding a row here; the
+/// seal and the compiler-facing bounds follow from it.
+macro_rules! profiles {
+    (
+        $(
+            $(#[$doc:meta])*
+            $marker:ident => $security:expr $(, proves [ $($cap:ident),* $(,)? ] )? ;
+        )+
+    ) => {
+        $(
+            $(#[$doc])*
+            pub enum $marker {}
 
-/// The peer key is self-announced over a plaintext channel. Public traffic only.
-///
-/// It carries neither capability, so a bounded consumer rejects it at compile time:
-///
-/// ```compile_fail
-/// fn needs_proven<P: bifrost_transport::PeerProven>() {}
-/// needs_proven::<bifrost_transport::Announced>();
-/// ```
-pub enum Announced {}
+            impl sealed::Sealed for $marker {}
 
-/// No wire: the identity is exact by construction and the bytes stay inside one process.
-///
-/// This is a trust-unit declaration the compiler cannot check. It is for test scaffolding and
-/// same-process composition, where the process boundary is the trust boundary, not for anything
-/// crossing a process or a network.
-pub enum InProcess {}
+            impl SecurityProfile for $marker {
+                const SECURITY: Security = $security;
+            }
 
-impl sealed::Sealed for Sealed {}
-impl sealed::Sealed for Announced {}
-impl sealed::Sealed for InProcess {}
-
-impl SecurityProfile for Sealed {
-    const SECURITY: Security = Security {
-        peer: PeerProof::Proven,
-        channel: ChannelProtection::Aead,
+            $(
+                $(impl $cap for $marker {})*
+            )?
+        )+
     };
 }
 
-impl SecurityProfile for Announced {
-    const SECURITY: Security = Security {
-        peer: PeerProof::Announced,
-        channel: ChannelProtection::Plain,
-    };
+profiles! {
+    /// A handshake proves the peer holds the `NodeId` key and the channel is end-to-end AEAD.
+    ///
+    /// It is a declaration: the compiler cannot verify the handshake. Conformance falsifies a
+    /// mis-attributing fabricator and a dial to a key the receiver does not hold; it cannot catch a
+    /// transport that echoes the dialed key back or sends plaintext under this marker. Declaration
+    /// honesty, forward secrecy, nonce discipline, and replay resistance are protocol review.
+    Sealed => Security { peer: PeerProof::Proven, channel: ChannelProtection::Aead },
+        proves [PeerProven, Confidential];
+
+    /// The peer key is self-announced over a plaintext channel. Public traffic only.
+    ///
+    /// It carries neither capability, so a bounded consumer rejects it at compile time:
+    ///
+    /// ```compile_fail,E0277
+    /// fn needs_proven<P: bifrost_transport::PeerProven>() {}
+    /// needs_proven::<bifrost_transport::Announced>();
+    /// ```
+    Announced => Security { peer: PeerProof::Announced, channel: ChannelProtection::Plain },
+        proves [];
+
+    /// No wire: the identity is exact by construction and the bytes stay inside one process.
+    ///
+    /// This is a trust-unit declaration the compiler cannot check. It is for test scaffolding and
+    /// same-process composition, where the process boundary is the trust boundary, not for anything
+    /// crossing a process or a network.
+    InProcess => Security { peer: PeerProof::InProcess, channel: ChannelProtection::InProcess },
+        proves [PeerProven, Confidential];
 }
 
-impl SecurityProfile for InProcess {
-    const SECURITY: Security = Security {
-        peer: PeerProof::InProcess,
-        channel: ChannelProtection::InProcess,
-    };
-}
-
-impl PeerProven for Sealed {}
-impl PeerProven for InProcess {}
-impl Confidential for Sealed {}
-impl Confidential for InProcess {}
 impl<T: PeerProven + Confidential> Secure for T {}
 
 /// Closes [`SecurityProfile`] to the markers above: the trait is public, the seal is not.
