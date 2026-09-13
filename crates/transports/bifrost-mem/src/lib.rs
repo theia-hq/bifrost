@@ -15,7 +15,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, CryptoKind, Error};
-pub use bifrost_transport::{Session, Transport};
+pub use bifrost_transport::{InProcess, Session, Transport};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
@@ -71,6 +71,7 @@ impl Drop for MemTransport {
 }
 
 impl Transport for MemTransport {
+    type Security = InProcess;
     type Session = MemSession;
 
     fn node_id(&self) -> NodeId {
@@ -125,6 +126,7 @@ pub struct MemSession {
 }
 
 impl Session for MemSession {
+    type Security = InProcess;
     type Write = io::WriteHalf<io::DuplexStream>;
     type Read = io::ReadHalf<io::DuplexStream>;
 

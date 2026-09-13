@@ -9,7 +9,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, ConnInfo, CryptoKind, Error, Path};
-pub use bifrost_transport::{Session, Transport};
+pub use bifrost_transport::{Sealed, Session, Transport};
 use iroh::endpoint::{Connection, PathList, RecvStream, SendStream, presets};
 use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, TransportAddr};
 
@@ -73,6 +73,7 @@ impl Endpoint {
 }
 
 impl Transport for Endpoint {
+    type Security = Sealed;
     type Session = IrohSession;
 
     fn node_id(&self) -> NodeId {
@@ -119,6 +120,7 @@ pub struct IrohSession {
 }
 
 impl Session for IrohSession {
+    type Security = Sealed;
     type Write = SendStream;
     type Read = RecvStream;
 

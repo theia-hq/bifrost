@@ -38,8 +38,9 @@ let (mut writer, mut reader) = session.open_bi().await?;
 ```
 
 `Transport`, `Session`, and `Discovery` are the pluggable interfaces. Implement `Transport` to add a
-backend; every backend is held to the same behaviour by the conformance suite, so a dial written against
-these interfaces runs unchanged over any of them.
+backend; every backend declares its `Security` profile (`Sealed`, `Announced`, or `InProcess`) and is
+held to the same byte-movement behaviour by the conformance suite, so a dial written against these
+interfaces runs unchanged over any of them.
 
 ## The crates
 
@@ -60,8 +61,9 @@ these interfaces runs unchanged over any of them.
 - bifrost establishes the connection and hands you a byte-stream. It says nothing about what those bytes
   mean; that is the caller's protocol.
 - Verified blob transfer lives in `bifrost-wire`, a sibling crate the facade re-exports as `bifrost::wire`.
-- Transports are interchangeable: iroh, an in-process backend, and a from-scratch QUIC all pass the same
-  conformance suite, so an app dialing a given identity runs unchanged across them.
+- Transports are interchangeable in interface, not in security. iroh, an in-process backend, and a
+  from-scratch QUIC all pass the same conformance suite, but each declares a different `Security`
+  profile: `PeerProven` for a consumer that trusts the peer, `Secure` for one that carries a secret.
 
 ## License
 

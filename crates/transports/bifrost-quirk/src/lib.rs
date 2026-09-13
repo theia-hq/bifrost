@@ -9,7 +9,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, Path};
-pub use bifrost_transport::{Session, Transport};
+pub use bifrost_transport::{Announced, Session, Transport};
 
 /// A quirk-backed endpoint.
 pub struct Endpoint {
@@ -39,6 +39,7 @@ impl Endpoint {
 }
 
 impl Transport for Endpoint {
+    type Security = Announced;
     type Session = QuirkSession;
 
     fn node_id(&self) -> NodeId {
@@ -108,6 +109,7 @@ pub struct QuirkSession {
 }
 
 impl Session for QuirkSession {
+    type Security = Announced;
     type Write = quirk::SendStream;
     type Read = quirk::RecvStream;
 

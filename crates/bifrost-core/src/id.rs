@@ -32,9 +32,10 @@ impl CryptoKind {
 
 /// A self-certifying node identity: a raw 32-byte public key plus its [`CryptoKind`].
 ///
-/// This is the only way a peer is named in Bifrost. It is self-certifying because a successful
-/// transport handshake proves the remote holds the matching private key, so reaching a `NodeId`
-/// means reaching exactly that identity with no registry to trust.
+/// This is the only way a peer is named in Bifrost. Whether reaching a `NodeId` PROVES that identity
+/// is the transport's declared security profile, not a property of the type: a `Sealed` transport
+/// proves key possession, while an `Announced` one (quirk phase 0) reaches whatever key answers and
+/// proves nothing. Consumers that need proof require the `PeerProven` bound.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId {
     kind: CryptoKind,

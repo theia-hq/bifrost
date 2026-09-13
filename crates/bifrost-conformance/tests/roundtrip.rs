@@ -1,5 +1,7 @@
 use bifrost::{Node, StaticDiscovery, Transport};
-use bifrost_conformance::{close_drains, direct_conn_info, reach_roundtrip};
+use bifrost_conformance::{
+    close_drains, direct_conn_info, identity_binding, reach_roundtrip, wrong_key_rejected,
+};
 use bifrost_iroh::Endpoint;
 
 /// Compose an iroh sender that dials `receiver` by NodeId via a StaticDiscovery resolving it to its
@@ -28,6 +30,29 @@ async fn iroh_close_drains() {
     let receiver = Endpoint::bind_local().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
     close_drains(sender, receiver).await;
+}
+
+/// iroh proves the peer from the TLS handshake, so both ends attribute the dialed identity.
+#[tokio::test]
+async fn iroh_identity_binding() {
+    identity_binding(
+        Endpoint::bind_local().await.expect("bind sender"),
+        Endpoint::bind_local().await.expect("bind receiver"),
+    )
+    .await;
+}
+
+/// A dial to a key the receiver does not hold fails the raw-public-key handshake: no session, and no
+/// way for a responder to speak for an identity it cannot prove.
+#[tokio::test]
+async fn iroh_wrong_key_rejected() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let fabricated = Endpoint::bind_local()
+        .await
+        .expect("bind fabricated")
+        .node_id();
+    let sender = Endpoint::bind_local().await.expect("bind sender");
+    wrong_key_rejected(sender, receiver, fabricated).await;
 }
 
 /// iroh over loopback hole-punches straight to a direct path, so `conn_info` reports
