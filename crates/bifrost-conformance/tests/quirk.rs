@@ -1,5 +1,7 @@
-use bifrost::{Node, StaticDiscovery, Transport};
-use bifrost_conformance::{close_drains, direct_conn_info, reach_roundtrip};
+use bifrost::{CryptoKind, Node, NodeId, StaticDiscovery, Transport};
+use bifrost_conformance::{
+    close_drains, direct_conn_info, identity_binding, reach_roundtrip, wrong_key_rejected,
+};
 use bifrost_quirk::Endpoint;
 
 /// Compose a quirk sender that dials `receiver` by NodeId via a StaticDiscovery resolving it to its
@@ -30,6 +32,30 @@ async fn quirk_close_drains() {
     let receiver = Endpoint::bind().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
     close_drains(sender, receiver).await;
+}
+
+/// quirk announces its key in a plaintext handshake, so both ends must attribute the key that was
+/// dialed. Phase 1 Noise replaces the announcement with a proof; this assertion does not change.
+#[tokio::test]
+async fn quirk_identity_binding() {
+    identity_binding(
+        Endpoint::bind().await.expect("bind sender"),
+        Endpoint::bind().await.expect("bind receiver"),
+    )
+    .await;
+}
+
+/// A fabricated key dialed at the receiver's real address is rejected by the dialed-vs-reached guard,
+/// so a plaintext responder cannot hand up a session for a key it does not hold.
+#[tokio::test]
+async fn quirk_wrong_key_rejected() {
+    let fabricated = NodeId::new(CryptoKind::Ed25519, [0x11; NodeId::KEY_LEN]);
+    wrong_key_rejected(
+        Endpoint::bind().await.expect("bind sender"),
+        Endpoint::bind().await.expect("bind receiver"),
+        fabricated,
+    )
+    .await;
 }
 
 /// quirk is direct-only, so a session reports [`bifrost::Path::Direct`] and names the peer's address.

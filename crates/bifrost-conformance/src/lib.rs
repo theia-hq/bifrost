@@ -1,15 +1,27 @@
-//! Parity conformance for Bifrost transports.
+//! Conformance for Bifrost transports.
 //!
 //! bifrost is REACH: reach a peer by key over a pluggable transport. That is its one contract, and
 //! this is the check every transport must pass. A composed [`Node`] dials the receiver by key, opens
-//! a stream, and bytes echo back byte-identical. Transfer, hashing, files: not bifrost's job, not
-//! tested here. iroh (QUIC) and the in-process mem transport both pass it unchanged.
+//! a stream, and bytes echo back byte-identical; a sender that closes right after its last write
+//! still drains; `conn_info` reports only what the transport knows. Identity is checked where a
+//! black-box test can: a session attributes the dialed key on both ends ([`identity_binding`]), and
+//! a dial to a fabricated key at the receiver's real address yields no session
+//! ([`wrong_key_rejected`]).
+//!
+//! What this suite cannot prove, stated plainly. Identity attribution is falsified for a fabricating
+//! transport, never proven for an honest one. The suite inspects no artifacts, so it cannot tell a
+//! sealed channel from a plaintext one: the channel guarantee rests on the backing implementation
+//! (iroh inherits QUIC and TLS, which this suite does not exercise) and on protocol review. Forward
+//! secrecy, nonce discipline, replay resistance against an active attacker, and entropy quality are
+//! protocol review of the handshake and its library, not black-box assertions. iroh (QUIC), the
+//! in-process mem transport, and quirk all pass the suite unchanged; that is the byte contract plus
+//! the identity cases, and the security profile is what each backend declares beside them.
 
 // This crate is test scaffolding: every public function is a conformance assertion invoked from other
 // crates' tests, so `expect` is the assertion mechanism, not production error handling.
 #![allow(clippy::expect_used)]
 
-use bifrost::{Discovery, Node, Path, Session, Transport};
+use bifrost::{Addr, Discovery, Error, Node, NodeId, Path, Session, Transport};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// A message sent to a peer reached by key over a bidirectional stream echoes back byte-identical.
@@ -92,6 +104,61 @@ where
         received, message,
         "receiver drained every byte to a clean end"
     );
+}
+
+/// A session attributes the dialed identity on both ends: the dialer's [`Session::peer`] is the key
+/// it dialed, and the acceptor's is the dialer's own identity.
+///
+/// A transport that fabricates `peer()` passes the byte-parity cases and fails here. Panics with a
+/// descriptive message on failure, so it reads as a test assertion.
+pub async fn identity_binding<T: Transport>(sender: T, receiver: T) {
+    let target = receiver.node_id();
+    let dialer = sender.node_id();
+    let addr = Addr {
+        node: target,
+        hints: receiver.local_addr().hints,
+    };
+
+    let (dialed, accepted) = tokio::join!(sender.connect(addr), receiver.accept());
+    let dialed = dialed.expect("connect");
+    let accepted = accepted.expect("accept");
+    assert_eq!(
+        dialed.peer(),
+        target,
+        "the dialer attributes the key it dialed"
+    );
+    assert_eq!(
+        accepted.peer(),
+        dialer,
+        "the acceptor attributes the dialer's identity"
+    );
+
+    sender.close().await;
+}
+
+/// A dial to a fabricated identity at the receiver's real address yields no session.
+///
+/// The strongest identity statement a black-box test can make: a transport that accepts whatever key
+/// it is handed, or answers with a session for a key the receiver does not hold, fails here. Panics
+/// with a descriptive message on failure, so it reads as a test assertion.
+pub async fn wrong_key_rejected<T: Transport>(sender: T, receiver: T, fabricated: NodeId) {
+    let target = receiver.node_id();
+    assert_ne!(
+        fabricated, target,
+        "the fabricated key must differ from the receiver's"
+    );
+    let addr = Addr {
+        node: fabricated,
+        hints: receiver.local_addr().hints,
+    };
+
+    match sender.connect(addr).await {
+        Err(Error::Connect(_)) => {}
+        Err(other) => panic!("expected a connect error, got {other:?}"),
+        Ok(_) => panic!("connect yielded a session for an identity that was never reached"),
+    }
+
+    sender.close().await;
 }
 
 /// A direct transport reports [`Path::Direct`] and names the remote over an established session.
