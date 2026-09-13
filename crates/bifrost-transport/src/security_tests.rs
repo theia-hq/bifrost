@@ -28,10 +28,13 @@ fn markers_declare_their_properties() {
     );
 }
 
-/// The capability traits compile for exactly the markers named in the contract. `Announced` has no
-/// call here: the `compile_fail` doctest on the marker pins its rejection.
+/// The capability set and the declared [`Security`] value agree per marker: the marker that carries
+/// a capability reads back as that capability through the one runtime predicate, and the marker that
+/// does not cannot. Both halves are emitted from one `profiles!` row, so a one-sided edit cannot
+/// compile; this test pins the row itself. `Announced` has no positive call here: the `compile_fail`
+/// doctest on the marker pins its rejection.
 #[test]
-fn capabilities_match_the_markers() {
+fn capabilities_match_the_declared_security() {
     fn peer_proven<P: PeerProven>() {}
     fn confidential<P: Confidential>() {}
     fn secure<P: Secure>() {}
@@ -39,7 +42,12 @@ fn capabilities_match_the_markers() {
     peer_proven::<Sealed>();
     confidential::<Sealed>();
     secure::<Sealed>();
+    assert!(<Sealed as SecurityProfile>::SECURITY.proves_peer());
+
     peer_proven::<InProcess>();
     confidential::<InProcess>();
     secure::<InProcess>();
+    assert!(<InProcess as SecurityProfile>::SECURITY.proves_peer());
+
+    assert!(!<Announced as SecurityProfile>::SECURITY.proves_peer());
 }

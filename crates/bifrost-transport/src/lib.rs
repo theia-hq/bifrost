@@ -9,8 +9,9 @@
 //!
 //! The declaration is a claim, not a proof. A consumer that carries authority bounds on
 //! [`PeerProven`] or [`Secure`] and reads [`SecurityProfile::SECURITY`] at a runtime seam; the
-//! conformance suite proves byte movement and identity binding, not the channel. The [`Security`]
-//! value and the marker types state what each profile means and what is left to protocol review.
+//! conformance suite proves byte movement and falsifies a mis-attributing fabricator; it does not
+//! inspect the channel. The [`Security`] value and the marker types state what each profile means
+//! and what is left to protocol review.
 //!
 //! This is the pluggable boundary: iroh today, a raw-QUIC transport next, others later, all exposing
 //! the same byte-stream interface and all held to the same behaviour by the conformance suite.
@@ -23,6 +24,32 @@
 //! Streams are exposed as associated types bounded by [`AsyncRead`]/[`AsyncWrite`], so the boundary
 //! is a plain byte-stream interface with no boxing: a transport differs only in how a session is
 //! established, never in how bytes flow once it is.
+//!
+//! # Admitting a new transport
+//!
+//! A new backend runs parity tests and carries nothing else until it clears this list. The bar
+//! applies to the [`Sealed`] declaration; a transport that cannot clear it declares [`Announced`]
+//! (public traffic only) or [`InProcess`] (same-process scaffolding only).
+//!
+//! 1. Declare the profile from the sealed set, with review: [`Sealed`] only for a named handshake
+//!    that binds the `NodeId` private key (a Noise pattern, TLS with raw public keys). Pairing, a
+//!    uid, or a transport-level channel is not `NodeId` proof.
+//! 2. Prove key possession in that handshake and test it: the accepted peer holds the dialed key's
+//!    private half, and a claim that cannot sign for it yields no session.
+//! 3. Pass the shared conformance suite in the backend's own CI, against a pinned conformance rev.
+//! 4. Run the identity falsifiers where the wire is drivable: a wrong-key dial is refused, and a
+//!    hostile dialer claiming a foreign `NodeId` is never attributed it. A stack whose handshake
+//!    lives inside a dependency (iroh's RPK TLS) cannot be driven from the suite; state that and
+//!    keep the review of that stack.
+//! 5. Bound the handshake and the wire: a handshake deadline, per-peer and global session and stream
+//!    caps, bounded queues and buffers, and bounded parsing (closing on abuse, never growing).
+//! 6. Fuzz or property-test every byte parser the transport owns.
+//! 7. Pin and deny-check every crypto dependency; hand-rolled primitives are refused.
+//! 8. Run a live adversarial pass with observed evidence: wrong key, on-path impersonation, replay,
+//!    and any planned downgrade.
+//!
+//! Until all of that passes: no credential, no gated route, no default reach path, and no
+//! peer-supplied transport selection.
 
 pub use bifrost_core::{Addr, ConnInfo, Error, NodeId, NodeIdParseError, Path};
 use tokio::io;
