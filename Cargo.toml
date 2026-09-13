@@ -9,6 +9,7 @@ members = [
     "crates/bifrost-wire",
     "crates/transports/bifrost-iroh",
     "crates/transports/bifrost-mem",
+    "crates/transports/bifrost-noise",
     "crates/transports/bifrost-quirk",
 ]
 
@@ -23,6 +24,7 @@ bifrost-core = { path = "crates/bifrost-core" }
 bifrost-iroh = { path = "crates/transports/bifrost-iroh" }
 bifrost-mdns = { path = "crates/bifrost-mdns" }
 bifrost-mem = { path = "crates/transports/bifrost-mem" }
+bifrost-noise = { path = "crates/transports/bifrost-noise" }
 bifrost-quirk = { path = "crates/transports/bifrost-quirk" }
 bifrost-transport = { path = "crates/bifrost-transport" }
 bifrost-wire = { path = "crates/bifrost-wire" }
@@ -33,11 +35,13 @@ data-encoding = "2"
 ed25519-dalek = "2"
 eyre = "0.6"
 iroh = "1.0"
+snow = { version = "=0.10.0", default-features = false, features = ["use-chacha20poly1305", "use-curve25519", "use-getrandom", "use-sha2"] }
 swarm-discovery = "0.6"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize = "1"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
