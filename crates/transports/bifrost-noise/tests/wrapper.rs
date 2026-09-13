@@ -494,6 +494,50 @@ async fn application_bytes_do_not_appear_on_the_inner_wire() {
     }
 }
 
+/// A saturated stream that is then torn down reads as a reset, never as a clean EOF.
+///
+/// This is the reviewer's finding 1 shape: the peer fills the 8-chunk queue, then trips a fatal
+/// frame, so the teardown's reset cannot enter the full queue. The app must not accept the truncation
+/// as a completed read.
+#[tokio::test]
+async fn saturated_stream_reads_reset_not_eof_on_teardown() {
+    let receiver = sealed(85);
+    let saboteur = Saboteur::new(seed(86), Sabotage::SaturateThenFatal);
+    let (accepted, saboteur) =
+        tokio::join!(receiver.accept(), saboteur.connect(dial_addr(&receiver)));
+    let accepted = accepted.expect("the handshake itself completes");
+    let _saboteur = saboteur.expect("the dialer holds the connection");
+
+    let (_write, mut read) = accepted
+        .accept_bi()
+        .await
+        .expect("the open stream is queued");
+    let mut buf = vec![0u8; 4096];
+    // Drain one chunk so the ninth frame can enter the full queue, then wait for the tear without
+    // reading: the queue stays full, which is the shape that used to read as a clean EOF.
+    let first = read.read(&mut buf).await.expect("the first chunk");
+    tokio::time::timeout(Duration::from_secs(1), accepted.wait_closed())
+        .await
+        .expect("the fatal frame tears the session down");
+
+    let mut total = first;
+    loop {
+        match read.read(&mut buf).await {
+            Ok(0) => panic!("a torn session read as a clean EOF after {total} bytes"),
+            Ok(n) => total += n,
+            Err(err) => {
+                assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        total,
+        9 * 4088,
+        "every authenticated byte is delivered first"
+    );
+}
+
 /// The stream cap counts concurrent streams, not a session lifetime: a closed stream frees a slot.
 #[tokio::test]
 async fn stream_cap_counts_concurrent_streams() {
