@@ -1,13 +1,14 @@
 //! The dial path's discovery readiness seam.
 //!
-//! mDNS answers only after its first browse cycle, so a resolve that runs in the first milliseconds
-//! of a cold node misses a peer that is on the network. These tests pin the dial path's response
-//! with deterministic doubles: an empty first resolve waits for the source to become ready and then
-//! resolves again, while a resolve that already yielded a hint does not wait at all. The doubles
-//! stand in for the real service; mDNS's own timing belongs to the live-run gate.
+//! mDNS answers only after its first browse cycle, and a fresh browser often hears its OWN
+//! advertisement echoed back before it hears the peer. These tests pin the dial path's response with
+//! deterministic doubles: an empty first resolve waits for readiness FOR THE TARGET, a self record
+//! does not release it, and a resolve that already yielded a hint does not wait at all. The doubles
+//! stand in for the real service; mDNS's own timing belongs to the live-run gate, and the real
+//! filter is pinned separately by the paused-clock tests in `bifrost-mdns`.
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
@@ -17,33 +18,48 @@ use bifrost::{
 };
 use tokio::io;
 
-/// A cold source: every resolve misses until a readiness wait stands in for its first browse cycle,
-/// after which it answers. Deterministic, it never sleeps.
+/// A cold source whose first observation is the dialing node's own advertisement echoed back, and
+/// whose second is the target's. Readiness carries the target, so only a wait asked for the target
+/// lets the target's record land; a target-blind or never-asked wait leaves the dial empty.
 #[derive(Clone)]
-struct ColdDiscovery {
-    peer: NodeId,
+struct SelfFirstDiscovery {
+    target: NodeId,
     addr: SocketAddr,
-    /// Set by the wait, standing in for the browse cycle having run.
-    heard: Arc<AtomicBool>,
-    /// Readiness waits observed, so a test can prove the dial path did or did not warm the source.
-    waits: Arc<AtomicUsize>,
+    /// Identity observations for the dialing node itself, which must not release a wait.
+    self_records: Arc<AtomicUsize>,
+    /// Target observations, which do.
+    target_records: Arc<AtomicUsize>,
+    /// The identity the dial asked readiness for, if it asked at all.
+    ready_for: Arc<Mutex<Option<NodeId>>>,
     /// The last bound a wait was given, in milliseconds.
     bound_ms: Arc<AtomicU64>,
 }
 
-impl ColdDiscovery {
-    fn new(peer: NodeId, addr: SocketAddr) -> Self {
+impl SelfFirstDiscovery {
+    fn new(target: NodeId, addr: SocketAddr) -> Self {
         Self {
-            peer,
+            target,
             addr,
-            heard: Arc::new(AtomicBool::new(false)),
-            waits: Arc::new(AtomicUsize::new(0)),
+            self_records: Arc::new(AtomicUsize::new(0)),
+            target_records: Arc::new(AtomicUsize::new(0)),
+            ready_for: Arc::new(Mutex::new(None)),
             bound_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    fn waits(&self) -> usize {
-        self.waits.load(Ordering::SeqCst)
+    fn self_records(&self) -> usize {
+        self.self_records.load(Ordering::SeqCst)
+    }
+
+    fn target_records(&self) -> usize {
+        self.target_records.load(Ordering::SeqCst)
+    }
+
+    fn ready_for(&self) -> Option<NodeId> {
+        *self
+            .ready_for
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn bound(&self) -> Duration {
@@ -51,20 +67,31 @@ impl ColdDiscovery {
     }
 }
 
-impl Discovery for ColdDiscovery {
+impl Discovery for SelfFirstDiscovery {
     async fn resolve(&self, node: NodeId) -> Result<Vec<SocketAddr>, Error> {
-        Ok(if node == self.peer && self.heard.load(Ordering::SeqCst) {
+        let heard = self.target_records.load(Ordering::SeqCst) > 0;
+        Ok(if node == self.target && heard {
             vec![self.addr]
         } else {
             Vec::new()
         })
     }
 
-    async fn wait_ready(&self, timeout: Duration) {
-        self.waits.fetch_add(1, Ordering::SeqCst);
+    async fn wait_ready(&self, node: NodeId, timeout: Duration) {
         self.bound_ms
             .store(timeout.as_millis() as u64, Ordering::SeqCst);
-        self.heard.store(true, Ordering::SeqCst);
+        *self
+            .ready_for
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(node);
+        // The dialing node's own advertisement echoes back first: an observation of a DIFFERENT
+        // identity, which a target-aware wait must hold through.
+        self.self_records.fetch_add(1, Ordering::SeqCst);
+        // The target's record lands next, and only a wait asked for the target lets it through.
+        tokio::task::yield_now().await;
+        if node == self.target {
+            self.target_records.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -164,13 +191,14 @@ impl Session for RecordingSession {
     async fn wait_closed(&self) {}
 }
 
-/// A cold source's first resolve misses, so the dial waits for readiness, resolves again, and only
-/// then reaches the peer. Without the wait, the transport would refuse the empty hint set.
+/// The dial's own record arrives first. A target-aware wait holds through it, lets the target's
+/// record land, and only then the re-resolve reaches the peer; a target-blind release would leave
+/// the hint set empty and the transport would refuse the dial.
 #[tokio::test]
-async fn cold_resolve_waits_then_dials() {
+async fn self_record_first_still_waits_for_the_target_then_dials() {
     let peer = id(0x11);
     let addr = addr(7001);
-    let cold = ColdDiscovery::new(peer, addr);
+    let cold = SelfFirstDiscovery::new(peer, addr);
     let probe = cold.clone();
 
     let transport = RecordingTransport::default();
@@ -182,9 +210,19 @@ async fn cold_resolve_waits_then_dials() {
         .expect("a cold no-hint dial reaches the peer after the wait");
 
     assert_eq!(
-        probe.waits(),
+        probe.ready_for(),
+        Some(peer),
+        "readiness must be asked for the dialed identity"
+    );
+    assert_eq!(
+        probe.self_records(),
         1,
-        "the dial warms the cold source exactly once"
+        "the dialing node's own record arrived first"
+    );
+    assert_eq!(
+        probe.target_records(),
+        1,
+        "only the target record releases the wait"
     );
     let bound = probe.bound();
     assert!(
@@ -208,7 +246,7 @@ async fn hinted_resolve_does_not_wait() {
     hints.insert(peer, vec![hinted]);
 
     // This source would answer the peer if warmed; the test proves the dial never asked it to.
-    let cold = ColdDiscovery::new(peer, addr(7003));
+    let cold = SelfFirstDiscovery::new(peer, addr(7003));
     let probe = cold.clone();
 
     let transport = RecordingTransport::default();
@@ -220,9 +258,14 @@ async fn hinted_resolve_does_not_wait() {
         .expect("a hinted dial reaches the peer at once");
 
     assert_eq!(
-        probe.waits(),
-        0,
+        probe.ready_for(),
+        None,
         "a resolve with hints must not wait for another source"
+    );
+    assert_eq!(
+        probe.self_records(),
+        0,
+        "no readiness wait means no observation is consumed"
     );
     assert_eq!(
         dialed.hints(),

@@ -42,13 +42,16 @@ impl<T: Transport, D: Discovery> Node<T, D> {
     /// Dial a peer by identity: resolve hints via discovery, then establish a session.
     ///
     /// An empty resolve is not final. Before concluding that nothing is known, the dial waits a
-    /// bounded span for the discovery to become ready and resolves once more, so a background
-    /// source that has not answered yet still gets its chance. A resolve that already yielded hints
-    /// dials at once, and a source with nothing to wait for returns immediately.
+    /// bounded span for the discovery to become ready FOR THIS PEER and resolves once more, so a
+    /// background source that has not heard the target yet still gets its chance. A resolve that
+    /// already yielded hints dials at once, and a source with nothing to wait for returns
+    /// immediately.
     pub async fn connect(&self, node: NodeId) -> Result<T::Session, Error> {
         let mut hints = self.discovery.resolve(node).await?;
         if hints.is_empty() {
-            self.discovery.wait_ready(DISCOVERY_READY_TIMEOUT).await;
+            self.discovery
+                .wait_ready(node, DISCOVERY_READY_TIMEOUT)
+                .await;
             hints = self.discovery.resolve(node).await?;
         }
         self.transport.connect(Addr { node, hints }).await
