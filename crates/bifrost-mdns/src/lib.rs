@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use bifrost_core::{Discovery, Error, NodeId};
 use swarm_discovery::{Discoverer, IpClass, Peer};
 use tokio::runtime::Handle;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 /// The mDNS service all theia nodes advertise and browse under: `_theia._udp.local.`.
 ///
@@ -40,18 +40,22 @@ const SERVICE: &str = "theia";
 /// Construction starts advertising immediately and spawns the background browser; the returned value
 /// owns the running service and stops it when dropped. Hold it for as long as the node should be
 /// discoverable. A fresh instance can resolve nothing until its first browse cycle has run (about a
-/// second out), so [`wait_ready`](Discovery::wait_ready) is the bounded wait a dial uses to tell a
-/// cold start from an absent peer.
+/// second out), so [`wait_ready`](Discovery::wait_ready) is the bounded, per-peer wait a dial uses to
+/// tell a cold start from an absent peer.
 pub struct MdnsDiscovery {
     /// Peers heard on the LAN, keyed by identity. Shared with the browse callback, which is the only
-    /// writer; [`resolve`](Self::resolve) is the only reader. A `Mutex` (not a channel) because the
-    /// access is a trivial, non-blocking map read/write behind an async method, not a stream to drive.
+    /// writer; [`resolve`](Self::resolve) and [`wait_ready`](Discovery::wait_ready) are the readers. A
+    /// `Mutex` (not a channel) because the access is a trivial, non-blocking map read/write behind an
+    /// async method, not a stream to drive.
     peers: Peers,
-    /// Wakes a [`wait_ready`](Discovery::wait_ready) caller on the first browse observation. Shared
-    /// with the browse callback, which is the only notifier.
-    observed: Arc<Notify>,
-    /// Set once a readiness wait has ended, whether an observation woke it or the bound elapsed (the
-    /// browse cycle has run by then). Later waits answer at once, so only the first cold dial pays.
+    /// Advances on every parsed browse observation. A readiness wait watches it to re-check its
+    /// target, so an observation of any other peer (the dialing node's own echo included) only wakes
+    /// the wait, never releases it. A `watch` (not a `Notify`) because a bump must reach every
+    /// waiter and must not be lost to a waiter that subscribed late.
+    observations: watch::Sender<()>,
+    /// Set once a readiness wait has run to its bound, proving the browse has had a full window, so
+    /// later empty resolves answer at once instead of paying the bound again. A wait released early
+    /// by the target does NOT set it: the browse is live, but its own first query may not be out yet.
     /// A plain field: only `wait_ready` reads or writes it.
     warmed: AtomicBool,
     /// Keeps the advertise + browse tasks alive. Dropping it stops the mDNS service, so it is held
@@ -101,8 +105,8 @@ impl MdnsDiscovery {
 
         let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
         let sink = Arc::clone(&peers);
-        let observed = Arc::new(Notify::new());
-        let signal = Arc::clone(&observed);
+        let (observations, _) = watch::channel(());
+        let signal = observations.clone();
         // `new_interactive` sets a human-facing cadence (tau=0.7s, phi=2.5): a person is waiting on an
         // interactive probe, so bias toward finding a peer within a second over minimizing multicast chatter.
         let service = Discoverer::new_interactive(SERVICE.to_owned(), node.to_string())
@@ -121,7 +125,7 @@ impl MdnsDiscovery {
 
         Ok(Self {
             peers,
-            observed,
+            observations,
             warmed: AtomicBool::new(false),
             _service: Some(service),
         })
@@ -134,12 +138,21 @@ impl MdnsDiscovery {
     /// [`resolve`](Self::resolve) returns empty so the caller falls through to its other sources.
     /// There is nothing to warm, so [`wait_ready`](Discovery::wait_ready) returns at once.
     pub fn disabled() -> Self {
+        let (observations, _) = watch::channel(());
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
-            observed: Arc::new(Notify::new()),
+            observations,
             warmed: AtomicBool::new(true),
             _service: None,
         }
+    }
+
+    /// Whether `node` is currently in the heard table, from an unexpired observation.
+    fn known(&self, node: NodeId) -> bool {
+        self.peers
+            .lock()
+            .map(|peers| peers.contains_key(&node))
+            .unwrap_or(false)
     }
 }
 
@@ -156,28 +169,51 @@ impl Discovery for MdnsDiscovery {
         Ok(peers.get(&node).cloned().unwrap_or_default())
     }
 
-    /// Wait for the first browse observation, or for the bound to elapse.
+    /// Wait for an observation of `node`, or for the bound to elapse.
     ///
     /// The browse sends its first query on its cadence, so a resolve that runs earlier misses a peer
-    /// that is in fact on the network. An observation wakes this at once; otherwise the bound stands
-    /// in for the first cycle. Either way the wait ends warm, so only the first cold dial pays it and
-    /// later empty resolves answer immediately.
-    async fn wait_ready(&self, timeout: Duration) {
+    /// that is in fact on the network. Observations of OTHER peers (the dialing node's own echo
+    /// included) wake this to re-check the table and keep waiting; only an observation of `node`
+    /// releases it. Running the bound out marks the instance warm: a full browse window has passed,
+    /// so later empty resolves answer at once. A wait released early by the target does not mark it.
+    async fn wait_ready(&self, node: NodeId, timeout: Duration) {
         if self.warmed.load(Ordering::Acquire) {
             return;
         }
-        let _ = tokio::time::timeout(timeout, self.observed.notified()).await;
-        self.warmed.store(true, Ordering::Release);
+        // Subscribe before the first table check: a bump that lands after the check still advances
+        // this receiver, so an observation between the check and the await is not lost.
+        let mut observations = self.observations.subscribe();
+        if self.known(node) {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                self.warmed.store(true, Ordering::Release);
+                return;
+            }
+            match tokio::time::timeout(remaining, observations.changed()).await {
+                Ok(Ok(())) if self.known(node) => return,
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return,
+                Err(_) => {
+                    self.warmed.store(true, Ordering::Release);
+                    return;
+                }
+            }
+        }
     }
 }
 
-/// Record a browse observation into the shared table, keyed by the peer's parsed [`NodeId`], and wake
-/// any readiness wait: a parsed observation proves the browse is live, including a peer expiring.
+/// Record a browse observation into the shared table, keyed by the peer's parsed [`NodeId`], then
+/// bump the observation stream so a readiness wait re-checks its target.
 ///
 /// The peer's instance name is a theia [`NodeId`] string; anything that does not parse (a foreign
 /// service instance sharing the name) is ignored rather than erroring. An expired peer (no addresses)
-/// is dropped from the table so a stale address is never resolved.
-fn record(peers: &Peers, observed: &Notify, peer_id: &str, peer: &Peer) {
+/// is dropped from the table so a stale address is never resolved. The bump follows the table update,
+/// so a wait woken by it always re-checks a state that already includes this observation.
+fn record(peers: &Peers, observations: &watch::Sender<()>, peer_id: &str, peer: &Peer) {
     let Ok(node) = peer_id.parse::<NodeId>() else {
         tracing::trace!(peer_id, "ignoring non-theia mDNS instance");
         return;
@@ -185,9 +221,9 @@ fn record(peers: &Peers, observed: &Notify, peer_id: &str, peer: &Peer) {
     let Ok(mut peers) = peers.lock() else {
         return;
     };
-    observed.notify_one();
     if peer.is_expiry() {
         peers.remove(&node);
+        observations.send_replace(());
         return;
     }
     // Bound the cache: refuse a NEW entry past the cap so an on-LAN flood of distinct fake NodeIds cannot
@@ -202,6 +238,7 @@ fn record(peers: &Peers, observed: &Notify, peer_id: &str, peer: &Peer) {
         .collect::<Vec<_>>();
     tracing::debug!(node = %node.short(), count = addrs.len(), "discovered peer over mDNS");
     peers.insert(node, addrs);
+    observations.send_replace(());
 }
 
 /// The one port a set of local addresses shares, or an error if they disagree or the set is empty.
