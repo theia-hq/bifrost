@@ -1,5 +1,14 @@
+use core::time::Duration;
+
 use bifrost_core::{Addr, Discovery, Error, NodeId};
 use bifrost_transport::Transport;
+
+/// How long a dial waits for discovery readiness before treating an empty resolve as final.
+///
+/// A background source (mDNS) sends its first query on its cadence, about a second after
+/// construction, so a resolve in the first milliseconds misses a peer that is on the network. This
+/// covers one query-response cycle with margin; a source that answers sooner ends the wait early.
+const DISCOVERY_READY_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// A composed endpoint: a [`Transport`] paired with a [`Discovery`].
 ///
@@ -31,8 +40,17 @@ impl<T: Transport, D: Discovery> Node<T, D> {
     }
 
     /// Dial a peer by identity: resolve hints via discovery, then establish a session.
+    ///
+    /// An empty resolve is not final. Before concluding that nothing is known, the dial waits a
+    /// bounded span for the discovery to become ready and resolves once more, so a background
+    /// source that has not answered yet still gets its chance. A resolve that already yielded hints
+    /// dials at once, and a source with nothing to wait for returns immediately.
     pub async fn connect(&self, node: NodeId) -> Result<T::Session, Error> {
-        let hints = self.discovery.resolve(node).await?;
+        let mut hints = self.discovery.resolve(node).await?;
+        if hints.is_empty() {
+            self.discovery.wait_ready(DISCOVERY_READY_TIMEOUT).await;
+            hints = self.discovery.resolve(node).await?;
+        }
         self.transport.connect(Addr { node, hints }).await
     }
 

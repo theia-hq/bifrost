@@ -1,5 +1,7 @@
 use core::net::SocketAddr;
+use core::time::Duration;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::{Error, NodeId};
 
@@ -14,6 +16,18 @@ use crate::{Error, NodeId};
 pub trait Discovery {
     /// Resolve an identity to address hints. An empty result means "no hints, let the transport try".
     async fn resolve(&self, node: NodeId) -> Result<Vec<SocketAddr>, Error>;
+
+    /// Wait until this source can be expected to answer, bounded by `timeout`.
+    ///
+    /// A source that learns hints in the background (mDNS) may not have completed its first cycle
+    /// when a dial resolves immediately after construction, so an empty resolve can be a timing
+    /// artifact rather than a real absence. A dial that resolved empty calls this before treating
+    /// the result as final, then resolves once more. An implementation returns as soon as it can
+    /// answer, so a source with something to give does not pay the whole bound; the default is a
+    /// no-op, since a fixed table or a transport-internal resolver is ready by construction.
+    async fn wait_ready(&self, timeout: Duration) {
+        let _ = timeout;
+    }
 }
 
 /// Discovery for transports that resolve internally (iroh, mem): yields no external hints.
@@ -80,5 +94,16 @@ impl<P: Discovery, S: Discovery> Discovery for Layered<P, S> {
             }
         }
         Ok(hints)
+    }
+
+    /// Both sources wait, in resolve order, sharing the caller's bound: a source that answers at
+    /// once (the default, a fixed table) consumes none of it, so the common static-over-learned
+    /// composition spends the whole bound on the learned source.
+    async fn wait_ready(&self, timeout: Duration) {
+        let start = Instant::now();
+        self.primary.wait_ready(timeout).await;
+        self.secondary
+            .wait_ready(timeout.saturating_sub(start.elapsed()))
+            .await;
     }
 }
