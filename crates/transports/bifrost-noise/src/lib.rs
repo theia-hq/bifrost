@@ -66,6 +66,9 @@
 //! the Noise reader, with no fallback and no downgrade. A future protocol version is a new tag and
 //! prologue; both sides change together.
 //!
+//! The wrapper spawns its two frame pumps, so `connect`, `accept`, and every session operation must
+//! run inside a Tokio runtime.
+//!
 //! # What the tests prove, and what they cannot
 //!
 //! The suite exercises a byte-carrying inner and proves: byte parity and a clean drain over the
@@ -92,7 +95,6 @@ use bifrost_transport::{Announced, Sealed, SecurityProfile, Session, Transport};
 use ed25519_dalek::SigningKey;
 pub use error::NoiseError;
 pub use session::{NoiseSession, StreamRead, StreamWrite};
-use snow::params::NoiseParams;
 use tokio::sync::Semaphore;
 use tokio::time;
 use zeroize::Zeroize;
@@ -151,9 +153,6 @@ where
     /// [`NodeId::from_ed25519_secret`] of `seed`: one address carries one identity, and a wrapper
     /// whose identity differed from its inner could not be routed to.
     pub fn new(inner: T, seed: [u8; NodeId::KEY_LEN]) -> Result<Self, NoiseError> {
-        wire::PATTERN
-            .parse::<NoiseParams>()
-            .map_err(|_| NoiseError::UnsupportedPattern)?;
         let node = NodeId::from_ed25519_secret(&seed);
         let inner_node = inner.node_id();
         if node != inner_node {

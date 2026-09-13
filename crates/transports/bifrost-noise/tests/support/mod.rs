@@ -364,6 +364,8 @@ pub enum Sabotage {
     OversizedPrefix,
     /// One ciphertext sent twice.
     ReplayedFrame,
+    /// Nine 4088-byte `DATA` frames (past the 8-chunk stream queue), then a fatal frame.
+    SaturateThenFatal,
 }
 
 /// A peer that blows up the frame layer after an honest handshake.
@@ -448,6 +450,18 @@ impl Transport for Saboteur {
                     .write_all(&sealed)
                     .await
                     .map_err(|err| Error::Connect(Box::new(err)))?;
+            }
+            Sabotage::SaturateThenFatal => {
+                for _ in 0..9 {
+                    let data = frame(bifrost_noise::wire::FRAME_DATA, 0, &[0x5a; 4088]);
+                    seal_and_send(&mut write, &mut state, &data)
+                        .await
+                        .map_err(Error::Connect)?;
+                }
+                let bad = frame(bifrost_noise::wire::FRAME_DATA, 2, &[]);
+                seal_and_send(&mut write, &mut state, &bad)
+                    .await
+                    .map_err(Error::Connect)?;
             }
         }
         write

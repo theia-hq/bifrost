@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Context, Poll};
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use bifrost_core::{ConnInfo, Error, NodeId};
 use bifrost_transport::{Sealed, Session};
@@ -84,9 +84,15 @@ struct Inbound {
     life: Arc<StreamLife>,
 }
 
-/// One live stream's lifetime: the last half to drop releases the session's slot.
+/// One live stream's lifetime: the last half to drop releases the session's slot, and the sticky
+/// `torn` flag records that the session died under it.
+///
+/// The flag is what makes a teardown fail closed even when a per-stream queue is full and the
+/// reset chunk cannot be enqueued: `StreamRead` maps the queue's end to `ConnectionReset` when the
+/// flag is set, so a truncated read never presents as a clean EOF.
 pub(crate) struct StreamLife {
     live: Arc<AtomicU32>,
+    torn: AtomicBool,
 }
 
 impl StreamLife {
@@ -99,7 +105,18 @@ impl StreamLife {
         }
         Some(Arc::new(Self {
             live: Arc::clone(live),
+            torn: AtomicBool::new(false),
         }))
+    }
+
+    /// Mark the stream torn: its session is gone, so its read ends with a reset, not a clean EOF.
+    pub(crate) fn tear(&self) {
+        self.torn.store(true, Ordering::Release);
+    }
+
+    /// Whether the session died under this stream.
+    pub(crate) fn is_torn(&self) -> bool {
+        self.torn.load(Ordering::Acquire)
     }
 }
 
@@ -107,6 +124,15 @@ impl Drop for StreamLife {
     fn drop(&mut self) {
         self.live.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// One live route: where a stream's chunks go, and a weak handle to its lifetime for the teardown
+/// marker. The handle is weak so the route never keeps a closed stream's slot claimed; only the
+/// stream's own halves (and a queued `Inbound`) own the `StreamLife`.
+#[derive(Clone)]
+struct Route {
+    tx: mpsc::Sender<Chunk>,
+    life: Weak<StreamLife>,
 }
 
 /// The session's death signal.
@@ -182,7 +208,7 @@ pub struct NoiseSession<S: Session> {
     peer: NodeId,
     frames: mpsc::Sender<Outbound>,
     incoming: tokio::sync::Mutex<mpsc::Receiver<Inbound>>,
-    routes: Arc<StdMutex<HashMap<u32, mpsc::Sender<Chunk>>>>,
+    routes: Arc<StdMutex<HashMap<u32, Route>>>,
     live: Arc<AtomicU32>,
     exit: Arc<Exit>,
     writer: AbortHandle,
@@ -279,7 +305,13 @@ impl<S: Session> Session for NoiseSession<S> {
         let (tx, rx) = mpsc::channel(STREAM_QUEUE);
         {
             let mut routes = self.routes.lock().unwrap_or_else(|p| p.into_inner());
-            routes.insert(id, tx);
+            routes.insert(
+                id,
+                Route {
+                    tx,
+                    life: Arc::downgrade(&life),
+                },
+            );
         }
         if self.frames.send(Outbound::Open(id)).await.is_err() {
             let mut routes = self.routes.lock().unwrap_or_else(|p| p.into_inner());
@@ -323,7 +355,7 @@ impl<S: Session> Session for NoiseSession<S> {
 pub struct StreamWrite {
     id: u32,
     frames: mpsc::Sender<Outbound>,
-    _life: Arc<StreamLife>,
+    life: Arc<StreamLife>,
     permit: Option<Reserve>,
     pending: Option<Outbound>,
     finished: bool,
@@ -341,7 +373,7 @@ impl StreamWrite {
         Self {
             id,
             frames,
-            _life: life,
+            life,
             permit: None,
             pending: None,
             finished: false,
@@ -349,10 +381,15 @@ impl StreamWrite {
     }
 
     /// Queue one frame, waiting for queue capacity without holding the frame across polls.
+    ///
+    /// The frame replaces any frame left by a cancelled poll. `AsyncWrite` says a `Pending` write
+    /// wrote nothing, so a later call with different bytes is owed those bytes; keeping the stale
+    /// frame would silently substitute it for the caller's new one.
     fn poll_send(&mut self, cx: &mut Context<'_>, frame: Outbound) -> Poll<io::Result<()>> {
-        if self.pending.is_none() {
-            self.pending = Some(frame);
+        if self.life.is_torn() {
+            return Poll::Ready(Err(closed("session torn down")));
         }
+        self.pending = Some(frame);
         loop {
             if let Some(reserve) = self.permit.as_mut() {
                 match reserve.as_mut().poll(cx) {
@@ -382,6 +419,8 @@ impl AsyncWrite for StreamWrite {
     ) -> Poll<io::Result<usize>> {
         let this = self.as_mut().get_mut();
         if this.finished {
+            // Stricter than the `Ok(0)` convention: a write after this half's own shutdown is an
+            // application bug, and the peer has already seen the `FIN`.
             return Poll::Ready(Err(closed("stream finished")));
         }
         if buf.is_empty() {
@@ -419,7 +458,8 @@ impl AsyncWrite for StreamWrite {
 
 impl Drop for StreamWrite {
     fn drop(&mut self) {
-        if !self.finished {
+        // A torn session has already reset every live stream; a reset frame would be noise.
+        if !self.finished && !self.life.is_torn() {
             let _ = self.frames.try_send(Outbound::Reset(self.id));
         }
     }
@@ -430,7 +470,7 @@ impl Drop for StreamWrite {
 /// A `FIN` reads as a clean end; a `RESET` reads as [`io::ErrorKind::ConnectionReset`].
 pub struct StreamRead {
     rx: mpsc::Receiver<Chunk>,
-    _life: Arc<StreamLife>,
+    life: Arc<StreamLife>,
     pending: Option<(Vec<u8>, usize)>,
 }
 
@@ -438,7 +478,7 @@ impl StreamRead {
     pub(crate) fn new(rx: mpsc::Receiver<Chunk>, life: Arc<StreamLife>) -> Self {
         Self {
             rx,
-            _life: life,
+            life,
             pending: None,
         }
     }
@@ -469,11 +509,16 @@ impl AsyncRead for StreamRead {
                 }
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Some(Chunk::Reset)) => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "stream reset by peer",
-            ))),
-            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Ready(Some(Chunk::Reset)) => Poll::Ready(Err(torn())),
+            // The queue ended. A clean end only if the whole session ended cleanly; a session
+            // teardown marks the stream torn, so a truncated read never presents as EOF.
+            Poll::Ready(None) => {
+                if this.life.is_torn() {
+                    Poll::Ready(Err(torn()))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -531,7 +576,7 @@ async fn write_frame<W: AsyncWrite + Unpin>(
 /// Where an inbound frame goes: new streams to `incoming`, data to a stream's route, a dead
 /// stream's `RESET` back out to the writer, and the concurrent open count for the cap.
 struct Dispatch {
-    routes: Arc<StdMutex<HashMap<u32, mpsc::Sender<Chunk>>>>,
+    routes: Arc<StdMutex<HashMap<u32, Route>>>,
     incoming: mpsc::Sender<Inbound>,
     frames: mpsc::Sender<Outbound>,
     live: Arc<AtomicU32>,
@@ -599,7 +644,15 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let (tx, rx) = mpsc::channel(STREAM_QUEUE);
                 let duplicate = {
                     let mut routes = routes.lock().unwrap_or_else(|p| p.into_inner());
-                    routes.insert(id, tx).is_some()
+                    routes
+                        .insert(
+                            id,
+                            Route {
+                                tx,
+                                life: Arc::downgrade(&life),
+                            },
+                        )
+                        .is_some()
                 };
                 if duplicate {
                     fatal = true;
@@ -614,12 +667,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     let routes = routes.lock().unwrap_or_else(|p| p.into_inner());
                     routes.get(&id).cloned()
                 };
-                let Some(tx) = route else {
+                let Some(route) = route else {
                     // Data for a stream that was never opened or is already closed.
                     fatal = true;
                     break;
                 };
-                if tx.send(Chunk::Data(payload.to_vec())).await.is_err() {
+                if route.tx.send(Chunk::Data(payload.to_vec())).await.is_err() {
                     // The local reader is gone; tell the peer this stream is dead.
                     {
                         let mut routes = routes.lock().unwrap_or_else(|p| p.into_inner());
@@ -639,8 +692,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     let mut routes = routes.lock().unwrap_or_else(|p| p.into_inner());
                     routes.remove(&id)
                 };
-                if let Some(tx) = route {
-                    let _ = tx.send(Chunk::Reset).await;
+                if let Some(route) = route {
+                    let _ = route.tx.send(Chunk::Reset).await;
                 }
             }
             _ => {
@@ -653,13 +706,17 @@ async fn read_loop<R: AsyncRead + Unpin>(
     if fatal {
         abort_writer.abort();
     }
-    // The session is over. Fail every pending local read closed and drop the routes, so the map
-    // cannot keep a sender alive and park a reader; `accept_bi` sees `Closed` when the reader task
-    // drops its `incoming` sender. This runs for a fatal frame and for a clean inner end alike.
+    // The session is over. Mark every live stream torn first (sticky, so a full queue cannot lose
+    // it), then best-effort enqueue a reset and drop the routes; `accept_bi` sees `Closed` when the
+    // reader task drops its `incoming` sender. This runs for a fatal frame and for a clean inner
+    // end alike.
     {
         let mut routes = routes.lock().unwrap_or_else(|p| p.into_inner());
-        for (_, tx) in routes.drain() {
-            let _ = tx.try_send(Chunk::Reset);
+        for (_, route) in routes.drain() {
+            if let Some(life) = route.life.upgrade() {
+                life.tear();
+            }
+            let _ = route.tx.try_send(Chunk::Reset);
         }
     }
     exit.close();
@@ -668,4 +725,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
 /// A closed-stream I/O error carrying its reason.
 fn closed(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, reason)
+}
+
+/// The error a reset stream or a torn session carries to its reads.
+fn torn() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionReset, "stream torn down")
 }

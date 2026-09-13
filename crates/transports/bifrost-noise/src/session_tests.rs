@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time;
 
 use crate::error::NoiseError;
-use crate::session::{Chunk, StreamLife, StreamRead, StreamWrite};
+use crate::session::{Chunk, Outbound, StreamLife, StreamRead, StreamWrite};
 use crate::{MAX_HANDSHAKES, Noise, Wrappable};
 
 /// Build a standalone stream lifetime not tied to a session, for stream-level tests.
@@ -131,6 +131,59 @@ async fn stream_write_backpressures_when_its_queue_is_full() {
     let _ = rx.recv().await.expect("the first frame is queued");
     let resumed = time::timeout(Duration::from_secs(1), write.write(&[0u8; 4])).await;
     assert!(resumed.is_ok(), "draining the queue wakes the write");
+}
+
+/// A torn stream reads as a reset at the end of its queue, never as a clean EOF, even when the
+/// queue's close is the only signal that arrived.
+#[tokio::test]
+async fn torn_stream_reads_reset_not_eof() {
+    let life = standalone_life();
+    let (tx, rx) = mpsc::channel(1);
+    let mut read = StreamRead::new(rx, Arc::clone(&life));
+    life.tear();
+    drop(tx);
+    let err = read.read(&mut [0u8; 1]).await.expect_err("a torn read");
+    assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+}
+
+/// A cancelled write leaves a pending frame; the next call's bytes replace it rather than being
+/// silently dropped behind it.
+#[tokio::test]
+async fn cancelled_write_replaces_the_stale_frame() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut write = StreamWrite::new(0, tx, standalone_life());
+
+    let first = write.write(&[1u8; 128]).await.expect("the first frame");
+    assert_eq!(first, 128);
+    let cancelled = time::timeout(Duration::from_millis(5), write.write(&[2u8; 3])).await;
+    assert!(cancelled.is_err(), "the second write parks");
+
+    match rx.recv().await.expect("the first frame") {
+        Outbound::Data(_, payload) => assert_eq!(payload.as_slice(), [1u8; 128]),
+        _ => panic!("expected a data frame"),
+    }
+    write
+        .write_all(&[3u8; 4])
+        .await
+        .expect("the replacement write is accepted");
+    match rx.recv().await.expect("the second frame") {
+        Outbound::Data(_, payload) => assert_eq!(payload.as_slice(), [3u8; 4]),
+        _ => panic!("expected a data frame"),
+    }
+}
+
+/// A second shutdown is a no-op: one `FIN` is queued, not two.
+#[tokio::test]
+async fn shutdown_twice_queues_one_fin() {
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut write = StreamWrite::new(0, tx, standalone_life());
+    write.shutdown().await.expect("the first shutdown");
+    write
+        .shutdown()
+        .await
+        .expect("the second shutdown is a no-op");
+    assert!(matches!(rx.recv().await, Some(Outbound::Fin(0))));
+    assert!(rx.try_recv().is_err(), "only one end frame is queued");
 }
 
 /// Reads split across buffers, report a peer reset as a connection reset, and end cleanly.
