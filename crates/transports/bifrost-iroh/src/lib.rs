@@ -5,12 +5,14 @@
 //! streams onto the [`Transport`] and [`Session`] traits, and keeps iroh's own address type from
 //! leaking past this boundary.
 
-use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, ConnInfo, CryptoKind, Error, Path};
 pub use bifrost_transport::{Sealed, Session, Transport};
-use iroh::endpoint::{Connection, PathList, RecvStream, SendStream, presets};
+use iroh::endpoint::{
+    Connection, PathList, PortmapperConfig, RecvStream, RelayMode, SendStream, presets,
+};
 use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, TransportAddr};
 
 /// The ALPN that identifies the Bifrost substrate protocol during the handshake.
@@ -38,11 +40,29 @@ impl Endpoint {
         .await
     }
 
-    /// Bind a local-only endpoint (no discovery, no relays) for same-host and LAN use.
+    /// Bind a local-only endpoint with a FRESH identity, for same-process tests (the conformance
+    /// suite): no discovery, no relays, no fixed address. A node that must keep one address across
+    /// runs binds [`bind_local_with_secret`](Self::bind_local_with_secret) instead.
     pub async fn bind_local() -> Result<Self, BindError> {
         Self::finish(
             iroh::Endpoint::builder(presets::Minimal),
             SecretKey::generate(),
+        )
+        .await
+    }
+
+    /// Bind a local-only endpoint with a PERSISTED identity: no n0 discovery, no relays, no
+    /// portmapper, on an OS-assigned port. Reachable only by direct address hints or the local
+    /// discovery composed above, and the same key yields the same [`NodeId`] across runs.
+    pub async fn bind_local_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
+        Self::finish(
+            iroh::Endpoint::builder(presets::Minimal)
+                // `presets::Minimal` leaves both of these at the iroh defaults (relays on, portmapper
+                // enabled). Pin them off explicitly so "no NAT traversal" is configuration, not an
+                // accident of an empty relay map or a future preset change.
+                .relay_mode(RelayMode::Disabled)
+                .portmapper_config(PortmapperConfig::Disabled),
+            SecretKey::from_bytes(&secret),
         )
         .await
     }
@@ -192,11 +212,15 @@ fn direct_addr(addr: &TransportAddr) -> Option<SocketAddr> {
     }
 }
 
-/// Rewrite an unspecified bind address (`0.0.0.0`) to loopback so it is directly dialable locally.
+/// Rewrite an unspecified bind address (`0.0.0.0` / `[::]`) to loopback so it is directly dialable
+/// locally and never handed out as a wildcard hint.
 fn loopback_for_unspecified(socket: SocketAddr) -> SocketAddr {
     match socket.ip() {
         IpAddr::V4(v4) if v4.is_unspecified() => {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), socket.port())
+        }
+        IpAddr::V6(v6) if v6.is_unspecified() => {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), socket.port())
         }
         _ => socket,
     }
@@ -224,4 +248,23 @@ pub enum BindError {
     /// The requested fixed bind address was not a valid socket address.
     #[error("invalid bind address")]
     Addr(#[from] iroh::endpoint::InvalidSocketAddr),
+}
+
+#[cfg(test)]
+mod tests {
+    /// The "no NAT traversal" claim is a mechanism, not an absence: iroh exposes no public relay or
+    /// portmapper introspection, so the pin is the constructor's two explicit disable calls and this
+    /// test reads them off the source. Removing a pin fails here, not at the next iroh upgrade.
+    #[test]
+    fn the_local_constructor_pins_relay_and_portmapper_off() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains(".relay_mode(RelayMode::Disabled)"),
+            "bind_local_with_secret must pin RelayMode::Disabled (no relay fallback)"
+        );
+        assert!(
+            source.contains(".portmapper_config(PortmapperConfig::Disabled)"),
+            "bind_local_with_secret must pin PortmapperConfig::Disabled (no gateway probing)"
+        );
+    }
 }
