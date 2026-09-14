@@ -79,18 +79,19 @@ const MAX_PEERS: usize = 1024;
 impl MdnsDiscovery {
     /// Start advertising `node` at its local `addrs` and browsing the LAN for other theia nodes.
     ///
-    /// `addrs` are the sockets this node is bound to (the addresses a caller has after bind). Every address must
-    /// share one port: mDNS advertises a service instance as one port plus a set of IPs, so a single
-    /// call maps one port to many addresses. Peers are learned in the background; a freshly started
-    /// node may need a discovery cycle before [`resolve`](Self::resolve) sees a given peer.
+    /// `addrs` are the sockets this node is bound to (the addresses a caller has after bind). mDNS
+    /// advertises a service instance as ONE port plus a set of IPs, so a bind on several ports (a
+    /// transport that binds v4 and v6 sockets on different ephemeral ports) cannot be advertised
+    /// whole; [`Advertised::of`] picks the port to advertise. Peers are learned in the background; a
+    /// freshly started node may need a discovery cycle before [`resolve`](Self::resolve) sees a given
+    /// peer.
     ///
     /// Must be called from within a Tokio runtime: the mDNS service spawns onto the current handle.
     pub fn advertise(
         node: NodeId,
         addrs: impl IntoIterator<Item = SocketAddr>,
     ) -> Result<Self, MdnsError> {
-        let addrs = addrs.into_iter().collect::<Vec<_>>();
-        let port = single_port(&addrs)?;
+        let Advertised { port, addrs } = Advertised::of(addrs)?;
         // Pin multicast egress to the interfaces we advertise on. Without this the kernel picks the
         // egress interface off the routing table, which can miss a multi-homed peer (and never loops
         // a loopback-only advertisement back to a same-host browser). One entry per bound IPv4.
@@ -101,7 +102,7 @@ impl MdnsDiscovery {
                 IpAddr::V6(_) => None,
             })
             .collect::<Vec<_>>();
-        let ips = addrs.into_iter().map(|addr| addr.ip());
+        let ips = addrs.iter().map(|addr| addr.ip());
 
         let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
         let sink = Arc::clone(&peers);
@@ -241,17 +242,46 @@ fn record(peers: &Peers, observations: &watch::Sender<()>, peer_id: &str, peer: 
     observations.send_replace(());
 }
 
-/// The one port a set of local addresses shares, or an error if they disagree or the set is empty.
-///
-/// mDNS advertises a service instance as a single port with a set of IPs, so every bound address must
-/// share one port. Nodes bind one listener across interfaces, so this holds in practice; the check
-/// makes a violation a clear error instead of silently advertising the wrong port.
-fn single_port(addrs: &[SocketAddr]) -> Result<u16, MdnsError> {
-    let mut ports = addrs.iter().map(SocketAddr::port);
-    let port = ports.next().ok_or(MdnsError::NoAddrs)?;
-    match ports.all(|other| other == port) {
-        true => Ok(port),
-        false => Err(MdnsError::MixedPorts),
+/// The addresses one mDNS advertisement can carry: mDNS names a service instance as ONE port plus a
+/// set of addresses, so a bind on several ports cannot be advertised whole and must pick a port.
+struct Advertised {
+    /// The port every advertised address is bound on.
+    port: u16,
+    /// The bound addresses on that port, at least one.
+    addrs: Vec<SocketAddr>,
+}
+
+impl Advertised {
+    /// Choose what to advertise from a bind's local addresses.
+    ///
+    /// A single-port bind (the common shape: one listener across interfaces) advertises every address
+    /// exactly as before, whatever family. A multi-port bind (iroh binds a v4 and a v6 socket on
+    /// different ephemeral ports) advertises the port of the first IPv4 socket in bind order: the
+    /// family mDNS queries egress on here, and the address a peer dials. Addresses on other ports are
+    /// left out rather than folded into a port that cannot carry them. A multi-port bind with no IPv4
+    /// socket has nothing a peer on that query path could dial, so it is a named error, never a
+    /// partial or guessed advertisement.
+    fn of(addrs: impl IntoIterator<Item = SocketAddr>) -> Result<Self, MdnsError> {
+        let addrs: Vec<SocketAddr> = addrs.into_iter().collect();
+        let Some(first) = addrs.first() else {
+            return Err(MdnsError::NoAddrs);
+        };
+        if addrs.iter().all(|addr| addr.port() == first.port()) {
+            return Ok(Self {
+                port: first.port(),
+                addrs,
+            });
+        }
+        let port = addrs
+            .iter()
+            .find(|addr| addr.is_ipv4())
+            .map(SocketAddr::port)
+            .ok_or(MdnsError::NoV4Addrs)?;
+        let addrs = addrs
+            .into_iter()
+            .filter(|addr| addr.port() == port)
+            .collect();
+        Ok(Self { port, addrs })
     }
 }
 
@@ -261,9 +291,10 @@ pub enum MdnsError {
     /// No local addresses were supplied to advertise.
     #[error("no local addresses to advertise")]
     NoAddrs,
-    /// The local addresses did not share a single port.
-    #[error("local addresses span multiple ports")]
-    MixedPorts,
+    /// A multi-port bind held no IPv4 socket, so the one port an advertisement may name would not be
+    /// dialable by a peer on this host's IPv4 mDNS query path.
+    #[error("no IPv4 address to advertise on a multi-port bind")]
+    NoV4Addrs,
     /// The mDNS service could not be spawned (socket bind or service-name error).
     ///
     /// Boxed because `SpawnError` is large (>128 bytes); keeping it inline would bloat every
