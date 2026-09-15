@@ -45,7 +45,7 @@ impl Endpoint {
 
     /// Bind with a persisted identity for DIALING ONLY: n0 resolution and relays, no address record.
     /// A dialer is not reachable at its key; publishing here overwrites whatever process IS serving
-    /// that key (swoosh 0.9.0 F1: a short-lived command wrote its own relay, exited, and dialers
+    /// that key (the 0.9.0 F1 finding: a short-lived command wrote its own relay, exited, and dialers
     /// followed a dead relay path). The N0 preset minus its `PkarrPublisher`.
     pub async fn bind_dialing_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
         Self::finish(
