@@ -2,6 +2,19 @@
 
 All notable changes to bifrost, newest first.
 
+## v0.1.1
+
+The serving bind publishes the node's address record; the dialing bind resolves without writing one.
+
+### New
+- **`Endpoint::bind_dialing_with_secret`.** The dialing bind: n0 resolution and relays, no address record, for a process that does not accept connections under the key.
+
+### Changed
+- **BREAKING: `bind_with_secret` is renamed `bind_reachable_with_secret`.** The name now states the write: it publishes this endpoint's address record, so only the process that accepts connections under the key calls it.
+
+### Fixed
+- **A dialing bind no longer overwrites a serving node's address record.** It registers the n0 resolvers with no pkarr publisher, so a short-lived dial under a key another process is serving cannot send peers to its own dead relay.
+
 ## v0.1.0
 
 The first release: reach a peer by public key over iroh, an in-process backend, or a from-scratch QUIC,
