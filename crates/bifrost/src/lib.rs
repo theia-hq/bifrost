@@ -1,4 +1,4 @@
-//! Bifrost: the pubkey-addressed overlay substrate.
+//! Bifrost: open a byte-stream to a peer identified by its public key, over any transport.
 //!
 //! This umbrella is what applications depend on. It owns [`Node`], the composition root an app holds,
 //! and re-exports the transport + discovery interface and the [`wire`], so an app speaks only
