@@ -58,7 +58,9 @@ async fn bind_with_secret_matches_the_iroh_node_id() {
     let quirk = Endpoint::bind_with_secret(secret)
         .await
         .expect("bind quirk");
-    let iroh = bifrost_iroh::Endpoint::bind_with_secret(secret)
+    // The dialing constructor: this test registers nothing, and a dial bind must not write a record
+    // (F1, 0.9.1).
+    let iroh = bifrost_iroh::Endpoint::bind_dialing_with_secret(secret)
         .await
         .expect("bind iroh");
 

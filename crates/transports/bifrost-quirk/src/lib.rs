@@ -25,10 +25,11 @@ impl Endpoint {
     }
 
     /// Bind with a persisted identity, from a raw 32-byte ed25519 secret, so the [`NodeId`] is stable
-    /// across runs. Mirrors [`bifrost_iroh::Endpoint::bind_with_secret`]: both derive the ed25519
-    /// verifying key from the same secret, so the same key yields the same [`NodeId`] over either
-    /// transport. That identical-identity-across-transports property is what the transport-swap demo
-    /// rests on.
+    /// across runs. Mirrors the iroh persisted-secret constructors (`bind_reachable_with_secret` for a
+    /// serving bind, `bind_dialing_with_secret` for a dialing one): each derives the ed25519 verifying
+    /// key from the same secret, so the same key yields the same [`NodeId`] over either transport. quirk
+    /// has no address registry to publish to, so one constructor covers both roles here. That
+    /// identical-identity-across-transports property is what the transport-swap demo rests on.
     pub async fn bind_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
         Ok(Self {
             inner: quirk::Endpoint::bind_with_secret(secret)

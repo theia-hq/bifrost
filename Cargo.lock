@@ -204,6 +204,7 @@ dependencies = [
  "bifrost-transport",
  "iroh",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
