@@ -56,6 +56,8 @@ interfaces runs unchanged over any of them.
 | `bifrost-conformance` | transport-agnostic test suite every backend must pass               |
 | `bifrost-wire`        | one-shot blob transfer over a stream, BLAKE3-verified end to end    |
 
+This page describes the default branch.
+
 ## Things to know
 
 - bifrost establishes the connection and hands you a byte-stream. It says nothing about what those bytes
