@@ -3,8 +3,9 @@
 # `swoosh`, `sshh`), and a prime library must not allude to a consumer CLI flag
 # (`--for`/`--public`/`--peer`/`--authkey`/`--to`). Pure sh + grep, no toolchain.
 # The check lives in scripts/layering-gate.sh; see notes/reviews/layering-leak-audit.md.
-# The same job runs scripts/sealed-gate.sh, which fails a `type Security = Sealed` outside the
-# audited transport set (see that script's header for the rule and the escape hatch).
+# The same job runs scripts/sealed-gate.sh, which fails a proof-bearing profile
+# (`Sealed`/`InProcess`) outside the reviewed per-crate table (see that script's header for the
+# rule and the escape hatch), plus its pass/fail fixture so the gate's own fail path cannot rot.
 name: layering-gate
 on:
   push:
@@ -20,3 +21,5 @@ jobs:
         run: sh scripts/layering-gate.sh .
       - name: sealed gate
         run: sh scripts/sealed-gate.sh .
+      - name: sealed gate fixture
+        run: sh scripts/tests/sealed-gate.sh

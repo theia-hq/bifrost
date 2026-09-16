@@ -163,3 +163,21 @@ enum MemError {
     #[error("peer not reachable in this process")]
     Unreachable,
 }
+
+#[cfg(test)]
+mod tests {
+    use bifrost_transport::SecurityProfile as _;
+
+    use super::{InProcess, MemTransport, Transport};
+
+    /// Per-backend profile pin (delib-72): the declared profile is part of the reviewed record, so an
+    /// accidental flip fails here rather than at the next review. `InProcess` is the profile the
+    /// `bifrost-mem` entry in `scripts/sealed-gate.sh` authorizes (test-only backend, no wire).
+    #[test]
+    fn the_declared_profile_is_pinned_to_in_process() {
+        assert_eq!(
+            <MemTransport as Transport>::Security::SECURITY,
+            InProcess::SECURITY
+        );
+    }
+}

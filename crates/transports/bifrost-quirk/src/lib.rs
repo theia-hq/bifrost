@@ -193,3 +193,21 @@ pub struct IdentityMismatch {
     dialed: NodeId,
     reached: NodeId,
 }
+
+#[cfg(test)]
+mod tests {
+    use bifrost_transport::SecurityProfile as _;
+
+    use super::{Announced, Endpoint, Transport};
+
+    /// Per-backend profile pin (delib-72): the declared profile is part of the reviewed record, so a
+    /// silent promotion to a proof-bearing profile fails here rather than at the next review.
+    /// `Announced` is this crate's honest profile (self-announced identity, plaintext channel).
+    #[test]
+    fn the_declared_profile_is_pinned_to_announced() {
+        assert_eq!(
+            <Endpoint as Transport>::Security::SECURITY,
+            Announced::SECURITY
+        );
+    }
+}
