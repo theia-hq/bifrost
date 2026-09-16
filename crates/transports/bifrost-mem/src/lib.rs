@@ -9,6 +9,7 @@
 //! self-discovering transport: `connect` resolves the peer with no external `Discovery` object,
 //! exactly as the design intends.
 
+use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -80,6 +81,12 @@ impl Transport for MemTransport {
 
     fn local_addr(&self) -> Addr {
         Addr::from_node(self.node)
+    }
+
+    /// None: an in-process transport binds no socket, so there is no bind truth to report and
+    /// nothing about it is publishable on a network.
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        Vec::new()
     }
 
     async fn connect(&self, addr: Addr) -> Result<MemSession, Error> {

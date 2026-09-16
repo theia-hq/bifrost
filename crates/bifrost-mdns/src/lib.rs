@@ -11,6 +11,12 @@
 //! reads that table: a hit returns the peer's LAN addresses, a miss returns empty so the caller falls
 //! through to whatever discovery it is layered with (an explicit hint, or the transport's own).
 //!
+//! What it advertises comes from bind truth: the caller hands
+//! [`advertise`](MdnsDiscovery::advertise) the sockets its transport actually bound, and this crate
+//! decides what of that is publishable, expanding a wildcard bind into this host's real addresses
+//! and leaving a deliberate loopback bind exactly as it is. [`Advertising`] names what the result
+//! reaches, so a surface can report the truth rather than assume a LAN record went out.
+//!
 //! The browse learns nothing until its first query-response cycle (roughly a second out with the
 //! interactive cadence), so [`wait_ready`](Discovery::wait_ready) gives a dial a bounded wait for
 //! that cycle before a miss is treated as final.
@@ -18,16 +24,21 @@
 //! This is LAN-only by construction: multicast does not cross subnets, so WAN discovery (pkarr/DHT)
 //! is a separate mechanism layered above, not a job for this crate.
 
-use core::net::{IpAddr, SocketAddr};
+use core::net::SocketAddr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, Mutex};
 
 use bifrost_core::{Discovery, Error, NodeId};
 use swarm_discovery::{Discoverer, IpClass, Peer};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+
+mod publish;
+
+pub use publish::{Advertised, Advertising};
 
 /// The mDNS service all theia nodes advertise and browse under: `_theia._udp.local.`.
 ///
@@ -37,11 +48,12 @@ const SERVICE: &str = "theia";
 
 /// LAN discovery over mDNS: advertises this node and resolves peers heard on the local network.
 ///
-/// Construction starts advertising immediately and spawns the background browser; the returned value
-/// owns the running service and stops it when dropped. Hold it for as long as the node should be
-/// discoverable. A fresh instance can resolve nothing until its first browse cycle has run (about a
-/// second out), so [`wait_ready`](Discovery::wait_ready) is the bounded, per-peer wait a dial uses to
-/// tell a cold start from an absent peer.
+/// Construction starts the service immediately (advertising as well, where the bind gives it
+/// something to advertise) and spawns the background browser; the returned value owns the running
+/// service and stops it when dropped. Hold it for as long as the node should be discoverable. A
+/// fresh instance can resolve nothing until its first browse cycle has run (about a second out), so
+/// [`wait_ready`](Discovery::wait_ready) is the bounded, per-peer wait a dial uses to tell a cold
+/// start from an absent peer.
 pub struct MdnsDiscovery {
     /// Peers heard on the LAN, keyed by identity. Shared with the browse callback, which is the only
     /// writer; [`resolve`](Self::resolve) and [`wait_ready`](Discovery::wait_ready) are the readers. A
@@ -73,36 +85,43 @@ type Peers = Arc<Mutex<HashMap<NodeId, Vec<SocketAddr>>>>;
 /// this is generous; the cap stops an on-LAN flood of distinct fake NodeIds (which anyone can emit, no
 /// secret needed) from growing this map without bound. It bounds OUR map only; the wrapped
 /// `swarm-discovery` keeps its own unbounded map, which needs a dependency-level fix (patch, fork, or
-/// replace); see notes/reviews/2026-08-28-adversary-mdns.md.
+/// replace).
 const MAX_PEERS: usize = 1024;
 
+/// A started mDNS service: the live discovery to hold, and what its advertisement reaches.
+///
+/// The two travel together because the one call that starts the service is the only place the
+/// outcome is known: a caller that dropped [`advertising`](Self::advertising) would have to guess it
+/// again from addresses it no longer owns.
+pub struct Started {
+    /// The running discovery. Hold it for as long as the node should be discoverable; dropping it
+    /// stops the service.
+    pub discovery: MdnsDiscovery,
+    /// What the advertisement put on the wire, for a surface to read before it claims a reach.
+    pub advertising: Advertising,
+}
+
 impl MdnsDiscovery {
-    /// Start advertising `node` at its local `addrs` and browsing the LAN for other theia nodes.
+    /// Start advertising `node` at the sockets it bound, and browsing the LAN for other theia nodes.
     ///
-    /// `addrs` are the sockets this node is bound to (the addresses a caller has after bind). mDNS
-    /// advertises a service instance as ONE port plus a set of IPs, so a bind on several ports (a
-    /// transport that binds v4 and v6 sockets on different ephemeral ports) cannot be advertised
-    /// whole; [`Advertised::of`] picks the port to advertise. Peers are learned in the background; a
-    /// freshly started node may need a discovery cycle before [`resolve`](Self::resolve) sees a given
-    /// peer.
+    /// `bound` is bind truth: the sockets the node's transport is bound to, with an unspecified IP
+    /// (`0.0.0.0`, `[::]`) left as bound rather than rewritten to loopback, which is what
+    /// `bifrost::Transport::bound_sockets` reports. A wildcard expands into this host's concrete
+    /// addresses and a concrete loopback address is published as itself, and the record names one
+    /// port, the first IPv4 socket's where the bind spans several ([`Advertised`]). Nothing
+    /// publishable is not a failure: the service still browses, and
+    /// the returned [`Advertising`] says so with its cause. The one failure left is the service not
+    /// starting at all.
+    ///
+    /// Peers are learned in the background; a freshly started node may need a discovery cycle before
+    /// [`resolve`](Self::resolve) sees a given peer.
     ///
     /// Must be called from within a Tokio runtime: the mDNS service spawns onto the current handle.
     pub fn advertise(
         node: NodeId,
-        addrs: impl IntoIterator<Item = SocketAddr>,
-    ) -> Result<Self, MdnsError> {
-        let Advertised { port, addrs } = Advertised::of(addrs)?;
-        // Pin multicast egress to the interfaces we advertise on. Without this the kernel picks the
-        // egress interface off the routing table, which can miss a multi-homed peer (and never loops
-        // a loopback-only advertisement back to a same-host browser). One entry per bound IPv4.
-        let interfaces = addrs
-            .iter()
-            .filter_map(|addr| match addr.ip() {
-                IpAddr::V4(v4) => Some(v4),
-                IpAddr::V6(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let ips = addrs.iter().map(|addr| addr.ip());
+        bound: impl IntoIterator<Item = SocketAddr>,
+    ) -> Result<Started, MdnsError> {
+        let advertising = Advertising::of(bound.into_iter().collect());
 
         let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
         let sink = Arc::clone(&peers);
@@ -110,34 +129,49 @@ impl MdnsDiscovery {
         let signal = observations.clone();
         // `new_interactive` sets a human-facing cadence (tau=0.7s, phi=2.5): a person is waiting on an
         // interactive probe, so bias toward finding a peer within a second over minimizing multicast chatter.
-        let service = Discoverer::new_interactive(SERVICE.to_owned(), node.to_string())
+        let mut service = Discoverer::new_interactive(SERVICE.to_owned(), node.to_string())
             // V4Only: the dependency's IPv6 leg always egresses the default interface, sending to the
             // link-local mDNS group with scope 0. On a host without an IPv6 path that send fails per
             // query (EHOSTUNREACH, hundreds of WARN lines in minutes), and the leg runs at all only as
-            // a side effect of the v4 interface pinning above. Queries are v4-preferred regardless and
+            // a side effect of the v4 interface pinning below. Queries are v4-preferred regardless and
             // a response can still carry AAAA records, so this drops only the narrow v6-only reach for
             // a quiet, deterministic v4 path; a real v4 send failure still warns per interface.
             .with_ip_class(IpClass::V4Only)
-            .with_addrs(port, ips)
-            .with_multicast_interfaces_v4(interfaces)
-            .with_callback(move |peer_id, peer| record(&sink, &signal, peer_id, peer))
+            .with_callback(move |peer_id, peer| record(&sink, &signal, peer_id, peer));
+        // Registering no addresses is how the dependency spells browse-only: it keeps querying and
+        // reading responses, and puts no record of its own on the wire.
+        if let Some(advertised) = advertising.advertised() {
+            service = service
+                .with_addrs(
+                    advertised.port(),
+                    advertised.addrs().iter().map(SocketAddr::ip),
+                )
+                .with_multicast_interfaces_v4(advertised.egress_v4());
+        }
+        let service = service
             .spawn(&Handle::current())
             .map_err(|err| MdnsError::Spawn(Box::new(err)))?;
 
-        Ok(Self {
-            peers,
-            observations,
-            warmed: AtomicBool::new(false),
-            _service: Some(service),
+        Ok(Started {
+            discovery: Self {
+                peers,
+                observations,
+                warmed: AtomicBool::new(false),
+                _service: Some(service),
+            },
+            advertising,
         })
     }
 
     /// A discovery that advertises and resolves nothing.
     ///
-    /// The honest fallback when mDNS cannot start (multicast blocked, no local addresses): it keeps the
-    /// composed discovery type unchanged so a caller layers it exactly as a live one, and every
+    /// The honest fallback when the mDNS service cannot start at all (multicast blocked): it keeps
+    /// the composed discovery type unchanged so a caller layers it exactly as a live one, and every
     /// [`resolve`](Self::resolve) returns empty so the caller falls through to its other sources.
     /// There is nothing to warm, so [`wait_ready`](Discovery::wait_ready) returns at once.
+    ///
+    /// Having nothing to advertise is NOT this: that node still browses and still resolves, which
+    /// [`advertise`](Self::advertise) reports as [`Advertising::BrowseOnly`].
     pub fn disabled() -> Self {
         let (observations, _) = watch::channel(());
         Self {
@@ -242,50 +276,11 @@ fn record(peers: &Peers, observations: &watch::Sender<()>, peer_id: &str, peer: 
     observations.send_replace(());
 }
 
-/// The addresses one mDNS advertisement can carry: mDNS names a service instance as ONE port plus a
-/// set of addresses, so a bind on several ports cannot be advertised whole and must pick a port.
-struct Advertised {
-    /// The port every advertised address is bound on.
-    port: u16,
-    /// The bound addresses on that port, at least one.
-    addrs: Vec<SocketAddr>,
-}
-
-impl Advertised {
-    /// Choose what to advertise from a bind's local addresses.
-    ///
-    /// A single-port bind (the common shape: one listener across interfaces) advertises every address
-    /// exactly as before, whatever family. A multi-port bind (iroh binds a v4 and a v6 socket on
-    /// different ephemeral ports) advertises the port of the first IPv4 socket in bind order: the
-    /// family mDNS queries egress on here, and the address a peer dials. Addresses on other ports are
-    /// left out rather than folded into a port that cannot carry them. A multi-port bind with no IPv4
-    /// socket has nothing a peer on that query path could dial, so it is a named error, never a
-    /// partial or guessed advertisement.
-    fn of(addrs: impl IntoIterator<Item = SocketAddr>) -> Result<Self, MdnsError> {
-        let addrs: Vec<SocketAddr> = addrs.into_iter().collect();
-        let Some(first) = addrs.first() else {
-            return Err(MdnsError::NoAddrs);
-        };
-        if addrs.iter().all(|addr| addr.port() == first.port()) {
-            return Ok(Self {
-                port: first.port(),
-                addrs,
-            });
-        }
-        let port = addrs
-            .iter()
-            .find(|addr| addr.is_ipv4())
-            .map(SocketAddr::port)
-            .ok_or(MdnsError::NoV4Addrs)?;
-        let addrs = addrs
-            .into_iter()
-            .filter(|addr| addr.port() == port)
-            .collect();
-        Ok(Self { port, addrs })
-    }
-}
-
-/// Why starting mDNS discovery failed.
+/// Why an advertisement could not be made.
+///
+/// Only [`Spawn`](Self::Spawn) stops the service: the rest name an advertisement that could not be
+/// composed, which leaves the node browsing and is carried as the cause of
+/// [`Advertising::BrowseOnly`].
 #[derive(Debug, thiserror::Error)]
 pub enum MdnsError {
     /// No local addresses were supplied to advertise.
@@ -295,6 +290,10 @@ pub enum MdnsError {
     /// dialable by a peer on this host's IPv4 mDNS query path.
     #[error("no IPv4 address to advertise on a multi-port bind")]
     NoV4Addrs,
+    /// A wildcard bind had to be expanded into this host's interface addresses, and the host would
+    /// not report them.
+    #[error("read this host's interface addresses")]
+    Interfaces(#[source] io::Error),
     /// The mDNS service could not be spawned (socket bind or service-name error).
     ///
     /// Boxed because `SpawnError` is large (>128 bytes); keeping it inline would bloat every
@@ -305,3 +304,5 @@ pub enum MdnsError {
 
 #[cfg(test)]
 mod lib_tests;
+#[cfg(test)]
+mod publish_tests;

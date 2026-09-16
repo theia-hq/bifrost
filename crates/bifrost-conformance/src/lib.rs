@@ -3,7 +3,9 @@
 //! bifrost is REACH: reach a peer by key over a pluggable transport. That is its one contract, and
 //! this is the check every transport must pass. A composed [`Node`] dials the receiver by key, opens
 //! a stream, and bytes echo back byte-identical; a sender that closes right after its last write
-//! still drains; `conn_info` reports only what the transport knows. Identity is checked where a
+//! still drains; `conn_info` reports only what the transport knows; a transport that binds sockets
+//! reports them as bound, wildcard and all ([`bound_sockets_are_bind_truth`],
+//! [`wildcard_bind_is_not_rewritten`]). Identity is checked where a
 //! black-box test can: a session attributes the dialed key on both ends ([`identity_binding`]), and
 //! a dial to a fabricated key at the receiver's real address yields no session
 //! ([`wrong_key_rejected`]).
@@ -24,6 +26,8 @@
 // This crate is test scaffolding: every public function is a conformance assertion invoked from other
 // crates' tests, so `expect` is the assertion mechanism, not production error handling.
 #![allow(clippy::expect_used)]
+
+use core::net::SocketAddr;
 
 use bifrost::{Addr, Discovery, Error, Node, NodeId, Path, Session, Transport};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -271,4 +275,61 @@ where
     );
 
     sender.close().await;
+}
+
+/// A bound wire transport reports the sockets it actually bound.
+///
+/// The bind-truth contract where a black-box test can see it: a transport that owns sockets names at
+/// least one, every socket it names carries the port the OS assigned (never the `0` that was asked
+/// for), and the set agrees port-for-port with the hints `local_addr` derives from it. That last
+/// check is what catches a transport reporting a set from somewhere else entirely, since the two
+/// accessors must describe the same sockets and may differ only in how an unspecified IP is written.
+/// A socketless transport (in-process) reports none and is not run through this. Panics with a
+/// descriptive message on failure, so it reads as a test assertion.
+pub fn bound_sockets_are_bind_truth<T: Transport>(transport: &T) {
+    let bound = transport.bound_sockets();
+    assert!(
+        !bound.is_empty(),
+        "a bound wire transport names at least one socket"
+    );
+    assert!(
+        bound.iter().all(|socket| socket.port() != 0),
+        "a bound socket carries the port the OS assigned, got {bound:?}"
+    );
+
+    // Family and port, not port alone: a transport that binds a v4 and a v6 socket on the same
+    // ephemeral port would otherwise pass while reporting one family twice.
+    let mut bound_sockets = families_and_ports(&bound);
+    let mut hint_sockets = families_and_ports(&transport.local_addr().hints);
+    bound_sockets.sort_unstable();
+    hint_sockets.sort_unstable();
+    assert_eq!(
+        bound_sockets, hint_sockets,
+        "the bound sockets and the local hints describe the same sockets"
+    );
+}
+
+/// A transport bound to a wildcard address reports the unspecified IP, not loopback.
+///
+/// The case the whole accessor exists for: `local_addr` rewrites `0.0.0.0` to `127.0.0.1` so the
+/// hint is dialable here, which makes a wildcard bind indistinguishable from a deliberate loopback
+/// bind. A publisher must expand the first into the host's real addresses and must never expand the
+/// second, so bind truth has to keep the wildcard. Run it against a transport the caller bound to a
+/// wildcard; a transport bound to a fixed address has nothing to preserve. Panics with a descriptive
+/// message on failure, so it reads as a test assertion.
+pub fn wildcard_bind_is_not_rewritten<T: Transport>(transport: &T) {
+    let bound = transport.bound_sockets();
+    assert!(
+        bound.iter().any(|socket| socket.ip().is_unspecified()),
+        "a wildcard bind keeps its unspecified IP in bind truth, got {bound:?}"
+    );
+}
+
+/// The family and port of each socket, the pair that identifies it independently of how an
+/// unspecified IP is written.
+fn families_and_ports(sockets: &[SocketAddr]) -> Vec<(bool, u16)> {
+    sockets
+        .iter()
+        .map(|socket| (socket.is_ipv4(), socket.port()))
+        .collect()
 }

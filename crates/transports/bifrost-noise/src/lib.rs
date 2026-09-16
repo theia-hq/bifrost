@@ -88,6 +88,7 @@
 //! but `snow` 0.10 does not zeroize the private key held inside its handshake state, so that copy
 //! is scrubbed only when the state is dropped.
 
+use core::net::SocketAddr;
 use std::sync::Arc;
 
 use bifrost_core::{Addr, Error, NodeId};
@@ -191,6 +192,12 @@ where
 
     fn local_addr(&self) -> Addr {
         self.inner.local_addr()
+    }
+
+    /// The wrapped transport's bind truth unchanged: the handshake rides the inner transport's
+    /// sockets, so wrapping adds no socket and hides none.
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.inner.bound_sockets()
     }
 
     async fn connect(&self, addr: Addr) -> Result<Self::Session, Error> {

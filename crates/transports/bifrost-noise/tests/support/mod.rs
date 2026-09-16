@@ -113,6 +113,11 @@ impl Transport for Wire {
         }
     }
 
+    /// The port this wire registered under, as a loopback socket: the fake's bind truth.
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        vec![SocketAddr::from(([127, 0, 0, 1], self.port))]
+    }
+
     async fn connect(&self, addr: Addr) -> Result<WireSession, Error> {
         let port = addr
             .hints
@@ -334,6 +339,10 @@ impl Transport for Forger {
         self.inner.local_addr()
     }
 
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.inner.bound_sockets()
+    }
+
     async fn connect(&self, addr: Addr) -> Result<Forged, Error> {
         let session = self.inner.connect(addr).await?;
         let (mut write, mut read) = session.open_bi().await?;
@@ -398,6 +407,10 @@ impl Transport for Saboteur {
 
     fn local_addr(&self) -> Addr {
         self.inner.local_addr()
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.inner.bound_sockets()
     }
 
     async fn connect(&self, addr: Addr) -> Result<Forged, Error> {
@@ -504,6 +517,10 @@ impl Transport for BarePeer {
         self.inner.local_addr()
     }
 
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.inner.bound_sockets()
+    }
+
     async fn connect(&self, addr: Addr) -> Result<Forged, Error> {
         let session = self.inner.connect(addr).await?;
         let (mut write, read) = session.open_bi().await?;
@@ -557,6 +574,10 @@ impl Transport for Splicer {
         self.inner.local_addr()
     }
 
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.inner.bound_sockets()
+    }
+
     async fn connect(&self, addr: Addr) -> Result<Forged, Error> {
         let session = self.inner.connect(addr).await?;
         let (mut write, mut read) = session.open_bi().await?;
@@ -607,6 +628,10 @@ impl Transport for Replayer {
 
     fn local_addr(&self) -> Addr {
         self.inner.local_addr()
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.inner.bound_sockets()
     }
 
     async fn connect(&self, addr: Addr) -> Result<Forged, Error> {

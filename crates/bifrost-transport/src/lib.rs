@@ -51,6 +51,8 @@
 //! Until all of that passes: no credential, no gated route, no default reach path, and no
 //! peer-supplied transport selection.
 
+use core::net::SocketAddr;
+
 pub use bifrost_core::{Addr, ConnInfo, Error, NodeId, NodeIdParseError, Path};
 use tokio::io;
 
@@ -83,6 +85,20 @@ pub trait Transport {
 
     /// A directly-dialable address for this transport (identity plus local hints).
     fn local_addr(&self) -> Addr;
+
+    /// The sockets this transport is bound to, exactly as bound.
+    ///
+    /// Raw bind truth: an unspecified IP (`0.0.0.0`, `[::]`) is reported as bound, never rewritten,
+    /// and a transport that owns no socket reports none. Empty is a fact, not an error.
+    ///
+    /// This is NOT [`local_addr`](Self::local_addr), whose hints rewrite an unspecified bind to
+    /// loopback so the address is dialable on this host. That rewrite is many-to-one: it maps a
+    /// wildcard bind and a deliberate loopback bind onto the same value, and a publisher must tell
+    /// them apart, because it has to expand the first into the host's real addresses and must never
+    /// expand the second. Required with no default for the same reason [`Self::Security`] is: the
+    /// only default a transport-blind trait could offer is the rewritten hint set, which would
+    /// compile that confusion into every backend that stayed silent.
+    fn bound_sockets(&self) -> Vec<SocketAddr>;
 
     /// Dial a peer.
     async fn connect(&self, addr: Addr) -> Result<Self::Session, Error>;

@@ -1,6 +1,7 @@
 use bifrost::{CryptoKind, Node, NodeId, StaticDiscovery, Transport};
 use bifrost_conformance::{
-    close_drains, direct_conn_info, identity_binding, reach_roundtrip, wrong_key_rejected,
+    bound_sockets_are_bind_truth, close_drains, direct_conn_info, identity_binding,
+    reach_roundtrip, wildcard_bind_is_not_rewritten, wrong_key_rejected,
 };
 use bifrost_quirk::Endpoint;
 
@@ -64,4 +65,20 @@ async fn quirk_direct_conn_info() {
     let receiver = Endpoint::bind().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
     direct_conn_info(sender, receiver).await;
+}
+
+/// quirk's bind truth is its one UDP socket, at the address it was bound to, matching the hint
+/// `local_addr` derives from it.
+#[tokio::test]
+async fn quirk_bound_sockets_are_bind_truth() {
+    let endpoint = Endpoint::bind().await.expect("bind endpoint");
+    bound_sockets_are_bind_truth(&endpoint);
+}
+
+/// quirk binds `0.0.0.0:0`, so bind truth keeps the wildcard where `local_addr` would have rewritten
+/// it to loopback: a publisher can tell this bind from one a caller pinned to `127.0.0.1`.
+#[tokio::test]
+async fn quirk_wildcard_bind_is_not_rewritten() {
+    let endpoint = Endpoint::bind().await.expect("bind endpoint");
+    wildcard_bind_is_not_rewritten(&endpoint);
 }
