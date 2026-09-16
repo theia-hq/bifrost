@@ -98,6 +98,18 @@ fn wrapper_declares_sealed_and_is_secure() {
     wrappable::<Sealed>();
 }
 
+/// Per-backend profile pin (delib-72): the declared profile is part of the reviewed record, so an
+/// accidental flip fails here rather than at the next review. `Sealed` is the profile the
+/// `bifrost-noise` entry in `scripts/sealed-gate.sh` authorizes; the assertion is the same constant the
+/// wrapper test above exercises end to end, kept as its own one-line tripwire.
+#[test]
+fn the_declared_profile_is_pinned_to_sealed() {
+    assert_eq!(
+        <Noise<Fake> as Transport>::Security::SECURITY,
+        Sealed::SECURITY
+    );
+}
+
 /// The constructor refuses an inner transport bound under another identity.
 #[test]
 fn constructor_refuses_a_mismatched_identity() {

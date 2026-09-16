@@ -305,4 +305,17 @@ mod tests {
             "bind_local_with_secret must pin PortmapperConfig::Disabled (no gateway probing)"
         );
     }
+
+    /// Per-backend profile pin (delib-72): the declared profile is part of the reviewed record, so an
+    /// accidental flip fails here rather than at the next review. `Sealed` is the profile the
+    /// `bifrost-iroh` entry in `scripts/sealed-gate.sh` authorizes.
+    #[test]
+    fn the_declared_profile_is_pinned_to_sealed() {
+        use bifrost_transport::SecurityProfile as _;
+
+        assert_eq!(
+            <Endpoint as bifrost_transport::Transport>::Security::SECURITY,
+            bifrost_transport::Sealed::SECURITY
+        );
+    }
 }
