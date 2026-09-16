@@ -1,7 +1,7 @@
 //! quirk-backed implementation of the Bifrost transport interface.
 //!
 //! Maps quirk's endpoint, connection, and streams onto the [`Transport`] and [`Session`] traits, so
-//! our own from-scratch QUIC is interchangeable with every other transport and held to the same
+//! our from-scratch UDP transport is interchangeable with every other transport and held to the same
 //! behaviour by the conformance suite. quirk dials by address, so this pairs with a discovery that
 //! resolves a [`NodeId`] to direct hints.
 
