@@ -11,6 +11,7 @@ bifrost-core.workspace = true
 bifrost-transport.workspace = true
 iroh.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

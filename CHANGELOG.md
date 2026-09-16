@@ -2,6 +2,11 @@
 
 All notable changes to bifrost, newest first.
 
+## Unreleased
+
+### New
+- **`Reach`: the relay and the resolver a bind uses.** `bifrost-iroh` gains `Endpoint::bind_reachable_with_secret_via` and `Endpoint::bind_dialing_with_secret_via`, taking a `Reach` whose relay and resolver halves are each n0's or one the caller runs (`RelayUrl` and `ResolverUrl`, `https` only); the existing binds are unchanged and are n0's on both halves.
+
 ## v0.1.1
 
 The serving bind publishes the node's address record; the dialing bind resolves without writing one.

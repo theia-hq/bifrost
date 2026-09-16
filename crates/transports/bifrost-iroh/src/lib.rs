@@ -10,11 +10,14 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, ConnInfo, CryptoKind, Error, Path};
 pub use bifrost_transport::{Sealed, Session, Transport};
-use iroh::address_lookup::{DnsAddressLookup, PkarrResolver};
 use iroh::endpoint::{
     Connection, PathList, PortmapperConfig, RecvStream, RelayMode, SendStream, presets,
 };
 use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, TransportAddr};
+
+mod reach;
+
+pub use reach::{Reach, ReachUrlError, RelayHome, RelayUrl, Resolver, ResolverUrl};
 
 /// The ALPN that identifies the Bifrost substrate protocol during the handshake.
 pub const ALPN: &[u8] = b"bifrost/0";
@@ -29,33 +32,43 @@ impl Endpoint {
     /// across NATs. The fresh-identity reachable shape: it publishes a record under a key generated per
     /// call that no dialer holds, like [`bind_reachable_with_secret`](Self::bind_reachable_with_secret).
     pub async fn bind() -> Result<Self, BindError> {
-        Self::finish(iroh::Endpoint::builder(presets::N0), SecretKey::generate()).await
+        Self::finish(Reach::default().serving(), SecretKey::generate()).await
     }
 
     /// Bind with a persisted identity as a SERVING node: n0 discovery and relays, and publish this
     /// endpoint's address record (n0 pkarr/DNS) so peers reach it by key. The serving bind: bind this
     /// only from the process that accepts connections under the key.
     pub async fn bind_reachable_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
-        Self::finish(
-            iroh::Endpoint::builder(presets::N0),
-            SecretKey::from_bytes(&secret),
-        )
-        .await
+        Self::bind_reachable_with_secret_via(secret, Reach::default()).await
     }
 
     /// Bind with a persisted identity for DIALING ONLY: n0 resolution and relays, no address record.
     /// A dialer is not reachable at its key; publishing here overwrites whatever process IS serving
     /// that key (the 0.9.0 F1 finding: a short-lived command wrote its own relay, exited, and dialers
-    /// followed a dead relay path). The N0 preset minus its `PkarrPublisher`.
+    /// followed a dead relay path). What n0 registers, minus its `PkarrPublisher`.
     pub async fn bind_dialing_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
-        Self::finish(
-            iroh::Endpoint::builder(presets::N0)
-                .clear_address_lookup()
-                .address_lookup(PkarrResolver::n0_dns())
-                .address_lookup(DnsAddressLookup::n0_dns()),
-            SecretKey::from_bytes(&secret),
-        )
-        .await
+        Self::bind_dialing_with_secret_via(secret, Reach::default()).await
+    }
+
+    /// Bind as a SERVING node over a caller-named [`Reach`]: the same publish-my-record bind as
+    /// [`bind_reachable_with_secret`](Self::bind_reachable_with_secret), with the relay and the
+    /// resolver each either n0's or one the caller runs.
+    pub async fn bind_reachable_with_secret_via(
+        secret: [u8; 32],
+        reach: Reach,
+    ) -> Result<Self, BindError> {
+        Self::finish(reach.serving(), SecretKey::from_bytes(&secret)).await
+    }
+
+    /// Bind for DIALING ONLY over a caller-named [`Reach`]: the same no-record bind as
+    /// [`bind_dialing_with_secret`](Self::bind_dialing_with_secret), with the relay and the resolver
+    /// each either n0's or one the caller runs. A dialer must resolve through the same resolver as
+    /// the node it is looking for, or that node's record is not there to find.
+    pub async fn bind_dialing_with_secret_via(
+        secret: [u8; 32],
+        reach: Reach,
+    ) -> Result<Self, BindError> {
+        Self::finish(reach.dialing(), SecretKey::from_bytes(&secret)).await
     }
 
     /// Bind a local-only endpoint with a FRESH identity, for same-process tests (the conformance
@@ -269,53 +282,6 @@ pub enum BindError {
 }
 
 #[cfg(test)]
-mod tests {
-    use bifrost_transport::Transport as _;
-
-    use super::Endpoint;
-
-    /// F1 (0.9.1): the dialing bind registers the two resolvers and NO publisher. A third service would
-    /// be a publisher re-added to the dialing path, the exact regression.
-    #[tokio::test]
-    async fn the_dialing_bind_registers_no_publisher() {
-        let endpoint = Endpoint::bind_dialing_with_secret([7u8; 32])
-            .await
-            .expect("dialing bind");
-        let services = endpoint
-            .inner
-            .address_lookup()
-            .expect("an n0 bind registers lookups")
-            .len();
-        endpoint.close().await;
-        assert_eq!(services, 2, "PkarrResolver + DnsAddressLookup only");
-    }
-
-    /// The "no NAT traversal" claim is a mechanism, not an absence: iroh exposes no public relay or
-    /// portmapper introspection, so the pin is the constructor's two explicit disable calls and this
-    /// test reads them off the source. Removing a pin fails here, not at the next iroh upgrade.
-    #[test]
-    fn the_local_constructor_pins_relay_and_portmapper_off() {
-        let source = include_str!("lib.rs");
-        assert!(
-            source.contains(".relay_mode(RelayMode::Disabled)"),
-            "bind_local_with_secret must pin RelayMode::Disabled (no relay fallback)"
-        );
-        assert!(
-            source.contains(".portmapper_config(PortmapperConfig::Disabled)"),
-            "bind_local_with_secret must pin PortmapperConfig::Disabled (no gateway probing)"
-        );
-    }
-
-    /// Per-backend profile pin (delib-72): the declared profile is part of the reviewed record, so an
-    /// accidental flip fails here rather than at the next review. `Sealed` is the profile the
-    /// `bifrost-iroh` entry in `scripts/sealed-gate.sh` authorizes.
-    #[test]
-    fn the_declared_profile_is_pinned_to_sealed() {
-        use bifrost_transport::SecurityProfile as _;
-
-        assert_eq!(
-            <Endpoint as bifrost_transport::Transport>::Security::SECURITY,
-            bifrost_transport::Sealed::SECURITY
-        );
-    }
-}
+mod lib_tests;
+#[cfg(test)]
+mod reach_tests;
