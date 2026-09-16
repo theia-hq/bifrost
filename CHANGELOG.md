@@ -5,7 +5,12 @@ All notable changes to bifrost, newest first.
 ## Unreleased
 
 ### New
+- **`bifrost-mdns` enumerates this host's addresses.** A wildcard bind (`0.0.0.0`, `[::]`) is expanded through `if-addrs` into the host's concrete non-loopback addresses on the bound port, so a node that bound every interface advertises addresses a peer can actually dial. A concrete address is published exactly as bound: a `127.0.0.1` bind stays loopback and is never expanded into a LAN reach it did not bind. Point-to-point links (utun, tun, wg, a tailnet) and link-local addresses are never published: neither has a LAN behind it, and a link-local address is unusable without a scope no record carries. The published set and the multicast egress pin come from that one set.
 - **`Reach`: the relay and the resolver a bind uses.** `bifrost-iroh` gains `Endpoint::bind_reachable_with_secret_via` and `Endpoint::bind_dialing_with_secret_via`, taking a `Reach` whose relay and resolver halves are each n0's or one the caller runs (`RelayUrl` and `ResolverUrl`, `https` only); the existing binds are unchanged and are n0's on both halves.
+
+### Changed
+- **BREAKING: `Transport` requires `bound_sockets()`.** A new required trait method, no default: the sockets a transport actually bound, with an unspecified IP preserved and empty allowed. `local_addr()` rewrites a wildcard bind to loopback so the hint is dialable here, which makes a wildcard bind and a deliberate loopback bind the same value; a publisher must tell them apart. Every backend implements it (iroh reports iroh's own bound set, quirk its UDP socket, mem none, `Noise<T>` forwards the inner's), and the conformance suite now checks it against what a transport bound.
+- **BREAKING: `MdnsDiscovery::advertise` reports what it advertised.** It takes the bind set and returns `Started { discovery, advertising }`, where `Advertising` names the outcome: `OnLan` (at least one non-loopback address published), `LoopbackOnly` (this machine only), or `BrowseOnly` (nothing publishable, with the cause). Having nothing to advertise no longer fails and is no longer `disabled()`: the node still browses and still resolves. The one remaining error is the service failing to start.
 
 ## v0.1.1
 

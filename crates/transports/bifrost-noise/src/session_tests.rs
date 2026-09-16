@@ -1,3 +1,4 @@
+use core::net::SocketAddr;
 use core::pin::Pin;
 use core::sync::atomic::AtomicU32;
 use core::task::{Context, Poll};
@@ -36,6 +37,10 @@ impl Transport for Fake {
 
     fn local_addr(&self) -> Addr {
         Addr::from_node(self.node)
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        Vec::new()
     }
 
     async fn connect(&self, _addr: Addr) -> Result<FakeSession, Error> {
@@ -287,6 +292,10 @@ impl Transport for Stalled {
 
     fn local_addr(&self) -> Addr {
         Addr::from_node(self.node_id())
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        Vec::new()
     }
 
     async fn connect(&self, _addr: Addr) -> Result<StalledSession, Error> {

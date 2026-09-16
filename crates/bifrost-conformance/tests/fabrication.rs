@@ -8,6 +8,7 @@
 //! still cannot catch (plaintext under `Sealed`, capture, tamper, replay) is named in the crate docs
 //! and the transport's admission checklist.
 
+use core::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
@@ -47,6 +48,10 @@ impl Transport for Fabricator {
 
     fn local_addr(&self) -> Addr {
         Addr::from_node(claimed())
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        Vec::new()
     }
 
     async fn connect(&self, _addr: Addr) -> Result<FabricatedSession, Error> {
@@ -99,6 +104,10 @@ impl Transport for ImpersonatorAtHint {
 
     fn local_addr(&self) -> Addr {
         Addr::from_node(claimed())
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        Vec::new()
     }
 
     async fn connect(&self, addr: Addr) -> Result<ImpersonatedSession, Error> {
@@ -198,6 +207,10 @@ impl Transport for EchoLiar {
 
     fn local_addr(&self) -> Addr {
         Addr::from_node(self.node)
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        Vec::new()
     }
 
     async fn connect(&self, addr: Addr) -> Result<EchoSession, Error> {

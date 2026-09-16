@@ -48,3 +48,14 @@ async fn mem_unknown_conn_info() {
     let sender = Node::new(MemTransport::bind(), NoDiscovery);
     unknown_conn_info(sender, receiver).await;
 }
+
+/// The in-process transport binds no socket, so its bind truth is empty: there is nothing to publish
+/// on a network, and empty is the honest answer rather than a fabricated loopback address.
+#[test]
+fn mem_binds_no_sockets() {
+    let transport = MemTransport::bind();
+    assert!(
+        transport.bound_sockets().is_empty(),
+        "an in-process transport binds no socket"
+    );
+}

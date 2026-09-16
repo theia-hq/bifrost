@@ -17,68 +17,7 @@ use std::sync::{Arc, Mutex};
 use bifrost_core::{CryptoKind, Discovery, NodeId};
 use tokio::sync::watch;
 
-use super::{Advertised, MdnsDiscovery, MdnsError};
-
-/// A multi-port bind (iroh 1.2.0 binds a v4 and a v6 socket on different ephemeral ports) cannot be
-/// advertised whole, so it advertises the port of the v4 socket: the address a peer dials. The v6
-/// socket on another port is left out, never folded into a port that cannot carry it.
-#[test]
-fn a_multi_port_bind_advertises_the_v4_sockets_port() {
-    let v4: SocketAddr = "127.0.0.1:51979".parse().expect("a valid v4 address");
-    let v6: SocketAddr = "[::1]:51987".parse().expect("a valid v6 address");
-
-    let advertised = Advertised::of([v4, v6]).expect("the v4 socket makes the bind advertisable");
-    assert_eq!(advertised.port, 51979, "the chosen port is the v4 socket's");
-    assert_eq!(
-        advertised.addrs,
-        vec![v4],
-        "only the addresses on the chosen port are advertised"
-    );
-
-    // A v6 socket that SHARES the chosen port rides along: the advertisement is the whole port group,
-    // not merely the v4 socket.
-    let v6_twin: SocketAddr = "[::1]:51979".parse().expect("a valid v6 address");
-    let advertised =
-        Advertised::of([v4, v6, v6_twin]).expect("the shared v4 port makes the bind advertisable");
-    assert_eq!(advertised.port, 51979);
-    assert_eq!(advertised.addrs, vec![v4, v6_twin]);
-}
-
-/// The single-port path is unchanged: one listener across interfaces is one port plus every bound
-/// address, whatever family, and the multi-port preference never narrows it.
-#[test]
-fn a_single_port_bind_advertises_every_address() {
-    let v4: SocketAddr = "127.0.0.1:51979".parse().expect("a valid v4 address");
-    let v6: SocketAddr = "[::1]:51979".parse().expect("a valid v6 address");
-
-    let advertised = Advertised::of([v4, v6]).expect("a shared port is advertisable");
-    assert_eq!(advertised.port, 51979);
-    assert_eq!(advertised.addrs, vec![v4, v6]);
-
-    // A v6-only single-port bind keeps its prior behavior too.
-    let advertised = Advertised::of([v6]).expect("a single v6 port is advertisable");
-    assert_eq!(advertised.port, 51979);
-    assert_eq!(advertised.addrs, vec![v6]);
-}
-
-/// A multi-port bind with no IPv4 socket has nothing a peer on the v4 query path could dial: a named
-/// error, never a partial or guessed advertisement.
-#[test]
-fn a_multi_port_bind_without_a_v4_socket_is_an_error() {
-    let v6: SocketAddr = "[::1]:1000".parse().expect("a valid v6 address");
-    let v6_other: SocketAddr = "[::2]:2000".parse().expect("a valid v6 address");
-
-    assert!(matches!(
-        Advertised::of([v6, v6_other]),
-        Err(MdnsError::NoV4Addrs)
-    ));
-}
-
-/// No addresses at all is the named error, not a panic on the empty set.
-#[test]
-fn an_empty_bind_is_an_error() {
-    assert!(matches!(Advertised::of([]), Err(MdnsError::NoAddrs)));
-}
+use super::MdnsDiscovery;
 
 /// Two nodes advertising on the LAN resolve each other's advertised address over mDNS.
 #[tokio::test]
@@ -88,8 +27,12 @@ async fn two_nodes_resolve_each_other_over_mdns() {
     let (bob, bob_addr) = (node(2), addr(4002));
 
     // Hold both guards for the whole test: dropping one stops its advertisement.
-    let alice_mdns = MdnsDiscovery::advertise(alice, [alice_addr]).expect("alice advertises");
-    let bob_mdns = MdnsDiscovery::advertise(bob, [bob_addr]).expect("bob advertises");
+    let alice_mdns = MdnsDiscovery::advertise(alice, [alice_addr])
+        .expect("alice advertises")
+        .discovery;
+    let bob_mdns = MdnsDiscovery::advertise(bob, [bob_addr])
+        .expect("bob advertises")
+        .discovery;
 
     // Each resolves the OTHER: alice learns bob's addr, bob learns alice's, both from the network.
     let found_bob = resolve_within(&alice_mdns, bob, Duration::from_secs(10)).await;
@@ -109,7 +52,9 @@ async fn two_nodes_resolve_each_other_over_mdns() {
 #[tokio::test]
 #[ignore = "drives real multicast; run locally with --ignored"]
 async fn unknown_peer_resolves_empty() {
-    let mdns = MdnsDiscovery::advertise(node(3), [addr(4003)]).expect("advertises");
+    let mdns = MdnsDiscovery::advertise(node(3), [addr(4003)])
+        .expect("advertises")
+        .discovery;
     let addrs = mdns.resolve(node(99)).await.expect("resolve never errors");
     assert!(
         addrs.is_empty(),
@@ -185,8 +130,12 @@ async fn wait_ready_releases_on_the_target_over_mdns() {
     let bob = node(52);
     let bob_addr = addr(4052);
 
-    let alice_mdns = MdnsDiscovery::advertise(alice, [addr(4051)]).expect("alice advertises");
-    let bob_mdns = MdnsDiscovery::advertise(bob, [bob_addr]).expect("bob advertises");
+    let alice_mdns = MdnsDiscovery::advertise(alice, [addr(4051)])
+        .expect("alice advertises")
+        .discovery;
+    let bob_mdns = MdnsDiscovery::advertise(bob, [bob_addr])
+        .expect("bob advertises")
+        .discovery;
 
     alice_mdns.wait_ready(bob, Duration::from_secs(10)).await;
 

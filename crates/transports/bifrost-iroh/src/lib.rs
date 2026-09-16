@@ -144,6 +144,12 @@ impl Transport for Endpoint {
         }
     }
 
+    /// iroh's own bound-socket set, unrewritten: the endpoint binds a v4 socket and, where the host
+    /// has one, a v6 socket, each reported at the address it was actually bound to.
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.inner.bound_sockets()
+    }
+
     async fn connect(&self, addr: Addr) -> Result<IrohSession, Error> {
         let endpoint_addr = to_endpoint_addr(addr).map_err(|err| Error::Connect(Box::new(err)))?;
         let conn = self

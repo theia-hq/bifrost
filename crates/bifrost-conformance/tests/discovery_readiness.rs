@@ -144,6 +144,10 @@ impl Transport for RecordingTransport {
         Addr::from_node(self.node_id())
     }
 
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        Vec::new()
+    }
+
     async fn connect(&self, addr: Addr) -> Result<RecordingSession, Error> {
         if addr.hints.is_empty() {
             return Err(Error::Connect(Box::new(NoHints)));

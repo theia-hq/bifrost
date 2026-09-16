@@ -60,6 +60,13 @@ impl Transport for Endpoint {
         }
     }
 
+    /// The one UDP socket this endpoint owns, at the address it was bound to. quirk binds a single
+    /// wildcard v4 socket, so this is the wildcard itself, not the loopback hint `local_addr` derives
+    /// from it. A socket whose address cannot be read is reported as no socket rather than guessed.
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.inner.local_addr().into_iter().collect()
+    }
+
     async fn connect(&self, addr: Addr) -> Result<QuirkSession, Error> {
         let dialed = addr.node;
         let peer = addr

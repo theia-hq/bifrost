@@ -1,6 +1,7 @@
 use bifrost::{Node, StaticDiscovery, Transport};
 use bifrost_conformance::{
-    close_drains, direct_conn_info, identity_binding, reach_roundtrip, wrong_key_rejected,
+    bound_sockets_are_bind_truth, close_drains, direct_conn_info, identity_binding,
+    reach_roundtrip, wildcard_bind_is_not_rewritten, wrong_key_rejected,
 };
 use bifrost_iroh::Endpoint;
 
@@ -63,4 +64,21 @@ async fn iroh_direct_conn_info() {
     let receiver = Endpoint::bind_local().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
     direct_conn_info(sender, receiver).await;
+}
+
+/// iroh's bind truth is iroh's own bound-socket set: the sockets the endpoint opened, reported as
+/// bound, and matching the hints `local_addr` derives from them.
+#[tokio::test]
+async fn iroh_bound_sockets_are_bind_truth() {
+    let endpoint = Endpoint::bind_local().await.expect("bind endpoint");
+    bound_sockets_are_bind_truth(&endpoint);
+}
+
+/// `bind_local` binds the wildcard, so bind truth keeps `0.0.0.0` (and `[::]` where the host has a v6
+/// socket) where `local_addr` would have rewritten it to loopback. This is the distinction a
+/// publisher needs to expand a wildcard without expanding a deliberate loopback bind.
+#[tokio::test]
+async fn iroh_wildcard_bind_is_not_rewritten() {
+    let endpoint = Endpoint::bind_local().await.expect("bind endpoint");
+    wildcard_bind_is_not_rewritten(&endpoint);
 }
