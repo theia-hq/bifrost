@@ -67,7 +67,7 @@ async fn quirk_direct_conn_info() {
     direct_conn_info(sender, receiver).await;
 }
 
-/// quirk's bind truth is its one UDP socket, at the address it was bound to, matching the hint
+/// This backend's bind truth is its one UDP socket, at the address it was bound to, matching the hint
 /// `local_addr` derives from it.
 #[tokio::test]
 async fn quirk_bound_sockets_are_bind_truth() {
