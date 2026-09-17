@@ -11,7 +11,7 @@
 /// cause (nauthy's missing / not-granted / revoked, a disabled service, an
 /// absent name) stays host-side, so a stranger, a revoked holder, and a wrong
 /// name receive identical bytes and the refusal is neither a revocation nor a
-/// service-enumeration oracle (deliberation 18). `BadRequest` and `Unavailable`
+/// service-enumeration oracle. `BadRequest` and `Unavailable`
 /// are safe to name: the first is the peer's grammar (public), the second is a
 /// post-admission host-resource failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

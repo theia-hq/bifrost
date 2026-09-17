@@ -103,10 +103,11 @@ fn wrapper_declares_sealed_and_is_secure() {
     wrappable::<Sealed>();
 }
 
-/// Per-backend profile pin (delib-72): the declared profile is part of the reviewed record, so an
-/// accidental flip fails here rather than at the next review. `Sealed` is the profile the
-/// `bifrost-noise` entry in `scripts/sealed-gate.sh` authorizes; the assertion is the same constant the
-/// wrapper test above exercises end to end, kept as its own one-line tripwire.
+/// The declared profile is PINNED per backend: every consumer's trust decision rests on it, so an
+/// accidental flip fails HERE, in the crate that declares it, rather than downstream in code that went on
+/// believing the old promise. `Sealed` is the profile the `bifrost-noise` entry in
+/// `scripts/sealed-gate.sh` authorizes; the assertion is the same constant the wrapper test above
+/// exercises end to end, kept as its own one-line tripwire.
 #[test]
 fn the_declared_profile_is_pinned_to_sealed() {
     assert_eq!(

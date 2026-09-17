@@ -19,6 +19,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: layering gate
         run: sh scripts/layering-gate.sh .
+      - name: process leaks
+        run: sh scripts/prose-gate.sh .
       - name: sealed gate
         run: sh scripts/sealed-gate.sh .
       - name: sealed gate fixture
