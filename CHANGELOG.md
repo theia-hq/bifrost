@@ -2,7 +2,9 @@
 
 All notable changes to bifrost, newest first.
 
-## Unreleased
+## v0.2.0
+
+Bind truth reaches discovery, so a node advertises addresses a peer can dial, and a bind can name a relay and a resolver of its own.
 
 ### Changed
 - **A parsed relay or resolver URL is pointer-sized.** Both newtypes box their URL, so a consumer can
