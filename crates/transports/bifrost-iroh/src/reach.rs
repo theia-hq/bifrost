@@ -49,7 +49,7 @@ impl Reach {
             // One URL is the whole map: a node offers exactly one home relay, and the relay a DIALER
             // uses comes from the peer's own record, never from this map.
             RelayHome::Custom(RelayUrl(url)) => {
-                RelayMode::Custom(RelayMap::from(iroh::RelayUrl::from(url)))
+                RelayMode::Custom(RelayMap::from(iroh::RelayUrl::from(*url)))
             }
         };
         let builder = iroh::Endpoint::builder(presets::Minimal).relay_mode(relay_mode);
@@ -68,9 +68,9 @@ impl Reach {
             // delegated DNS origin, so a DNS query against it would resolve nothing.
             (Resolver::Custom(ResolverUrl(base)), Role::Serving) => builder
                 .address_lookup(PkarrPublisher::builder(Url::clone(&base)))
-                .address_lookup(PkarrResolver::builder(base)),
+                .address_lookup(PkarrResolver::builder(*base)),
             (Resolver::Custom(ResolverUrl(base)), Role::Dialing) => {
-                builder.address_lookup(PkarrResolver::builder(base))
+                builder.address_lookup(PkarrResolver::builder(*base))
             }
         }
     }
@@ -103,8 +103,11 @@ pub enum Resolver {
 /// here would be dropped without a word. Parse one with [`FromStr`], render it with [`Display`].
 ///
 /// [`Display`]: fmt::Display
+/// The URL is boxed so the newtype stays pointer-sized: a parsed `Url` is large by value, and these
+/// travel inside command enums and argument structs in a consumer, where an inline one makes its
+/// variant tower over the rest. A size test pins it so the indirection cannot be dropped by accident.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelayUrl(Url);
+pub struct RelayUrl(Box<Url>);
 
 impl FromStr for RelayUrl {
     type Err = ReachUrlError;
@@ -124,7 +127,7 @@ impl FromStr for RelayUrl {
                 path: url.path().to_owned(),
             });
         }
-        Ok(Self(url))
+        Ok(Self(Box::new(url)))
     }
 }
 
@@ -141,8 +144,11 @@ impl fmt::Display for RelayUrl {
 /// [`FromStr`], render it with [`Display`].
 ///
 /// [`Display`]: fmt::Display
+/// The URL is boxed so the newtype stays pointer-sized: a parsed `Url` is large by value, and these
+/// travel inside command enums and argument structs in a consumer, where an inline one makes its
+/// variant tower over the rest. A size test pins it so the indirection cannot be dropped by accident.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolverUrl(Url);
+pub struct ResolverUrl(Box<Url>);
 
 impl FromStr for ResolverUrl {
     type Err = ReachUrlError;
@@ -156,7 +162,7 @@ impl FromStr for ResolverUrl {
         if let Ok(mut segments) = url.path_segments_mut() {
             segments.pop_if_empty();
         }
-        Ok(Self(url))
+        Ok(Self(Box::new(url)))
     }
 }
 

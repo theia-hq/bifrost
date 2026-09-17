@@ -4,6 +4,10 @@ All notable changes to bifrost, newest first.
 
 ## Unreleased
 
+### Changed
+- **A parsed relay or resolver URL is pointer-sized.** Both newtypes box their URL, so a consumer can
+  hold one inside a command enum without inflating every sibling variant; a size test pins it.
+
 ### New
 - **`bifrost-mdns` enumerates this host's addresses.** A wildcard bind (`0.0.0.0`, `[::]`) is expanded through `if-addrs` into the host's concrete non-loopback addresses on the bound port, so a node that bound every interface advertises addresses a peer can actually dial. A concrete address is published exactly as bound: a `127.0.0.1` bind stays loopback and is never expanded into a LAN reach it did not bind. Point-to-point links (utun, tun, wg, a tailnet) and link-local addresses are never published: neither has a LAN behind it, and a link-local address is unusable without a scope no record carries. The published set and the multicast egress pin come from that one set.
 - **`Reach`: the relay and the resolver a bind uses.** `bifrost-iroh` gains `Endpoint::bind_reachable_with_secret_via` and `Endpoint::bind_dialing_with_secret_via`, taking a `Reach` whose relay and resolver halves are each n0's or one the caller runs (`RelayUrl` and `ResolverUrl`, `https` only); the existing binds are unchanged and are n0's on both halves.

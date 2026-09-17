@@ -192,3 +192,20 @@ fn a_resolver_base_drops_one_trailing_slash() {
     let root: ResolverUrl = "https://dns.example/".parse().expect("a pkarr base");
     assert_eq!(root.to_string(), "https://dns.example/");
 }
+
+/// Both URL newtypes stay pointer-sized. They travel inside a consumer's command enums and argument
+/// structs, where an inline `Url` makes one variant tower over the rest, so the indirection is the
+/// point and this pins it against a well-meaning unboxing.
+#[test]
+fn a_parsed_url_is_pointer_sized() {
+    assert!(
+        size_of::<RelayUrl>() <= 16,
+        "RelayUrl must stay small enough to hold by value, got {} bytes",
+        size_of::<RelayUrl>()
+    );
+    assert!(
+        size_of::<ResolverUrl>() <= 16,
+        "ResolverUrl must stay small enough to hold by value, got {} bytes",
+        size_of::<ResolverUrl>()
+    );
+}
