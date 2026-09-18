@@ -2,6 +2,19 @@
 
 All notable changes to bifrost, newest first.
 
+## v0.2.2
+
+An unavailable refusal is about the host, not about the dialer.
+
+### Changed
+- **`Refusal::Unavailable` widens from "the peer admitted the dial but could not serve it" to "the host
+  could not complete this dial for a reason of its own".** A dialer could read the old meaning as proof of
+  having been admitted, and that narrowness left a pre-admission failure of the host's own with nowhere
+  honest to go: a gate whose evaluation runs out of time decided nothing about the caller's authority, and
+  telling them they were not admitted is a lie they act on. Doc only; no wire change and no signature
+  change. A caller that matches the variant should treat it as transient and retry, and must never record
+  it as an authorization outcome.
+
 ## v0.2.1
 
 The addresses a bind answers on, and how far each of them reaches.
