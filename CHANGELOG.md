@@ -2,6 +2,26 @@
 
 All notable changes to bifrost, newest first.
 
+## v0.2.1
+
+The addresses a bind answers on, and how far each of them reaches.
+
+### New
+- **`bifrost_mdns::Dialable`, `At` and `Reach`, and `Node::bound_sockets`.** The expansion that turns a
+  bind into the concrete sockets it answers on was private to the mDNS publisher, so a consumer that
+  needed the same answer for a different purpose had to read the publisher's own report about how far its
+  advertisement reached, which is a different question. It is public now, and each socket carries how far
+  it reaches: the internet, this network, one named point-to-point link, or this machine only. A private
+  address and a unique-local one behave identically and look nothing alike, while a unique-local and a
+  global IPv6 address look alike and do not, so the two routable classes are told apart rather than
+  folded.
+
+### Changed
+- **The expansion no longer drops point-to-point links.** They are carried as their own reach class,
+  named by the link. A wildcard bind demonstrably answers on a tunnel address, so dropping it was
+  publication policy rather than a property of the address. What goes on the mDNS wire is unchanged: the
+  publisher applies that policy itself, and its tests pass with their values untouched.
+
 ## v0.2.0
 
 Bind truth reaches discovery, so a node advertises addresses a peer can dial, and a bind can name a relay and a resolver of its own.
