@@ -2,7 +2,7 @@
 publish = false  # git-only for now, not published to crates.io
 name = "bifrost"
 description = "Open a byte stream to a peer by its ed25519 key; the transport underneath is swappable."
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 
