@@ -17,6 +17,12 @@
 //! and leaving a deliberate loopback bind exactly as it is. [`Advertising`] names what the result
 //! reaches, so a surface can report the truth rather than assume a LAN record went out.
 //!
+//! That expansion is public as [`Dialable`], because a bind answers on more addresses than a record
+//! may carry: a surface that hands a person an address to dial by hand wants the tunnel address and
+//! the loopback one that no record may name. Each entry says how far it reaches ([`Reach`]), so
+//! every consumer applies its OWN rule to the same fact instead of reading a report about what this
+//! crate published.
+//!
 //! The browse learns nothing until its first query-response cycle (roughly a second out with the
 //! interactive cadence), so [`wait_ready`](Discovery::wait_ready) gives a dial a bounded wait for
 //! that cycle before a miss is treated as final.
@@ -36,8 +42,10 @@ use swarm_discovery::{Discoverer, IpClass, Peer};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
+mod host;
 mod publish;
 
+pub use host::{At, Dialable, Reach};
 pub use publish::{Advertised, Advertising};
 
 /// The mDNS service all theia nodes advertise and browse under: `_theia._udp.local.`.
@@ -302,6 +310,8 @@ pub enum MdnsError {
     Spawn(#[source] Box<swarm_discovery::SpawnError>),
 }
 
+#[cfg(test)]
+mod host_tests;
 #[cfg(test)]
 mod lib_tests;
 #[cfg(test)]
