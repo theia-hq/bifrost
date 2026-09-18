@@ -11,7 +11,7 @@
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::MdnsError;
-use crate::host::{Dialable, Reach};
+use crate::host::{Dialable, Scope};
 
 /// What an mDNS advertisement reaches, as a surface reads it before it claims anything.
 ///
@@ -65,7 +65,7 @@ impl Advertising {
                 // is exactly what a record broadcast on this network is for. Folding the split in
                 // here would have dropped every internet address off the wire.
                 .filter(|at| {
-                    matches!(at.reach, Reach::Internet | Reach::Network)
+                    matches!(at.scope, Scope::Internet | Scope::Network)
                         || bound.contains(&at.socket)
                 })
                 .map(|at| at.socket)

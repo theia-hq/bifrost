@@ -5,7 +5,7 @@
 //! interface address of its family, and at loopback. That expansion is the only code in the family
 //! that turns a bind into addresses, and it has two consumers with genuinely different rules: this
 //! crate's advertiser, which may publish only what a peer hearing a multicast query could dial, and a
-//! surface that hands an operator addresses to pass to a peer by hand. So the reach of each address
+//! surface that hands an operator addresses to pass to a peer by hand. So the scope of each address
 //! is a FACT the entry carries, and each consumer applies its own rule to it, rather than one
 //! consumer reading the other's filtered result.
 
@@ -15,13 +15,15 @@ use if_addrs::Interface;
 
 use crate::MdnsError;
 
+mod stable;
+
 /// How far an address this bind answers on can be routed from.
 ///
 /// Not a ranking of quality: which entry is right depends on where the peer is, and nothing on this
 /// host knows that. It is who can route to the address, which is what a consumer needs to decide
 /// whether it may publish the address, and what a surface needs to mark it with.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Reach {
+pub enum Scope {
     /// A globally routable address: a peer anywhere on the internet can route to it, given a path.
     /// The only class that reaches a peer who is not already on a network or an overlay with this
     /// host, which on a transport with no relay and no NAT traversal is the only way to reach one
@@ -30,7 +32,7 @@ pub enum Reach {
     /// A link with a network behind it, and that network is where it stops: a private or
     /// unique-local address reaches a peer on this network and no further. Distinct from
     /// [`Internet`](Self::Internet) because the two look alike and do not behave alike, and a line
-    /// that did not say which claimed the wider reach for both.
+    /// that did not say which claimed the wider scope for both.
     Network,
     /// A point-to-point link (utun, tun, wg, a tailnet), named because the link is what says who can
     /// route to it: a peer on that same overlay, and nobody else.
@@ -44,7 +46,7 @@ pub enum Reach {
     ThisMachine,
 }
 
-impl Reach {
+impl Scope {
     /// The sort key behind [`Dialable::all`]'s order, by how far an address reaches without the peer
     /// first joining something: anyone who can route to it, anyone on that one named link, this
     /// machine. Private and numeric only to sort: an `Ord` on the enum would order two tunnels by
@@ -65,7 +67,7 @@ pub struct At {
     /// The concrete socket: never an unspecified IP, always the bound port.
     pub socket: SocketAddr,
     /// Who can route to [`socket`](Self::socket).
-    pub reach: Reach,
+    pub scope: Scope,
 }
 
 /// The sockets a bind answers on, expanded from bind truth through this host's interfaces.
@@ -117,12 +119,26 @@ impl Dialable {
         }
     }
 
-    /// Every socket this bind answers on: [`Network`] first, then [`Tunnel`], then [`ThisMachine`],
-    /// each group in the order the host reported its interfaces.
+    /// Assemble a set from entries already in hand that is SHORT, and say why.
     ///
-    /// [`Network`]: Reach::Network
-    /// [`Tunnel`]: Reach::Tunnel
-    /// [`ThisMachine`]: Reach::ThisMachine
+    /// [`FromIterator`] builds the set that read cleanly, which is the only set a consumer could
+    /// build for itself; this builds the other one. Without it, the branch a consumer writes over
+    /// [`interfaces`](Self::interfaces) is a branch its own tests cannot reach, and a branch no
+    /// test can reach is a branch that quietly goes missing.
+    pub fn short(entries: impl IntoIterator<Item = At>, cause: MdnsError) -> Self {
+        Self {
+            interfaces: Some(cause),
+            ..Self::from_iter(entries)
+        }
+    }
+
+    /// Every socket this bind answers on: [`Internet`] first, then [`Network`], then [`Tunnel`],
+    /// then [`ThisMachine`], each group in the order the host reported its interfaces.
+    ///
+    /// [`Internet`]: Scope::Internet
+    /// [`Network`]: Scope::Network
+    /// [`Tunnel`]: Scope::Tunnel
+    /// [`ThisMachine`]: Scope::ThisMachine
     pub fn all(&self) -> &[At] {
         &self.addrs
     }
@@ -146,10 +162,11 @@ impl FromIterator<At> for Dialable {
     /// trusted from the caller: a value built this way is indistinguishable from an expanded one,
     /// which is what lets a consumer drive its own rendering over a host it does not have (a tunnel
     /// link, a second network address). Nothing was read, so nothing is short:
-    /// [`interfaces`](Dialable::interfaces) is `None`.
+    /// [`interfaces`](Dialable::interfaces) is `None`, and [`short`](Dialable::short) is how a
+    /// caller says otherwise.
     fn from_iter<I: IntoIterator<Item = At>>(entries: I) -> Self {
         let mut addrs: Vec<At> = entries.into_iter().collect();
-        addrs.sort_by_key(|at| at.reach.rank());
+        addrs.sort_by_key(|at| at.scope.rank());
         Self {
             addrs,
             interfaces: None,
@@ -171,26 +188,33 @@ pub(crate) struct HostAddr {
     /// The interface's address.
     pub(crate) ip: IpAddr,
     /// Who can route to it, read off the link it sits on.
-    pub(crate) reach: Reach,
+    pub(crate) scope: Scope,
 }
 
 impl HostAddrs {
     /// Read this host's live interfaces.
+    ///
+    /// Two reads, not one. `if-addrs` reports an interface's flags but never an ADDRESS's, and an
+    /// IPv6 interface routinely carries a stable address and an RFC 8981 temporary one that is
+    /// indistinguishable from it by its bits alone. Asking the platform for those flags is the
+    /// only way to tell them apart, so it happens HERE, against the live list, and the policy
+    /// below stays a pure function of whatever list it is handed.
     fn of_this_host() -> Result<Self, MdnsError> {
         let interfaces = if_addrs::get_if_addrs().map_err(MdnsError::Interfaces)?;
-        Ok(Self::of_interfaces(interfaces))
+        Ok(Self::of_interfaces(stable::only(interfaces)))
     }
 
-    /// The addresses of the interfaces a wildcard bind answers on, each with its reach.
+    /// The addresses of the interfaces a wildcard bind answers on, each with its scope.
     ///
     /// Two kinds of interface are left out, because an address taken from one is an address NEITHER
     /// consumer can use. An interface the OS does not report as running is not one this node answers
     /// on, and naming it costs a dialing peer a timeout. A link-local address means nothing without
     /// the scope of the interface it came from, which neither a record nor a pasted address carries.
     /// A point-to-point link (utun, tun, wg, a tailnet) is NOT dropped: the socket observably answers
-    /// there, so the fact that the link has no network behind it is carried as [`Reach::Tunnel`] and
+    /// there, so the fact that the link has no network behind it is carried as [`Scope::Tunnel`] and
     /// left to each consumer, which is what stops one consumer's publication policy from deciding
-    /// what the other may hand a human.
+    /// what the other may hand a human. An address that is about to expire is dropped one step
+    /// earlier, in [`of_this_host`](Self::of_this_host), which is where the flags for it exist.
     pub(crate) fn of_interfaces(interfaces: Vec<Interface>) -> Self {
         Self(
             interfaces
@@ -204,16 +228,16 @@ impl HostAddrs {
                     // order matters: a tunnel address is routinely inside a range that reads as
                     // one thing by prefix and behaves as another, and the link is the better
                     // evidence when we have it.
-                    reach: if interface.ip().is_loopback() {
-                        Reach::ThisMachine
+                    scope: if interface.ip().is_loopback() {
+                        Scope::ThisMachine
                     } else if interface.is_p2p() {
-                        Reach::Tunnel {
+                        Scope::Tunnel {
                             link: interface.name,
                         }
                     } else if is_globally_routable(interface.ip()) {
-                        Reach::Internet
+                        Scope::Internet
                     } else {
-                        Reach::Network
+                        Scope::Network
                     },
                 })
                 .collect(),
@@ -227,29 +251,31 @@ impl HostAddrs {
     /// addresses would claim a reach it deliberately did not bind. An unspecified address means
     /// "every interface of this family", so it stands for this host's concrete addresses in that
     /// family, plus loopback, which the wildcard genuinely answers on too.
+    ///
+    /// A concrete address is scoped by the ADDRESS alone, because there is no interface list to
+    /// match it against and so no link to ask: a concrete bind on a tunnel address reads as
+    /// [`Scope::Network`], never [`Scope::Tunnel`]. Nothing binds one today, and inventing a
+    /// syscall to sharpen a case nobody has would buy nothing; the caller that starts binding
+    /// tunnel addresses concretely is the one that should.
     pub(crate) fn expand(&self, bound: Vec<SocketAddr>) -> Vec<At> {
         let mut dialable: Vec<At> = Vec::with_capacity(bound.len());
         for socket in bound {
             if !socket.ip().is_unspecified() {
-                // Without a wildcard there is no interface list to match a concrete address against,
-                // so its reach is what the address itself says. A concrete tunnel bind therefore
-                // reads as `Network`: the one caller that binds concretely names a LAN address, and
-                // inventing a syscall to sharpen a case nobody has would buy nothing.
-                let reach = if socket.ip().is_loopback() {
-                    Reach::ThisMachine
+                let scope = if socket.ip().is_loopback() {
+                    Scope::ThisMachine
                 } else if is_globally_routable(socket.ip()) {
-                    Reach::Internet
+                    Scope::Internet
                 } else {
-                    Reach::Network
+                    Scope::Network
                 };
-                push_once(&mut dialable, socket, reach);
+                push_once(&mut dialable, socket, scope);
                 continue;
             }
             for host in self.same_family(socket.ip()) {
                 push_once(
                     &mut dialable,
                     SocketAddr::new(host.ip, socket.port()),
-                    host.reach.clone(),
+                    host.scope.clone(),
                 );
             }
             // The wildcard's own loopback socket, whether or not the interface list named one (it
@@ -258,11 +284,11 @@ impl HostAddrs {
             push_once(
                 &mut dialable,
                 SocketAddr::new(loopback_of(socket.ip()), socket.port()),
-                Reach::ThisMachine,
+                Scope::ThisMachine,
             );
         }
         // Stable, so the interface order the OS reported survives inside each group.
-        dialable.sort_by_key(|at| at.reach.rank());
+        dialable.sort_by_key(|at| at.scope.rank());
         dialable
     }
 
@@ -288,8 +314,6 @@ fn loopback_of(family: IpAddr) -> IpAddr {
     }
 }
 
-/// Whether `addr` is link-local: `169.254.0.0/16`, or `fe80::/10` matched by its prefix because
-/// `Ipv6Addr` has no stable accessor for it.
 /// Whether `addr` is one a peer anywhere on the internet could route to, given a path.
 ///
 /// Spelled out rather than taken from the standard library: the `is_global` family is still
@@ -299,32 +323,70 @@ fn loopback_of(family: IpAddr) -> IpAddr {
 ///
 /// v4: everything that is not reserved for somewhere smaller than the internet. v6: the single
 /// global-unicast prefix `2000::/3`, which is what a routable v6 address is by definition and which
-/// excludes unique-local `fc00::/7` and link-local `fe80::/10` without naming them.
+/// excludes unique-local `fc00::/7` and link-local `fe80::/10` without naming them, minus the
+/// ranges that sit INSIDE it and are reserved rather than routable.
 fn is_globally_routable(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => {
             !v4.is_private()
                 && !v4.is_loopback()
                 && !v4.is_link_local()
-                && !v4.is_broadcast()
                 && !v4.is_multicast()
-                && !v4.is_unspecified()
                 && !v4.is_documentation()
-                // Carrier-grade NAT, `100.64.0.0/10`: a provider's own space, and the range a
-                // tailnet hands out, so an overlay address that escaped the link test still does
-                // not read as internet-routable.
-                && !(v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+                && !is_reserved_v4(v4)
         }
-        // The global-unicast prefix, minus the documentation range `2001:db8::/32`, which sits
-        // inside it and is reserved rather than routable. The v4 arm excludes its documentation
-        // ranges through `is_documentation`; v6 has no stable equivalent, so it is named here.
-        IpAddr::V6(v6) => {
-            v6.segments()[0] & 0xe000 == 0x2000
-                && !(v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
-        }
+        IpAddr::V6(v6) => v6.segments()[0] & 0xe000 == 0x2000 && !is_reserved_v6(v6),
     }
 }
 
+/// The v4 ranges reserved for something other than the open internet that the standard library has
+/// no STABLE predicate for: `is_shared`, `is_benchmarking` and `is_reserved` are all unstable, so
+/// each is named here instead of waiting for them.
+///
+/// Two of these subsume a predicate the caller would otherwise ask separately for: `240.0.0.0/4`
+/// covers the broadcast address, and `0.0.0.0/8` covers the unspecified one.
+fn is_reserved_v4(addr: Ipv4Addr) -> bool {
+    matches!(
+        addr.octets(),
+        // This network (`0.0.0.0/8`): a source-only range, and `0.0.0.0` itself.
+        [0, ..]
+        // Carrier-grade NAT (`100.64.0.0/10`): a provider's own space, and the range a tailnet
+        // hands out, so an overlay address that escaped the link test still does not read as
+        // internet-routable.
+        | [100, 64..=127, ..]
+        // IETF protocol assignments (`192.0.0.0/24`), including the NAT64 well-known prefix.
+        | [192, 0, 0, _]
+        // 6to4 relay anycast (`192.88.99.0/24`), deprecated and never a host address.
+        | [192, 88, 99, _]
+        // Benchmarking (`198.18.0.0/15`). The live one: Zscaler, Umbrella and WARP hand these out
+        // on their virtual interfaces, where no link test catches them.
+        | [198, 18..=19, ..]
+        // Reserved for future use (`240.0.0.0/4`), broadcast included.
+        | [240..=255, ..]
+    )
+}
+
+/// The v6 ranges that sit inside global unicast `2000::/3` and are reserved rather than routable.
+/// `Ipv6Addr::is_global` is unstable and `is_documentation` with it, so each is named here.
+fn is_reserved_v6(addr: Ipv6Addr) -> bool {
+    matches!(
+        addr.segments(),
+        // Teredo (`2001::/32`): a tunnel endpoint, not an address of this host's own.
+        [0x2001, 0x0000, ..]
+        // Benchmarking (`2001:2::/48`).
+        | [0x2001, 0x0002, 0x0000, ..]
+        // ORCHIDv2 (`2001:20::/28`): cryptographic identifiers, never routed.
+        | [0x2001, 0x0020..=0x002f, ..]
+        // Documentation (`2001:db8::/32`).
+        | [0x2001, 0x0db8, ..]
+        // 6to4 (`2002::/16`): reachable only through a relay, and one derived from an RFC 1918 v4
+        // address reads exactly like one derived from a routable address.
+        | [0x2002, ..]
+    )
+}
+
+/// Whether `addr` is link-local: `169.254.0.0/16`, or `fe80::/10` matched by its prefix because
+/// `Ipv6Addr` has no stable accessor for it.
 fn is_link_local(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => v4.is_link_local(),
@@ -334,10 +396,10 @@ fn is_link_local(addr: IpAddr) -> bool {
 
 /// Append `socket` unless it is already there. Two wildcards on one port expand into the same host
 /// addresses, and a wildcard's loopback is the same socket a deliberate loopback bind names, so the
-/// same address can be derived twice; the first derivation carries the reach, since a duplicate
+/// same address can be derived twice; the first derivation carries the scope, since a duplicate
 /// cannot reach further than the entry already standing.
-fn push_once(dialable: &mut Vec<At>, socket: SocketAddr, reach: Reach) {
+fn push_once(dialable: &mut Vec<At>, socket: SocketAddr, scope: Scope) {
     if !dialable.iter().any(|at| at.socket == socket) {
-        dialable.push(At { socket, reach });
+        dialable.push(At { socket, scope });
     }
 }

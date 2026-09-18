@@ -19,7 +19,7 @@
 //!
 //! That expansion is public as [`Dialable`], because a bind answers on more addresses than a record
 //! may carry: a surface that hands a person an address to dial by hand wants the tunnel address and
-//! the loopback one that no record may name. Each entry says how far it reaches ([`Reach`]), so
+//! the loopback one that no record may name. Each entry says how far it reaches ([`Scope`]), so
 //! every consumer applies its OWN rule to the same fact instead of reading a report about what this
 //! crate published.
 //!
@@ -45,7 +45,7 @@ use tokio::sync::watch;
 mod host;
 mod publish;
 
-pub use host::{At, Dialable, Reach};
+pub use host::{At, Dialable, Scope};
 pub use publish::{Advertised, Advertising};
 
 /// The mDNS service all theia nodes advertise and browse under: `_theia._udp.local.`.
