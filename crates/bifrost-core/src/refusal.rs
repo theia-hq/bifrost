@@ -25,7 +25,16 @@ pub enum Refusal {
         /// The peer's bounded explanation.
         detail: RefusalDetail,
     },
-    /// The peer admitted the dial but could not serve it for a host-side reason.
+    /// The host could not complete this dial for a reason of its own, which is NOT a ruling about the
+    /// dialer.
+    ///
+    /// It used to mean the narrower "the peer admitted the dial but could not serve it", so a dialer
+    /// could read it as proof of having been admitted. That is gone deliberately. A gate whose
+    /// evaluation runs out of time decided nothing about the caller's authority, and telling them they
+    /// were not admitted is a lie they act on: they stop retrying and go hunting for a credential
+    /// nothing rejected. So a pre-admission failure of the host's own lands here too, and the variant
+    /// now means only "this is about us, not about you". A caller retries it; it is never an
+    /// authorization outcome and must never be recorded as one.
     #[error("unavailable: {detail}")]
     Unavailable {
         /// The peer's bounded explanation.
