@@ -15,6 +15,12 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 
+# Per-ADDRESS IPv6 flags, which `if-addrs` reports for an interface and never for an address: the
+# netlink constants on Linux, and the ioctl request plus the `in6_ifreq` shape on the BSDs. Already
+# in this tree underneath `if-addrs` itself, so it adds an edge and not a crate.
+[target.'cfg(any(target_os = "linux", target_vendor = "apple", target_os = "freebsd"))'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
 
