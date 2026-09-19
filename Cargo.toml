@@ -51,6 +51,10 @@ unwrap_used = "deny"
 expect_used = "deny"
 wildcard_imports = "deny"
 std_instead_of_core = "warn"
+undocumented_unsafe_blocks = "deny"
 
 [workspace.lints.rust]
 unused_must_use = "deny"
+# Allowed back per-file, and only in the two platform reads under `bifrost-mdns/src/host/stable/`,
+# so the next `unsafe` anywhere in the workspace has to be argued rather than merely written.
+unsafe_code = "deny"

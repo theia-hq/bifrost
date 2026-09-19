@@ -10,10 +10,9 @@
 //! consumer reading the other's filtered result.
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::io;
 
 use if_addrs::Interface;
-
-use crate::MdnsError;
 
 mod stable;
 
@@ -72,28 +71,28 @@ pub struct At {
 
 /// The sockets a bind answers on, expanded from bind truth through this host's interfaces.
 ///
-/// Built by [`of`](Self::of), which is TOTAL: an interface list the OS will not hand over yields
-/// what is derivable without one (every concrete socket, and each wildcard's loopback) and carries
-/// the cause, so a consumer renders a short list instead of growing an error branch for a syscall.
+/// Built by [`of`](Self::of), which is TOTAL: whatever this host refuses to say, the set still
+/// holds what is derivable without it (every concrete socket, and each wildcard's loopback) and
+/// carries what went [`missing`](Self::missing), so a consumer renders a qualified list instead of
+/// growing an error branch for a syscall.
 #[derive(Debug)]
 pub struct Dialable {
     /// The entries, in [`all`](Self::all)'s order.
     addrs: Vec<At>,
-    /// Why the expanded half may be short: the interface read failed. `None` when the read
-    /// succeeded, and when no wildcard made it necessary.
-    interfaces: Option<MdnsError>,
+    /// What this host would not say, or would not still be answering on.
+    missing: Missing,
 }
 
 impl Dialable {
     /// Expand `bound` into the sockets it answers on.
     ///
     /// The interface list is read only when a wildcard is actually present, so a bind that named its
-    /// own addresses never pays the syscall and never carries a cause.
+    /// own addresses never pays the syscall and never misses anything.
     pub fn of(bound: Vec<SocketAddr>) -> Self {
         if !bound.iter().any(|socket| socket.ip().is_unspecified()) {
             return Self {
                 addrs: HostAddrs(Vec::new()).expand(bound),
-                interfaces: None,
+                missing: Missing::Nothing,
             };
         }
         Self::of_host(HostAddrs::of_this_host(), bound)
@@ -103,31 +102,35 @@ impl Dialable {
     ///
     /// The seam [`of`](Self::of) is written over, so the failed-read half is exercised by a test
     /// that hands it the failure, and every other case by a test that hands it a fixed host.
-    pub(crate) fn of_host(host: Result<HostAddrs, MdnsError>, bound: Vec<SocketAddr>) -> Self {
+    pub(crate) fn of_host(
+        host: Result<(HostAddrs, Missing), io::Error>,
+        bound: Vec<SocketAddr>,
+    ) -> Self {
         match host {
-            Ok(host) => Self {
+            Ok((host, missing)) => Self {
                 addrs: host.expand(bound),
-                interfaces: None,
+                missing,
             },
             // Total by construction: an empty interface list still expands a wildcard into the
             // loopback socket it genuinely answers on, and the cause rides along for the consumer
             // whose own outcome depends on it.
             Err(cause) => Self {
                 addrs: HostAddrs(Vec::new()).expand(bound),
-                interfaces: Some(cause),
+                missing: Missing::Interfaces(cause),
             },
         }
     }
 
-    /// Assemble a set from entries already in hand that is SHORT, and say why.
+    /// Assemble a set from entries already in hand that is MISSING something, and say what.
     ///
     /// [`FromIterator`] builds the set that read cleanly, which is the only set a consumer could
-    /// build for itself; this builds the other one. Without it, the branch a consumer writes over
-    /// [`interfaces`](Self::interfaces) is a branch its own tests cannot reach, and a branch no
-    /// test can reach is a branch that quietly goes missing.
-    pub fn short(entries: impl IntoIterator<Item = At>, cause: MdnsError) -> Self {
+    /// build for itself; this builds the other ones. Without it, the branch a consumer writes over
+    /// [`missing`](Self::missing) is a branch its own tests cannot reach, and a branch no test can
+    /// reach is a branch that quietly goes missing. Handed [`Missing::Nothing`] it is
+    /// [`FromIterator`], which is the constructor to reach for instead.
+    pub fn short(entries: impl IntoIterator<Item = At>, missing: Missing) -> Self {
         Self {
-            interfaces: Some(cause),
+            missing,
             ..Self::from_iter(entries)
         }
     }
@@ -143,15 +146,16 @@ impl Dialable {
         &self.addrs
     }
 
-    /// Why the expanded half may be short, or `None` when nothing was missed.
-    pub fn interfaces(&self) -> Option<&MdnsError> {
-        self.interfaces.as_ref()
+    /// What this set does not carry: the one read that failed, or the addresses that were dropped
+    /// because this host is about to stop answering on them.
+    pub fn missing(&self) -> &Missing {
+        &self.missing
     }
 
-    /// Split into the entries and the interface-read cause, for the one consumer that reports that
-    /// cause as its OWN outcome and so has to own it rather than borrow it.
-    pub(crate) fn into_parts(self) -> (Vec<At>, Option<MdnsError>) {
-        (self.addrs, self.interfaces)
+    /// Split into the entries and what went missing, for the one consumer that reports a missing
+    /// interface list as its OWN outcome and so has to own the cause rather than borrow it.
+    pub(crate) fn into_parts(self) -> (Vec<At>, Missing) {
+        (self.addrs, self.missing)
     }
 }
 
@@ -161,16 +165,90 @@ impl FromIterator<At> for Dialable {
     /// The order is [`all`](Dialable::all)'s invariant, so it is established here too rather than
     /// trusted from the caller: a value built this way is indistinguishable from an expanded one,
     /// which is what lets a consumer drive its own rendering over a host it does not have (a tunnel
-    /// link, a second network address). Nothing was read, so nothing is short:
-    /// [`interfaces`](Dialable::interfaces) is `None`, and [`short`](Dialable::short) is how a
-    /// caller says otherwise.
+    /// link, a second network address). Nothing was read, so nothing went missing:
+    /// [`missing`](Dialable::missing) is [`Missing::Nothing`], and [`short`](Dialable::short) is
+    /// how a caller says otherwise.
     fn from_iter<I: IntoIterator<Item = At>>(entries: I) -> Self {
         let mut addrs: Vec<At> = entries.into_iter().collect();
         addrs.sort_by_key(|at| at.scope.rank());
         Self {
             addrs,
-            interfaces: None,
+            missing: Missing::Nothing,
         }
+    }
+}
+
+/// What a [`Dialable`] does not carry, so a surface can say in ONE read whether its list is short
+/// and why, rather than promising a reach off a set that quietly lost half of itself.
+///
+/// Three things can go missing between a bind and its entries, and they are mutually exclusive by
+/// construction: the interface list is read before the per-address flags, so a set that lost the
+/// list never got as far as asking for the flags; and flags that could not be read drop nothing,
+/// so a set that dropped something read them. One value, one cause, one arm to render.
+#[derive(Debug)]
+pub enum Missing {
+    /// Nothing: every address this host reported, each one checked against its own flags.
+    Nothing,
+    /// This host's interface list, which the OS would not hand over, so every wildcard in the bind
+    /// stands for its own loopback socket and nothing else. A consumer that renders these entries
+    /// as this host's addresses without saying so asserts the host is loopback-only when it is not.
+    Interfaces(io::Error),
+    /// The per-address IPv6 flags, which this host would not report at all: a netlink socket a
+    /// sandbox refuses to open is the live case, and a hardening line nobody would connect to
+    /// address selection is all it takes. Every address is kept, so the list is WHOLE and
+    /// unchecked rather than short, and one of the addresses in it may be an RFC 8981 temporary
+    /// address that rots in the hand of the peer it is handed to.
+    Flags,
+    /// The addresses this host reports it is about to stop answering on, dropped so a peer is never
+    /// handed one that rots.
+    Expiring(Expiring),
+}
+
+/// The addresses dropped as expiring, by how far each of them reached.
+///
+/// The scope is the point. A tally alone cannot be rendered: on a host that never had a global
+/// address, a deprecated unique-local one is a drop that says nothing about the internet, so only
+/// the CLASS a drop emptied tells an operator something they can act on. It is also ALL this
+/// carries, deliberately: the dropped address is the one privacy addressing exists to keep
+/// unpublished, and handing it to a surface to print would defeat the mechanism that dropped it.
+///
+/// Non-empty by construction: nothing dropped is [`Missing::Nothing`], never an empty report.
+#[derive(Debug)]
+pub struct Expiring(Vec<Scope>);
+
+impl Expiring {
+    /// The report for the scopes of the dropped addresses, one entry per address, or `None` when
+    /// nothing was dropped.
+    pub fn of(scopes: impl IntoIterator<Item = Scope>) -> Option<Self> {
+        let scopes: Vec<Scope> = scopes.into_iter().collect();
+        (!scopes.is_empty()).then_some(Self(scopes))
+    }
+
+    /// The report for the interfaces the flag read took out of this host's list.
+    ///
+    /// They go through the SAME policy the kept ones do, so a drop counts exactly when it would
+    /// have become an entry: an address on a link that is down, or a link-local one, was never
+    /// going to be handed to anyone, and reporting it as lost would send a consumer looking for a
+    /// row that was never coming.
+    pub(crate) fn of_interfaces(dropped: Vec<Interface>) -> Option<Self> {
+        Self::of(
+            HostAddrs::of_interfaces(dropped)
+                .0
+                .into_iter()
+                .map(|addr| addr.scope),
+        )
+    }
+
+    /// How many addresses were dropped.
+    pub fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether one of the dropped addresses reached as far as `scope`, which is what lets a
+    /// consumer say WHICH class went short instead of only that something did. Compared by value,
+    /// so a tunnel is asked about by its own link.
+    pub fn reached(&self, scope: &Scope) -> bool {
+        self.0.contains(scope)
     }
 }
 
@@ -192,16 +270,27 @@ pub(crate) struct HostAddr {
 }
 
 impl HostAddrs {
-    /// Read this host's live interfaces.
+    /// Read this host's live interfaces, and what the read could not establish about them.
     ///
     /// Two reads, not one. `if-addrs` reports an interface's flags but never an ADDRESS's, and an
     /// IPv6 interface routinely carries a stable address and an RFC 8981 temporary one that is
     /// indistinguishable from it by its bits alone. Asking the platform for those flags is the
     /// only way to tell them apart, so it happens HERE, against the live list, and the policy
     /// below stays a pure function of whatever list it is handed.
-    fn of_this_host() -> Result<Self, MdnsError> {
-        let interfaces = if_addrs::get_if_addrs().map_err(MdnsError::Interfaces)?;
-        Ok(Self::of_interfaces(stable::only(interfaces)))
+    ///
+    /// Each read can come up empty in its own way, and both ways travel with the result: a list
+    /// this host would not hand over is the error, and flags it would not report, or addresses it
+    /// reported as expiring, are the [`Missing`] beside the addresses that survived.
+    fn of_this_host() -> Result<(Self, Missing), io::Error> {
+        let interfaces = if_addrs::get_if_addrs()?;
+        let (kept, lifetimes) = stable::sift(interfaces);
+        let missing = match lifetimes {
+            stable::Lifetimes::Unread => Missing::Flags,
+            stable::Lifetimes::Expiring(dropped) => {
+                Expiring::of_interfaces(dropped).map_or(Missing::Nothing, Missing::Expiring)
+            }
+        };
+        Ok((Self::of_interfaces(kept), missing))
     }
 
     /// The addresses of the interfaces a wildcard bind answers on, each with its scope.
@@ -371,17 +460,20 @@ fn is_reserved_v4(addr: Ipv4Addr) -> bool {
 fn is_reserved_v6(addr: Ipv6Addr) -> bool {
     matches!(
         addr.segments(),
-        // Teredo (`2001::/32`): a tunnel endpoint, not an address of this host's own.
-        [0x2001, 0x0000, ..]
-        // Benchmarking (`2001:2::/48`).
-        | [0x2001, 0x0002, 0x0000, ..]
-        // ORCHIDv2 (`2001:20::/28`): cryptographic identifiers, never routed.
-        | [0x2001, 0x0020..=0x002f, ..]
-        // Documentation (`2001:db8::/32`).
+        // IETF protocol assignments (`2001::/23`), the whole block IANA marks not globally
+        // reachable: Teredo (`2001::/32`), benchmarking (`2001:2::/48`), AMT (`2001:3::/32`),
+        // AS112 (`2001:4:112::/48`), ORCHID (`2001:10::/28`) and ORCHIDv2 (`2001:20::/28`). One
+        // arm for all of them, because the block is reserved wholesale and naming each assignment
+        // is a list that goes stale every time the IETF takes another one.
+        [0x2001, 0x0000..=0x01ff, ..]
+        // Documentation (`2001:db8::/32`), which sits outside the block above.
         | [0x2001, 0x0db8, ..]
         // 6to4 (`2002::/16`): reachable only through a relay, and one derived from an RFC 1918 v4
         // address reads exactly like one derived from a routable address.
         | [0x2002, ..]
+        // Documentation (`3fff::/20`, RFC 9637), the range that replaced borrowing a real prefix
+        // for an example.
+        | [0x3fff, 0x0000..=0x0fff, ..]
     )
 }
 

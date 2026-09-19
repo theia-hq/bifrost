@@ -4,10 +4,16 @@
 //! The dump answers for the whole host at once, so the interface list is not needed to ask, only
 //! to match against afterwards.
 //!
-//! The unsafe here is confined to three calls that MOVE BYTES: open a socket, send a fixed
-//! 24-byte request, receive into a stack buffer. Everything that INTERPRETS those bytes is safe
-//! code over `&[u8]`, so the walk that is easy to get wrong is not the walk that could be unsound,
-//! and it is exercised from a fixture rather than from whatever the kernel of the day says.
+//! Nothing that INTERPRETS a byte is unsafe. There are five `unsafe` blocks and they are all in
+//! the last three functions of this file: `socket` and `from_raw_fd` to get a descriptor,
+//! `setsockopt` to put a timeout on it, `send` of a fixed 24-byte request, and `recv` into a stack
+//! buffer. Everything that reads a byte back out is safe code over `&[u8]`, so the walk that is
+//! easy to get wrong is not the walk that could be unsound, and it is exercised from a fixture
+//! rather than from whatever the kernel of the day says.
+
+// One of the two files in this workspace that may say `unsafe`; the gate that keeps it to two is
+// `unsafe_code = "deny"` at the workspace root.
+#![allow(unsafe_code)]
 
 use core::net::Ipv6Addr;
 use std::io;
@@ -15,36 +21,53 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use if_addrs::Interface;
 
-/// The v6 addresses the kernel reports as temporary or deprecated.
+/// The v6 addresses the kernel reports as temporary or deprecated, each on the link it sits on.
 ///
-/// Empty when the dump cannot be made, which keeps every address: see this module's parent for why
-/// every failure degrades that way.
-pub(super) fn expiring(_interfaces: &[Interface]) -> Vec<Ipv6Addr> {
-    match dump() {
-        Ok(expiring) => expiring,
-        Err(cause) => {
-            tracing::debug!(%cause, "read per-address IPv6 flags over netlink; keeping every address");
-            Vec::new()
-        }
-    }
+/// The dump answers per interface INDEX and the caller matches on the link, so the interface list
+/// is what turns one into the other. An index this host did not report is dropped: no address in
+/// that list is on it, so naming it could only drop the same address off some other link.
+pub(super) fn expiring(interfaces: &[Interface]) -> io::Result<Vec<(String, Ipv6Addr)>> {
+    Ok(dump()?
+        .into_iter()
+        .filter_map(|(index, ip)| Some((link_of(interfaces, index)?.to_owned(), ip)))
+        .collect())
 }
 
-/// One `RTM_GETADDR` dump, gathering what it reports as expiring.
+/// The name this host gives interface `index`, as `if-addrs` reported it.
+fn link_of(interfaces: &[Interface], index: u32) -> Option<&str> {
+    interfaces
+        .iter()
+        .find(|interface| interface.index == Some(index))
+        .map(|interface| interface.name.as_str())
+}
+
+/// How many datagrams one dump may take before the run is abandoned. A v6 `RTM_NEWADDR` is about
+/// 76 bytes and the kernel caps a dump's datagram near 4 KiB, so this is a few thousand addresses:
+/// a guard against a kernel that never says it is done, not a limit any host reaches.
+const DATAGRAMS: usize = 64;
+
+/// One `RTM_GETADDR` dump, gathering what it reports as expiring, by interface index.
 ///
-/// A dump arrives as a run of datagrams ending in `NLMSG_DONE`. The bound on the run is a guard
-/// against a kernel that never sends one, not a real limit: a host with more addresses than this
-/// buffer holds has the addresses it did not reach KEPT, which is the safe direction.
-fn dump() -> io::Result<Vec<Ipv6Addr>> {
+/// A dump arrives as a run of datagrams ending in `NLMSG_DONE`. Running out of datagrams KEEPS the
+/// addresses it did not reach, which is the safe direction, so the bound costs correctness
+/// nothing.
+fn dump() -> io::Result<Vec<(u32, Ipv6Addr)>> {
     let socket = netlink()?;
     send(&socket, &request())?;
     let mut expiring = Vec::new();
     let mut datagram = [0u8; 8192];
-    for _ in 0..64 {
+    for _ in 0..DATAGRAMS {
         let read = receive(&socket, &mut datagram)?;
         if matches!(scan(&datagram[..read], &mut expiring), Flow::Done) {
-            break;
+            return Ok(expiring);
         }
     }
+    // The one degradation a caller could otherwise mistake for a complete dump: the addresses past
+    // here were never read, so they are kept, and the log is what says the answer was partial.
+    tracing::debug!(
+        datagrams = DATAGRAMS,
+        "the address dump did not end within the datagrams read for it; keeping the rest"
+    );
     Ok(expiring)
 }
 
@@ -78,22 +101,34 @@ enum Flow {
     Done,
 }
 
-/// Read one datagram of the dump, appending every temporary or deprecated address in it.
+/// Read one datagram of the dump, appending every temporary or deprecated address in it with the
+/// interface index it was announced on.
 ///
-/// Total over arbitrary bytes, and pure: anything that does not parse ENDS the walk, which keeps
-/// the addresses it did not reach rather than inventing them.
-fn scan(mut datagram: &[u8], expiring: &mut Vec<Ipv6Addr>) -> Flow {
+/// Total over arbitrary bytes, and pure. A message whose length does not fit the bytes that are
+/// actually there ends the walk, and a message that parses is judged on what was READ: a malformed
+/// attribute ends the attribute walk and leaves the flags at whatever the header said, which is
+/// still the kernel's own positive report. Both directions keep addresses rather than invent them.
+fn scan(mut datagram: &[u8], expiring: &mut Vec<(u32, Ipv6Addr)>) -> Flow {
     while let (Some(length), Some(kind)) = (u32_at(datagram, 0), u16_at(datagram, 4)) {
         let length = length as usize;
         if length < NLMSGHDR || length > datagram.len() {
             return Flow::Done;
         }
-        if kind == libc::NLMSG_DONE as u16 || kind == libc::NLMSG_ERROR as u16 {
+        if kind == libc::NLMSG_DONE as u16 {
             return Flow::Done;
         }
-        if kind == libc::RTM_NEWADDR {
-            if let Some(addr) = expiring_addr(&datagram[NLMSGHDR..length]) {
-                expiring.push(addr);
+        if kind == libc::NLMSG_ERROR as u16 {
+            tracing::debug!("the kernel refused the address dump; keeping what it did not report");
+            return Flow::Done;
+        }
+        // Only the kernel may say an address is on its way out, and a netlink message carries the
+        // port id of whoever sent it, which for the kernel is zero. Forging one is already out of
+        // reach (rtnetlink refuses an unprivileged user-to-user send, and the capability that
+        // lifts that can change the address outright), so this is the line that makes the boundary
+        // this parse's own rather than one inherited from a kernel registration flag.
+        if kind == libc::RTM_NEWADDR && u32_at(datagram, 12) == Some(0) {
+            if let Some(reported) = expiring_addr(&datagram[NLMSGHDR..length]) {
+                expiring.push(reported);
             }
         }
         datagram = &datagram[aligned(length).min(datagram.len())..];
@@ -101,11 +136,13 @@ fn scan(mut datagram: &[u8], expiring: &mut Vec<Ipv6Addr>) -> Flow {
     Flow::More
 }
 
-/// The address one `RTM_NEWADDR` payload announces, if that address is temporary or deprecated.
-fn expiring_addr(payload: &[u8]) -> Option<Ipv6Addr> {
+/// The address one `RTM_NEWADDR` payload announces and the interface index it sits on, if that
+/// address is temporary or deprecated.
+fn expiring_addr(payload: &[u8]) -> Option<(u32, Ipv6Addr)> {
     if *payload.first()? != libc::AF_INET6 as u8 {
         return None;
     }
+    let index = u32_at(payload, 4)?;
     // The `ifa_flags` byte in the header is the kernel's truncated copy of a 32-bit field; a
     // kernel new enough to have flags above the byte repeats all of them in an `IFA_FLAGS`
     // attribute, which then wins. Both bits asked about here fit in the byte, so a kernel that
@@ -133,7 +170,7 @@ fn expiring_addr(payload: &[u8]) -> Option<Ipv6Addr> {
     if flags & (libc::IFA_F_TEMPORARY | libc::IFA_F_DEPRECATED) == 0 {
         return None;
     }
-    addr
+    addr.map(|addr| (index, addr))
 }
 
 /// Where the next netlink item starts: every length is rounded up to four bytes.
@@ -157,6 +194,12 @@ fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
 ///
 /// The timeout is the whole reason this is not two lines: the read below runs on the bind path, so
 /// a kernel that answers the request and then says nothing more must not park the caller forever.
+/// `SO_RCVTIMEO` bounds one `recv` and not the run, so the total is this timeout times
+/// [`DATAGRAMS`], a minute rather than a second, and only a kernel dribbling one datagram just
+/// inside every timeout reaches it: the first timeout is an error that ends the dump. That total
+/// is the number that matters, because the dump is reached synchronously from
+/// [`MdnsDiscovery::advertise`](crate::MdnsDiscovery::advertise), so it holds a runtime worker for
+/// its duration, and on a current-thread runtime it holds every timer on that runtime with it.
 fn netlink() -> io::Result<OwnedFd> {
     // SAFETY: `socket` takes three integers and returns an owned descriptor or -1.
     let fd = unsafe {

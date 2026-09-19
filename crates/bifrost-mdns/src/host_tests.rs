@@ -10,7 +10,7 @@ use std::io;
 use if_addrs::{IfAddr, IfOperStatus, Ifv4Addr, Interface};
 
 use crate::MdnsError;
-use crate::host::{At, Dialable, HostAddr, HostAddrs, Scope};
+use crate::host::{At, Dialable, Expiring, HostAddr, HostAddrs, Missing, Scope};
 use crate::publish::Advertising;
 
 /// A wildcard bind means "every interface", so it answers at this host's concrete addresses on the
@@ -119,7 +119,10 @@ fn a_tunnel_address_is_handable_and_never_published() {
         interface("utun4", "100.100.201.59", Running::Yes, PointToPoint::Yes),
     ]);
 
-    let advertising = Advertising::of_dialable(Dialable::of_host(Ok(host), bound.clone()), &bound);
+    let advertising = Advertising::of_dialable(
+        Dialable::of_host(Ok((host, Missing::Nothing)), bound.clone()),
+        &bound,
+    );
 
     let Advertising::OnLan(advertised) = advertising else {
         panic!("the network address reaches the LAN, got {advertising:?}");
@@ -176,7 +179,7 @@ fn a_link_local_address_is_never_yielded() {
 #[test]
 fn a_wildcard_on_an_isolated_host_is_handable_at_loopback_and_publishes_nothing() {
     let bound = vec![socket("0.0.0.0", 51979)];
-    let dialable = Dialable::of_host(Ok(HostAddrs(Vec::new())), bound.clone());
+    let dialable = Dialable::of_host(Ok((HostAddrs(Vec::new()), Missing::Nothing)), bound.clone());
 
     assert_eq!(
         dialable.all(),
@@ -195,9 +198,7 @@ fn a_wildcard_on_an_isolated_host_is_handable_at_loopback_and_publishes_nothing(
 #[test]
 fn a_failed_interface_read_carries_its_cause_and_still_answers_at_loopback() {
     let bound = vec![socket("0.0.0.0", 51979), socket("127.0.0.1", 9000)];
-    let failed = Err(MdnsError::Interfaces(io::Error::other(
-        "no interfaces here",
-    )));
+    let failed = Err(io::Error::other("no interfaces here"));
 
     let dialable = Dialable::of_host(failed, bound.clone());
 
@@ -210,7 +211,7 @@ fn a_failed_interface_read_carries_its_cause_and_still_answers_at_loopback() {
         "the wildcard's loopback and the concrete bind survive a read that failed"
     );
     assert!(
-        matches!(dialable.interfaces(), Some(MdnsError::Interfaces(_))),
+        matches!(dialable.missing(), Missing::Interfaces(_)),
         "the cause rides along rather than being swallowed"
     );
     assert!(
@@ -222,17 +223,17 @@ fn a_failed_interface_read_carries_its_cause_and_still_answers_at_loopback() {
     );
 }
 
-/// A consumer renders the short list off the cause, so it has to be able to BUILD one: a branch
-/// over [`Dialable::interfaces`] that no test of its own can reach is the branch that came back
-/// missing. Assembled with a cause, the value is an expanded one in every other respect.
+/// A consumer renders the short list off what is missing, so it has to be able to BUILD one: a
+/// branch over [`Dialable::missing`] that no test of its own can reach is the branch that came
+/// back missing. Assembled with a cause, the value is an expanded one in every other respect.
 #[test]
-fn an_assembled_set_can_carry_the_cause_that_made_it_short() {
+fn an_assembled_set_can_carry_what_made_it_short() {
     let dialable = Dialable::short(
         [
             at("127.0.0.1", 51979, Scope::ThisMachine),
             at("192.168.1.5", 51979, Scope::Network),
         ],
-        MdnsError::Interfaces(io::Error::other("no interfaces here")),
+        Missing::Interfaces(io::Error::other("no interfaces here")),
     );
 
     assert_eq!(
@@ -244,9 +245,83 @@ fn an_assembled_set_can_carry_the_cause_that_made_it_short() {
         "an assembled set is ordered exactly as an expansion would order it"
     );
     assert!(
-        matches!(dialable.interfaces(), Some(MdnsError::Interfaces(_))),
+        matches!(dialable.missing(), Missing::Interfaces(_)),
         "the cause is what the whole constructor is for"
     );
+}
+
+/// What the report is per SCOPE for: a drop that EMPTIES a class is the thing an operator can act
+/// on, and a tally cannot say whether one happened. A deprecated unique-local address says nothing
+/// about whether this host still has an internet address; two counted drops say nothing at all.
+#[test]
+fn what_was_dropped_as_expiring_says_which_class_lost_an_address() {
+    let dropped = Expiring::of_interfaces(vec![
+        v6("en0", "2605:59c1:18c2:df08:7c65:e101:392a:62b1"),
+        v6("en0", "fde2:7482:8f60:8:1cd3:29d9:f098:aa4b"),
+    ])
+    .expect("two addresses were dropped");
+
+    assert_eq!(dropped.count(), 2, "one entry per dropped address");
+    assert!(
+        dropped.reached(&Scope::Internet),
+        "the global address that went is what makes the internet class worth a word"
+    );
+    assert!(
+        dropped.reached(&Scope::Network),
+        "the unique-local one is a separate loss, not the same one counted twice"
+    );
+    assert!(
+        !dropped.reached(&Scope::ThisMachine),
+        "a class nothing was dropped from lost nothing"
+    );
+}
+
+/// A drop counts only where it would have become an entry. An address on a link this host does not
+/// report as running was never going to be handed to anyone, so calling it lost sends a consumer
+/// looking for a row that was never coming; and nothing dropped is no report at all, never an
+/// empty one.
+#[test]
+fn a_drop_this_host_would_never_have_handed_over_is_not_reported() {
+    let down = Interface {
+        oper_status: IfOperStatus::Down,
+        ..v6("en1", "2605:59c1:18c2:df08:7c65:e101:392a:62b1")
+    };
+
+    assert!(
+        Expiring::of_interfaces(vec![down]).is_none(),
+        "the link is down, so the address it carried was never an entry to lose"
+    );
+    assert!(
+        Expiring::of_interfaces(Vec::new()).is_none(),
+        "nothing dropped is nothing to report"
+    );
+}
+
+/// What the other two arms must NOT change. Only the interface list is a read the wire depends on:
+/// flags this host would not report leave every address in hand, and an address dropped as
+/// expiring is one no record may carry anyway, so a record still goes out in both cases.
+#[test]
+fn only_a_missing_interface_list_takes_this_node_off_the_wire() {
+    let bound = vec![socket("0.0.0.0", 51979)];
+    for missing in [
+        Missing::Flags,
+        Missing::Expiring(Expiring::of([Scope::Internet]).expect("one dropped address")),
+    ] {
+        let dialable = Dialable::short(
+            [
+                at("192.168.1.5", 51979, Scope::Network),
+                at("127.0.0.1", 51979, Scope::ThisMachine),
+            ],
+            missing,
+        );
+
+        let advertising = Advertising::of_dialable(dialable, &bound);
+
+        let Advertising::OnLan(advertised) = advertising else {
+            panic!("the network address is still publishable, got {advertising:?}");
+        };
+        assert_eq!(advertised.addrs(), [socket("192.168.1.5", 51979)]);
+    }
 }
 
 /// A fixed stand-in for a multi-homed host: two routable v4 addresses, one v6, and loopback in both
@@ -285,6 +360,10 @@ fn interface(name: &str, addr: &str, running: Running, p2p: PointToPoint) -> Int
             broadcast: None,
         }),
         index: None,
+        // Windows names an adapter as well as an interface; this list is fixed, so the identifier
+        // is too.
+        #[cfg(windows)]
+        adapter_name: "{00000000-0000-0000-0000-000000000000}".to_owned(),
         oper_status: match running {
             Running::Yes => IfOperStatus::Up,
             Running::No => IfOperStatus::Down,
@@ -379,13 +458,30 @@ fn a_reserved_range_is_not_an_internet_one() {
             "benchmarking, at the far end of the same /15",
         ),
         ("240.0.0.1", "reserved for future use, `240.0.0.0/4`"),
+        (
+            "255.255.255.255",
+            "broadcast, which `240.0.0.0/4` subsumes and no separate predicate is asked for",
+        ),
+        (
+            "0.0.0.0",
+            "unspecified, which `0.0.0.0/8` subsumes for the same reason",
+        ),
         ("2001::1", "Teredo, `2001::/32`"),
         ("2001:2::1", "benchmarking, `2001:2::/48`"),
+        ("2001:3::1", "AMT, `2001:3::/32`"),
+        ("2001:4:112::1", "AS112-v6, `2001:4:112::/48`"),
+        ("2001:10::1", "ORCHID, `2001:10::/28`"),
         ("2001:2f:ffff::1", "ORCHIDv2, `2001:20::/28`"),
+        (
+            "2001:1ff:ffff::1",
+            "the far end of IETF protocol assignments, `2001::/23`",
+        ),
         (
             "2002:c0a8:105::1",
             "6to4, `2002::/16`, this one derived from `192.168.1.5`",
         ),
+        ("3fff::1", "documentation, `3fff::/20`"),
+        ("3fff:fff:ffff::1", "the far end of the same /20"),
     ] {
         assert_eq!(scope_of(addr), Scope::Network, "{addr} is {reason}");
     }
@@ -401,6 +497,11 @@ fn a_routable_address_is_still_an_internet_one() {
         "9.9.9.9",
         "2605:59c1:18c2:df08::5",
         "2606:4700:4700::1111",
+        // The first address past the reserved `2001::/23`, which the one arm covering that whole
+        // block must not swallow: `2001:200::/23` is an ordinary APNIC allocation.
+        "2001:200::1",
+        // The first address past documentation's `3fff::/20`.
+        "3fff:1000::1",
     ] {
         assert_eq!(
             scope_of(addr),
@@ -504,6 +605,10 @@ fn v6(name: &str, addr: &str) -> Interface {
             broadcast: None,
         }),
         index: None,
+        // Windows names an adapter as well as an interface; this list is fixed, so the identifier
+        // is too.
+        #[cfg(windows)]
+        adapter_name: "{00000000-0000-0000-0000-000000000000}".to_owned(),
         oper_status: IfOperStatus::Up,
         is_p2p: false,
     }

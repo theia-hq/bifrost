@@ -21,7 +21,8 @@
 //! may carry: a surface that hands a person an address to dial by hand wants the tunnel address and
 //! the loopback one that no record may name. Each entry says how far it reaches ([`Scope`]), so
 //! every consumer applies its OWN rule to the same fact instead of reading a report about what this
-//! crate published.
+//! crate published. The set also says what it is [`Missing`], so a surface that hands over a short
+//! list can say why it is short rather than presenting it as everything this host has.
 //!
 //! The browse learns nothing until its first query-response cycle (roughly a second out with the
 //! interactive cadence), so [`wait_ready`](Discovery::wait_ready) gives a dial a bounded wait for
@@ -45,7 +46,7 @@ use tokio::sync::watch;
 mod host;
 mod publish;
 
-pub use host::{At, Dialable, Scope};
+pub use host::{At, Dialable, Expiring, Missing, Scope};
 pub use publish::{Advertised, Advertising};
 
 /// The mDNS service all theia nodes advertise and browse under: `_theia._udp.local.`.

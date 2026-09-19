@@ -11,7 +11,7 @@
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::MdnsError;
-use crate::host::{Dialable, Scope};
+use crate::host::{Dialable, Missing, Scope};
 
 /// What an mDNS advertisement reaches, as a surface reads it before it claims anything.
 ///
@@ -50,11 +50,14 @@ impl Advertising {
 
     /// Decide what the sockets a bind answers on put on the wire, given the bind they came from.
     pub(crate) fn of_dialable(dialable: Dialable, bound: &[SocketAddr]) -> Self {
-        let (dialable, interfaces) = dialable.into_parts();
+        let (dialable, missing) = dialable.into_parts();
         // The interface list is only ever needed to expand a wildcard, so failing to read it leaves
-        // nothing to publish rather than nothing to run: browsing does not depend on it.
-        if let Some(cause) = interfaces {
-            return Self::BrowseOnly(cause);
+        // nothing to publish rather than nothing to run: browsing does not depend on it. It is also
+        // the only thing whose absence changes this decision: unread per-address flags leave every
+        // address in hand, and an address dropped as expiring is one this node must not publish
+        // anyway, so both leave a record this crate can still stand behind.
+        if let Missing::Interfaces(cause) = missing {
+            return Self::BrowseOnly(MdnsError::Interfaces(cause));
         }
         Self::of_publishable(
             dialable

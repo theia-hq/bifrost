@@ -5,6 +5,10 @@
 //! module never sends anything on it. One call per v6 address is the whole cost, and a host has a
 //! handful.
 
+// One of the two files in this workspace that may say `unsafe`; the gate that keeps it to two is
+// `unsafe_code = "deny"` at the workspace root.
+#![allow(unsafe_code)]
+
 use core::ffi::c_char;
 use core::net::Ipv6Addr;
 use std::io;
@@ -12,27 +16,22 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use if_addrs::{IfAddr, Interface};
 
-/// The v6 addresses this host reports as temporary or deprecated.
+/// The v6 addresses this host reports as temporary or deprecated, each on the link it sits on.
 ///
-/// Empty when the handle cannot be opened, which keeps every address: see this module's parent for
-/// why every failure degrades that way.
-pub(super) fn expiring(interfaces: &[Interface]) -> Vec<Ipv6Addr> {
-    let socket = match handle() {
-        Ok(socket) => socket,
-        Err(cause) => {
-            tracing::debug!(%cause, "open a handle for per-address IPv6 flags; keeping every address");
-            return Vec::new();
-        }
-    };
-    interfaces
+/// An address that cannot be asked about answers NO and is kept, so the only failure that reaches
+/// the caller is the handle itself: see this module's parent for why every failure degrades by
+/// keeping the address.
+pub(super) fn expiring(interfaces: &[Interface]) -> io::Result<Vec<(String, Ipv6Addr)>> {
+    let socket = handle()?;
+    Ok(interfaces
         .iter()
         .filter_map(|interface| match interface.addr {
             IfAddr::V6(ref v6) => Some((interface.name.as_str(), v6.ip)),
             IfAddr::V4(_) => None,
         })
         .filter(|(link, ip)| is_expiring(&socket, link, *ip))
-        .map(|(_, ip)| ip)
-        .collect()
+        .map(|(link, ip)| (link.to_owned(), ip))
+        .collect())
 }
 
 /// Whether the kernel reports `ip` on `link` as temporary or deprecated.
@@ -89,13 +88,37 @@ fn query(link: &str, ip: Ipv6Addr) -> Option<libc::in6_ifreq> {
 
 /// A socket to ask through. Never connected and never written to; the ioctl needs only a
 /// descriptor of the right family.
+///
+/// Close-on-exec in two steps, because the platforms disagree on where it goes: FreeBSD takes it
+/// in the socket type, and macOS has no `SOCK_CLOEXEC` for `socket()` at all, so it sets the
+/// descriptor flag straight afterwards. The flag is not optional on either: this runs on the bind
+/// path of a long-running server, and a descriptor a `spawn` in that window copies into a child
+/// outlives the frame that opened it by the life of the child.
 fn handle() -> io::Result<OwnedFd> {
+    #[cfg(target_vendor = "apple")]
+    let kind = libc::SOCK_DGRAM;
+    #[cfg(target_os = "freebsd")]
+    let kind = libc::SOCK_DGRAM | libc::SOCK_CLOEXEC;
     // SAFETY: `socket` takes three integers and returns an owned descriptor or -1.
-    let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
+    let fd = unsafe { libc::socket(libc::AF_INET6, kind, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `fd` is a descriptor this call just created, owned by nothing else, handed over
     // exactly once so it is closed exactly once.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    #[cfg(target_vendor = "apple")]
+    {
+        // SAFETY: `F_SETFD` takes one integer argument, and the descriptor is owned by `socket`
+        // and live for the call.
+        let set = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        if set < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(socket)
 }
+
+#[cfg(test)]
+#[path = "bsd_tests.rs"]
+mod bsd_tests;
