@@ -2,6 +2,56 @@
 
 All notable changes to bifrost, newest first.
 
+## v0.2.3
+
+An address we hand out is one that will still be there tomorrow.
+
+### Fixed
+- **A temporary IPv6 address is no longer published or handed over.** `HostAddrs` classified every
+  address the OS reported, so on any host with IPv6 privacy addressing an RFC 8981 temporary address
+  sat beside its stable twin, indistinguishable. Two consequences, and the larger one was on the wire:
+  `Advertising::of_dialable` publishes everything scoped `Internet` or `Network`, so a node was
+  MULTICASTING a rotating privacy address onto every network it joined. The other is that a consumer
+  handed one to a human, and macOS deprecates it at about 24h and expires it at about 7d, so the peer's
+  copy rots inside a day. `if-addrs` reports flags for an INTERFACE and never for an ADDRESS, so there
+  was nothing to read; there is now, via netlink `RTM_GETADDR` on Linux and `SIOCGIFAFLAG_IN6` on the
+  BSDs, with a documented no-op on every other target. The rule is one-directional: drop only what the
+  kernel positively reports as temporary or deprecated, so a failed socket, a failed ioctl, a name that
+  will not fit `IFNAMSIZ`, or a platform with no answer all KEEP the address, because dropping a real
+  address on a syscall failure is worse than keeping a temporary one.
+- **`is_globally_routable` delivers what its doc claims.** It admitted 6to4 `2002::/16`, Teredo
+  `2001::/32`, AMT, ORCHID, RFC 9637 documentation space `3fff::/20`, and on the v4 side `198.18.0.0/15`
+  (the range tap-mode Zscaler and WARP hand out), `240.0.0.0/4`, `192.0.0.0/24`, `192.88.99.0/24` and
+  `0.0.0.0/8` beyond the exact unspecified address.
+
+### Added
+- **`Dialable` says WHY a set is short.** `Missing` is `Nothing`, `Interfaces`, `Flags` or `Expiring`,
+  and the three causes are mutually exclusive by construction rather than by convention: the interface
+  list is read before the flags, so losing it means never asking, and unread flags drop nothing, so a
+  drop implies the flags were read. `Flags` is honest that the list is WHOLE and unchecked rather than
+  short. A positive report is not a failure, which is why this exists: deprecation can take every SLAAC
+  global at once on a prefix rotation or a wake from sleep, while those addresses still accept inbound,
+  since RFC 4862 deprecation deprioritizes an address as a SOURCE and says nothing about it as a
+  destination. `Expiring` carries the dropped addresses' scope CLASSES and never the addresses, which
+  are the one thing privacy addressing exists to keep unpublished. A signal, not a floor: nothing keeps
+  a deprecated address.
+- **`ScopeClass` and `Scope::class`,** so a class can be asked about as a class. `Expiring::reached`
+  took a `Scope`, which compared tunnels by link name, so a link whose only address expired left no
+  surviving row to take the name from and the question could not be formed at all.
+
+### Changed
+- **`Reach` is `Scope` in this crate.** Reach is node-scale, and `bifrost_iroh::Reach` is the relay and
+  resolver a NODE leans on; this is one address's scope. Two sibling crates spending one word on
+  unrelated concepts made every consumer of both qualify forever.
+- **A gap in a family this bind never expands is not this bind's gap.** The interface read hands its
+  findings forward and only `Dialable::of_host` narrows them against the sockets actually bound, because
+  the read holds only half of what names a missing set. A v4-only bind therefore reports neither a v6
+  drop nor an unread-flags caveat, and a concrete bind reports nothing at all, by the rule rather than a
+  special case: it answers at exactly the address it named, so no address this host stopped answering on
+  was ever a row it could lose.
+- **`unsafe_code = "deny"` on the workspace,** allowed back in the two platform reads only. These are
+  the first `unsafe` blocks in bifrost and they arrived with no lint.
+
 ## v0.2.2
 
 An unavailable refusal is about the host, not about the dialer.
