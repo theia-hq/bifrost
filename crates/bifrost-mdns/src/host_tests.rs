@@ -263,19 +263,12 @@ fn what_was_dropped_as_expiring_says_which_class_lost_an_address() {
         ],
     );
 
-    let dropped = report(&dialable);
-    assert_eq!(dropped.count(), 2, "one entry per dropped address");
-    assert!(
-        dropped.reached(ScopeClass::Internet),
-        "the global address that went is what makes the internet class worth a word"
-    );
-    assert!(
-        dropped.reached(ScopeClass::Network),
-        "the unique-local one is a separate loss, not the same one counted twice"
-    );
-    assert!(
-        !dropped.reached(ScopeClass::ThisMachine),
-        "a class nothing was dropped from lost nothing"
+    assert_eq!(
+        classes(&dialable),
+        [ScopeClass::Internet, ScopeClass::Network],
+        "the global address that went is what makes the internet class worth a word, the \
+         unique-local one is a separate loss rather than the same one twice, and a class nothing \
+         was dropped from is not in the report at all"
     );
 }
 
@@ -308,19 +301,11 @@ fn a_drop_this_host_would_never_have_handed_over_is_not_reported() {
 fn a_drop_in_a_family_this_bind_never_expands_is_not_this_binds_drop() {
     let dialable = bind_over_drops(vec![socket("0.0.0.0", 51979)], both_families_dropped());
 
-    let dropped = report(&dialable);
     assert_eq!(
-        dropped.count(),
-        1,
-        "only the v4 drop is one this bind could have been short of"
-    );
-    assert!(
-        !dropped.reached(ScopeClass::Internet),
-        "the global v6 address went, and this bind never had an internet row to lose"
-    );
-    assert!(
-        dropped.reached(ScopeClass::Network),
-        "the v4 drop is this bind's own, and stands whatever happened in the other family"
+        classes(&dialable),
+        [ScopeClass::Network],
+        "the global v6 address went and this bind never had an internet row to lose, while the \
+         v4 drop is its own and stands whatever happened in the other family"
     );
 }
 
@@ -334,11 +319,11 @@ fn a_dual_stack_bind_reports_the_drop_a_v4_only_bind_could_not() {
         both_families_dropped(),
     );
 
-    let dropped = report(&dialable);
-    assert_eq!(dropped.count(), 2, "both drops are this bind's own");
-    assert!(
-        dropped.reached(ScopeClass::Internet),
-        "the bind expands v6, so the global v6 address it lost is a class that went short"
+    assert_eq!(
+        classes(&dialable),
+        [ScopeClass::Internet, ScopeClass::Network],
+        "the bind expands both families, so the global v6 address it lost is a class that went \
+         short and both drops are its own"
     );
 }
 
@@ -387,8 +372,9 @@ fn a_tunnel_whose_only_address_expired_still_answers_for_the_tunnel_class() {
         )],
     );
 
-    assert!(
-        report(&dialable).reached(ScopeClass::Tunnel),
+    assert_eq!(
+        classes(&dialable),
+        [ScopeClass::Tunnel],
         "the class the drop emptied is the one an operator can act on"
     );
     assert!(
@@ -397,6 +383,126 @@ fn a_tunnel_whose_only_address_expired_still_answers_for_the_tunnel_class() {
             .iter()
             .any(|at| at.scope.class() == ScopeClass::Tunnel),
         "no row of that class is left, which is exactly why the question is a class question"
+    );
+}
+
+/// The same rule, the other gap. The per-address flags exist for IPv6 alone -- both platform reads
+/// ask for AF_INET6 addresses and nothing else -- so a bind that expands no v6 wildcard was never
+/// carrying an address they could have checked, and reporting them unread over its rows caveats an
+/// expiry that cannot happen to any of them. Unnarrowed, that lands on every v4-only bind (any
+/// transport binding `0.0.0.0` alone) permanently and on every banner.
+#[test]
+fn unread_flags_are_a_gap_only_for_a_bind_that_expands_the_family_they_cover() {
+    let unread = |bound| Dialable::of_host(Ok((host_addrs(), Gaps::Flags)), bound);
+
+    assert!(
+        matches!(
+            unread(vec![socket("0.0.0.0", 51979)]).missing(),
+            Missing::Nothing
+        ),
+        "the bind expands v4 alone, and no row of it has a lifetime this read could have checked"
+    );
+    assert!(
+        matches!(
+            unread(vec![socket("[::]", 51987)]).missing(),
+            Missing::Flags
+        ),
+        "a v6 wildcard expands the family the flags cover, so its rows are genuinely unchecked"
+    );
+    assert!(
+        matches!(
+            unread(vec![socket("0.0.0.0", 51979), socket("[::]", 51987)]).missing(),
+            Missing::Flags
+        ),
+        "and a dual-stack bind is as short as the v6 half of it"
+    );
+    assert!(
+        matches!(
+            unread(vec![socket("[2001:db8::5]", 9000)]).missing(),
+            Missing::Nothing
+        ),
+        "a concrete bind expands no family at all: it answers at the address it named itself"
+    );
+}
+
+/// One lost address is one lost address however many wildcards of its family the bind holds. An
+/// unnamed dual-stack bind already gets a socket per family and a caller may bind more, so a
+/// narrowing that yielded an entry per matching wildcard would have a single dropped address read
+/// as a class that lost several. Claimed in the prose over `expanded_by` and pinned nowhere else.
+#[test]
+fn one_address_is_expanded_once_however_many_wildcards_stand_for_it() {
+    let host = HostAddrs(vec![host_addr("2605:59c1:18c2:df08::5", Scope::Internet)]);
+
+    let expanded: Vec<IpAddr> = host
+        .expanded_by(&[socket("[::]", 1), socket("[::]", 2), socket("[::]", 3)])
+        .map(|host| host.ip)
+        .collect();
+
+    assert_eq!(
+        expanded,
+        vec![ip("2605:59c1:18c2:df08::5")],
+        "three wildcards over one address is one address"
+    );
+}
+
+/// The link-local belt at the SET scale as well as the per-wildcard one. Both filters answer the
+/// same question about the same list, so a `fe80::` cannot be an address a bind is short of any
+/// more than it can be an address a bind hands over.
+#[test]
+fn a_link_local_address_is_expanded_by_no_bind() {
+    let host = HostAddrs(vec![
+        host_addr("fe80::1", Scope::Network),
+        host_addr("2001:db8::5", Scope::Network),
+    ]);
+
+    let expanded: Vec<IpAddr> = host
+        .expanded_by(&[socket("[::]", 51987)])
+        .map(|host| host.ip)
+        .collect();
+
+    assert_eq!(
+        expanded,
+        vec![ip("2001:db8::5")],
+        "the scope a link-local address needs to mean anything travels with neither consumer"
+    );
+}
+
+/// The order every consumer reads off this set, asserted as the order rather than through a
+/// rendering that happens to depend on it. [`ScopeClass`]'s declaration order IS the sort order
+/// once `Ord` is derived, which makes reordering the variants a silent reordering of every lane
+/// this crate feeds: the surface that would notice lives in another repo, at a pinned rev, while
+/// the edit that breaks it happens here.
+#[test]
+fn the_expansion_orders_the_classes_by_how_far_they_reach() {
+    let dialable: Dialable = [
+        at("127.0.0.1", 51979, Scope::ThisMachine),
+        at(
+            "100.100.201.59",
+            51979,
+            Scope::Tunnel {
+                link: "utun4".to_owned(),
+            },
+        ),
+        at("192.168.1.5", 51979, Scope::Network),
+        at("[2605:59c1:18c2:df08::5]", 51979, Scope::Internet),
+    ]
+    .into_iter()
+    .collect();
+
+    assert_eq!(
+        dialable
+            .all()
+            .iter()
+            .map(|at| at.scope.class())
+            .collect::<Vec<ScopeClass>>(),
+        [
+            ScopeClass::Internet,
+            ScopeClass::Network,
+            ScopeClass::Tunnel,
+            ScopeClass::ThisMachine,
+        ],
+        "anyone who can route to it, anyone on this network, anyone on one named link, this \
+         machine: a shuffled set comes out in the order a person chooses an address in"
     );
 }
 
@@ -429,10 +535,10 @@ fn both_families_dropped() -> Vec<Interface> {
     ]
 }
 
-/// What a set reports it lost to expiry, or a panic naming what it reported instead.
-fn report(dialable: &Dialable) -> &Expiring {
+/// The classes a set reports it lost an address from, or a panic naming what it reported instead.
+fn classes(dialable: &Dialable) -> Vec<ScopeClass> {
     match dialable.missing() {
-        Missing::Expiring(dropped) => dropped,
+        Missing::Expiring(dropped) => dropped.classes().collect(),
         other => panic!("the bind expands the family these addresses sat in, got {other:?}"),
     }
 }

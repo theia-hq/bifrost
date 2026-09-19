@@ -10,6 +10,7 @@
 //! consumer reading the other's filtered result.
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::collections::BTreeSet;
 use std::io;
 
 use if_addrs::Interface;
@@ -66,8 +67,9 @@ impl Scope {
 /// Consumers group by class rather than by scope: a surface renders one line per class, then asks
 /// whether a class it drew nothing for is one that lost an address. Both questions are about the
 /// class, and with no value for it each site can only ask by comparing discriminants, which is the
-/// same question rewritten once per consumer. Naming it here also makes the classes enumerable,
-/// which is what a consumer sweeping every class needs.
+/// same question rewritten once per consumer. Naming it is also what lets a drop report say WHICH
+/// class went short ([`Expiring::classes`]), so a consumer reads the classes that lost something
+/// instead of sweeping all of them and asking about each.
 ///
 /// Ordered as [`Dialable::all`] is ordered, by how far the class reaches without the peer first
 /// joining something: anyone who can route to it, anyone on one named link, this machine. The
@@ -236,49 +238,51 @@ pub enum Missing {
     /// sandbox refuses to open is the live case, and a hardening line nobody would connect to
     /// address selection is all it takes. Every address is kept, so the list is WHOLE and
     /// unchecked rather than short, and one of the addresses in it may be an RFC 8981 temporary
-    /// address that rots in the hand of the peer it is handed to.
+    /// address that rots in the hand of the peer it is handed to. Reported only where that last
+    /// sentence can be true, which is a bind that expands IPv6: the flags are IPv6's own, so a
+    /// bind that expands no v6 wildcard is not short of them.
     Flags,
     /// The addresses this host reports it is about to stop answering on, dropped so a peer is never
     /// handed one that rots. Only the ones THIS bind would have expanded: see [`Gaps::against`].
     Expiring(Expiring),
 }
 
-/// The addresses dropped as expiring, by how far each of them reached.
+/// The classes the addresses dropped as expiring came out of, each named once.
 ///
-/// The class is the point. A tally alone cannot be rendered: on a host that never had a global
-/// address, a deprecated unique-local one is a drop that says nothing about the internet, so only
-/// the CLASS a drop emptied tells an operator something they can act on. It is also ALL this
-/// carries, deliberately: the dropped address is the one privacy addressing exists to keep
-/// unpublished, and handing it to a surface to print would defeat the mechanism that dropped it.
-/// A tunnel's link name goes the same way, since the only question anyone asks of a drop is which
-/// class it came out of.
+/// The class is the point, and it is the whole of it. A tally cannot be rendered: on a host that
+/// never had a global address, a deprecated unique-local one is a drop that says nothing about the
+/// internet, so only the CLASS a drop emptied tells an operator something they can act on. Two
+/// drops out of one class are that one class, which is why this is a SET: the multiplicity answers
+/// no question anyone may ask, and a shape that carries a fact nothing can render invites a
+/// consumer to render it anyway. The addresses themselves are left out for the same reason and a
+/// sharper one: the dropped address is the one privacy addressing exists to keep unpublished, and
+/// handing it to a surface to print would defeat the mechanism that dropped it. A tunnel's link
+/// name goes the same way.
 ///
 /// Non-empty by construction: nothing dropped is [`Missing::Nothing`], never an empty report.
 #[derive(Debug)]
-pub struct Expiring(Vec<ScopeClass>);
+pub struct Expiring(BTreeSet<ScopeClass>);
 
 impl Expiring {
-    /// The report for the scopes of the dropped addresses, one entry per address, or `None` when
-    /// nothing was dropped. Each scope is kept as its [`class`](Scope::class) and no finer.
+    /// The report for the scopes of the dropped addresses, or `None` when nothing was dropped.
+    /// Each scope is kept as its [`class`](Scope::class) and no finer, and each class once.
     pub fn of(scopes: impl IntoIterator<Item = Scope>) -> Option<Self> {
-        let classes: Vec<ScopeClass> = scopes.into_iter().map(|scope| scope.class()).collect();
+        let classes: BTreeSet<ScopeClass> = scopes.into_iter().map(|scope| scope.class()).collect();
         (!classes.is_empty()).then_some(Self(classes))
     }
 
-    /// How many addresses were dropped.
-    pub fn count(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Whether one of the dropped addresses reached as far as `class`, which is what lets a
-    /// consumer say WHICH class went short instead of only that something did.
+    /// Which classes lost an address, in [`Dialable::all`]'s order, which is what lets a consumer
+    /// say WHICH class went short instead of only that something did.
     ///
-    /// Asked of the class rather than of one scope, because the case that matters most is the one
-    /// where nothing of that class is left: a link whose only address expired leaves no surviving
-    /// row to read a link name off, so a question phrased as `Tunnel { link }` is one the consumer
-    /// that needs the answer cannot even form.
-    pub fn reached(&self, class: ScopeClass) -> bool {
-        self.0.contains(&class)
+    /// Handed over as classes rather than answered one class at a time, because the case that
+    /// matters most is the one where nothing of that class is left: a link whose only address
+    /// expired leaves no surviving row to read a link name off, so a question phrased as
+    /// `Tunnel { link }` is one the consumer that needs the answer cannot even form. And a
+    /// consumer asking which of the classes it drew nothing for was emptied only ever has to look
+    /// at the classes something was dropped from, so these are all of them: sweeping every class
+    /// instead is a fifth variant away from silently going unswept.
+    pub fn classes(&self) -> impl Iterator<Item = ScopeClass> {
+        self.0.iter().copied()
     }
 }
 
@@ -296,8 +300,9 @@ pub(crate) enum Gaps {
     /// Nothing: every address this host reported, each one checked against its own flags.
     Nothing,
     /// The per-address IPv6 flags, which this host would not report at all. Says nothing about any
-    /// one address, so no bind narrows it: every address is kept and every one of them is
-    /// unchecked.
+    /// one address: every address is kept and every one of them is unchecked. Narrowed by FAMILY
+    /// all the same, because the flags it stands for are IPv6's alone: a bind that expands no v6
+    /// wildcard carries no address this read could have checked, so it is short of nothing.
     Flags,
     /// The addresses this host reports it is about to stop answering on, already through the
     /// expansion's own policy and non-empty by construction, like the [`Expiring`] a bind narrows
@@ -323,15 +328,25 @@ impl Gaps {
 
     /// What a set expanded from `bound` is missing, which is less than this host could not say.
     ///
-    /// A dropped address in a family `bound` never expands was never a candidate for an entry, so
-    /// it is not this set's loss. A concrete socket answers at exactly itself and expands no family
-    /// at all, which makes a bind of nothing but concrete sockets a bind no drop can be laid at:
-    /// every address it answers on is one it named itself. Narrowing can leave nothing, and nothing
-    /// left is [`Missing::Nothing`] rather than an empty report, which [`Expiring`] is not.
+    /// A gap in a family `bound` never expands was never a candidate for an entry, so it is not
+    /// this set's loss. A concrete socket answers at exactly itself and expands no family at all,
+    /// which makes a bind of nothing but concrete sockets a bind no gap can be laid at: every
+    /// address it answers on is one it named itself.
+    ///
+    /// ONE rule, both gaps, at the two scales each of them has. A drop is one address, so the
+    /// narrowing asks the question of each dropped address and can leave nothing, and nothing left
+    /// is [`Missing::Nothing`] rather than an empty report, which [`Expiring`] is not. Unread
+    /// flags name no address, so the question is asked once for the whole family they cover: the
+    /// platform reads collect IPv6 addresses and nothing else, so a v4-only bind (any
+    /// transport that binds `0.0.0.0` alone) would otherwise carry a permanent caveat about
+    /// an expiry that could not touch a single row it renders.
     fn against(self, bound: &[SocketAddr]) -> Missing {
         match self {
             Self::Nothing => Missing::Nothing,
-            Self::Flags => Missing::Flags,
+            Self::Flags if expands_family_of(bound, IpAddr::V6(Ipv6Addr::UNSPECIFIED)) => {
+                Missing::Flags
+            }
+            Self::Flags => Missing::Nothing,
             Self::Expiring(dropped) => {
                 Expiring::of(dropped.expanded_by(bound).map(|addr| addr.scope))
                     .map_or(Missing::Nothing, Missing::Expiring)
@@ -482,22 +497,30 @@ impl HostAddrs {
     }
 
     /// These addresses that `bound` as a whole expands: the set-level form of
-    /// [`same_family`](Self::same_family)'s per-wildcard question.
+    /// [`same_family`](Self::same_family)'s per-wildcard question, filtered the same way, so the
+    /// two cannot come to disagree about which addresses a bind stands for.
     ///
     /// An address is expanded when SOME wildcard in the bind stands for its family, and a concrete
     /// socket stands for no family at all, since it answers at exactly the address it named. Each
     /// address is yielded at most once however many wildcards match it, so two wildcards of one
-    /// family on different ports do not make one lost address read as two. Family is the whole
-    /// question: this is asked of a list already through
-    /// [`of_interfaces`](Self::of_interfaces), which is where an address neither consumer could
-    /// use has already gone.
-    fn expanded_by(self, bound: &[SocketAddr]) -> impl Iterator<Item = HostAddr> {
-        self.0.into_iter().filter(move |host| {
-            bound.iter().any(|socket| {
-                socket.ip().is_unspecified() && socket.ip().is_ipv4() == host.ip.is_ipv4()
-            })
-        })
+    /// family on different ports do not make one lost address read as two.
+    pub(crate) fn expanded_by(self, bound: &[SocketAddr]) -> impl Iterator<Item = HostAddr> {
+        self.0
+            .into_iter()
+            .filter(move |host| expands_family_of(bound, host.ip) && !is_link_local(host.ip))
     }
+}
+
+/// Whether some wildcard in `bound` stands for the family `family` is in.
+///
+/// The one definition of what a bind expands, which is asked at two scales: of one of this host's
+/// addresses, to say whether it could ever have become an entry, and of a family as a whole, to
+/// say whether a read covering only that family is a read this bind needed. A concrete socket
+/// expands nothing and is never a match: it answers at exactly the address it named.
+fn expands_family_of(bound: &[SocketAddr], family: IpAddr) -> bool {
+    bound
+        .iter()
+        .any(|socket| socket.ip().is_unspecified() && socket.ip().is_ipv4() == family.is_ipv4())
 }
 
 /// The loopback address of `family`'s own family, the address every wildcard bind also answers on.
