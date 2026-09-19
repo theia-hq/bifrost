@@ -46,7 +46,7 @@ use tokio::sync::watch;
 mod host;
 mod publish;
 
-pub use host::{At, Dialable, Expiring, Missing, Scope};
+pub use host::{At, Dialable, Expiring, Missing, Scope, ScopeClass};
 pub use publish::{Advertised, Advertising};
 
 /// The mDNS service all theia nodes advertise and browse under: `_theia._udp.local.`.

@@ -10,7 +10,7 @@ use std::io;
 use if_addrs::{IfAddr, IfOperStatus, Ifv4Addr, Interface};
 
 use crate::MdnsError;
-use crate::host::{At, Dialable, Expiring, HostAddr, HostAddrs, Missing, Scope};
+use crate::host::{At, Dialable, Expiring, Gaps, HostAddr, HostAddrs, Missing, Scope, ScopeClass};
 use crate::publish::Advertising;
 
 /// A wildcard bind means "every interface", so it answers at this host's concrete addresses on the
@@ -120,7 +120,7 @@ fn a_tunnel_address_is_handable_and_never_published() {
     ]);
 
     let advertising = Advertising::of_dialable(
-        Dialable::of_host(Ok((host, Missing::Nothing)), bound.clone()),
+        Dialable::of_host(Ok((host, Gaps::Nothing)), bound.clone()),
         &bound,
     );
 
@@ -179,7 +179,7 @@ fn a_link_local_address_is_never_yielded() {
 #[test]
 fn a_wildcard_on_an_isolated_host_is_handable_at_loopback_and_publishes_nothing() {
     let bound = vec![socket("0.0.0.0", 51979)];
-    let dialable = Dialable::of_host(Ok((HostAddrs(Vec::new()), Missing::Nothing)), bound.clone());
+    let dialable = Dialable::of_host(Ok((HostAddrs(Vec::new()), Gaps::Nothing)), bound.clone());
 
     assert_eq!(
         dialable.all(),
@@ -250,36 +250,39 @@ fn an_assembled_set_can_carry_what_made_it_short() {
     );
 }
 
-/// What the report is per SCOPE for: a drop that EMPTIES a class is the thing an operator can act
+/// What the report is per CLASS for: a drop that EMPTIES a class is the thing an operator can act
 /// on, and a tally cannot say whether one happened. A deprecated unique-local address says nothing
 /// about whether this host still has an internet address; two counted drops say nothing at all.
 #[test]
 fn what_was_dropped_as_expiring_says_which_class_lost_an_address() {
-    let dropped = Expiring::of_interfaces(vec![
-        v6("en0", "2605:59c1:18c2:df08:7c65:e101:392a:62b1"),
-        v6("en0", "fde2:7482:8f60:8:1cd3:29d9:f098:aa4b"),
-    ])
-    .expect("two addresses were dropped");
+    let dialable = bind_over_drops(
+        vec![socket("[::]", 51987)],
+        vec![
+            v6("en0", "2605:59c1:18c2:df08:7c65:e101:392a:62b1"),
+            v6("en0", "fde2:7482:8f60:8:1cd3:29d9:f098:aa4b"),
+        ],
+    );
 
+    let dropped = report(&dialable);
     assert_eq!(dropped.count(), 2, "one entry per dropped address");
     assert!(
-        dropped.reached(&Scope::Internet),
+        dropped.reached(ScopeClass::Internet),
         "the global address that went is what makes the internet class worth a word"
     );
     assert!(
-        dropped.reached(&Scope::Network),
+        dropped.reached(ScopeClass::Network),
         "the unique-local one is a separate loss, not the same one counted twice"
     );
     assert!(
-        !dropped.reached(&Scope::ThisMachine),
+        !dropped.reached(ScopeClass::ThisMachine),
         "a class nothing was dropped from lost nothing"
     );
 }
 
 /// A drop counts only where it would have become an entry. An address on a link this host does not
 /// report as running was never going to be handed to anyone, so calling it lost sends a consumer
-/// looking for a row that was never coming; and nothing dropped is no report at all, never an
-/// empty one.
+/// looking for a row that was never coming; and nothing dropped is no gap at all, never an empty
+/// one.
 #[test]
 fn a_drop_this_host_would_never_have_handed_over_is_not_reported() {
     let down = Interface {
@@ -288,13 +291,150 @@ fn a_drop_this_host_would_never_have_handed_over_is_not_reported() {
     };
 
     assert!(
-        Expiring::of_interfaces(vec![down]).is_none(),
+        matches!(Gaps::expiring(vec![down]), Gaps::Nothing),
         "the link is down, so the address it carried was never an entry to lose"
     );
     assert!(
-        Expiring::of_interfaces(Vec::new()).is_none(),
+        matches!(Gaps::expiring(Vec::new()), Gaps::Nothing),
         "nothing dropped is nothing to report"
     );
+}
+
+/// THE case the narrowing exists for. A bind that expands one family alone, which is every
+/// transport that binds `0.0.0.0` and nothing else, never had a row in the other family, so an
+/// address dropped there leaves a gap the BIND already explains. Reported, it would have a
+/// consumer tell its operator to wait out an expiry for a row that was never coming.
+#[test]
+fn a_drop_in_a_family_this_bind_never_expands_is_not_this_binds_drop() {
+    let dialable = bind_over_drops(vec![socket("0.0.0.0", 51979)], both_families_dropped());
+
+    let dropped = report(&dialable);
+    assert_eq!(
+        dropped.count(),
+        1,
+        "only the v4 drop is one this bind could have been short of"
+    );
+    assert!(
+        !dropped.reached(ScopeClass::Internet),
+        "the global v6 address went, and this bind never had an internet row to lose"
+    );
+    assert!(
+        dropped.reached(ScopeClass::Network),
+        "the v4 drop is this bind's own, and stands whatever happened in the other family"
+    );
+}
+
+/// The other half of the same fact: the SAME drop against a bind that does expand v6 is reported,
+/// so the narrowing is about which families this bind answers on and never about the v6 family
+/// being worth less.
+#[test]
+fn a_dual_stack_bind_reports_the_drop_a_v4_only_bind_could_not() {
+    let dialable = bind_over_drops(
+        vec![socket("0.0.0.0", 51979), socket("[::]", 51979)],
+        both_families_dropped(),
+    );
+
+    let dropped = report(&dialable);
+    assert_eq!(dropped.count(), 2, "both drops are this bind's own");
+    assert!(
+        dropped.reached(ScopeClass::Internet),
+        "the bind expands v6, so the global v6 address it lost is a class that went short"
+    );
+}
+
+/// Narrowing can take everything, and a report of nothing is not a report: the consumer branches on
+/// the variant, so an empty one would render an expiry clause over a set that lost nothing.
+#[test]
+fn a_drop_narrowed_down_to_nothing_leaves_nothing_missing() {
+    let dialable = bind_over_drops(
+        vec![socket("0.0.0.0", 51979)],
+        vec![v6("en0", "2605:59c1:18c2:df08:7c65:e101:392a:62b1")],
+    );
+
+    assert!(
+        matches!(dialable.missing(), Missing::Nothing),
+        "the one drop was in a family this bind never expands, so the set is missing nothing"
+    );
+}
+
+/// A concrete bind expands to nothing but itself, so no address this host is about to stop
+/// answering on was ever a row it could lose. [`Dialable::of`] never even reads the interfaces for
+/// such a bind; this pins that the seam underneath agrees, rather than leaving the two paths to
+/// disagree the day something else reads the host first.
+#[test]
+fn a_concrete_bind_expands_nothing_so_no_drop_is_its_own() {
+    let dialable = bind_over_drops(vec![socket("192.168.1.5", 9000)], both_families_dropped());
+
+    assert!(
+        matches!(dialable.missing(), Missing::Nothing),
+        "an address the bind named itself cannot go short of an address it never named"
+    );
+}
+
+/// A drop is asked about as a CLASS, because the case that needs the answer is the one where the
+/// instance is gone: the only address on `utun4` expired, so no surviving row carries the link name
+/// a question about that one tunnel would have to be phrased in, and a tunnel-only drop would fall
+/// through unsaid.
+#[test]
+fn a_tunnel_whose_only_address_expired_still_answers_for_the_tunnel_class() {
+    let dialable = bind_over_drops(
+        vec![socket("0.0.0.0", 51979)],
+        vec![interface(
+            "utun4",
+            "100.100.201.59",
+            Running::Yes,
+            PointToPoint::Yes,
+        )],
+    );
+
+    assert!(
+        report(&dialable).reached(ScopeClass::Tunnel),
+        "the class the drop emptied is the one an operator can act on"
+    );
+    assert!(
+        !dialable
+            .all()
+            .iter()
+            .any(|at| at.scope.class() == ScopeClass::Tunnel),
+        "no row of that class is left, which is exactly why the question is a class question"
+    );
+}
+
+/// The set a bind of `bound` comes out with on a host that dropped `dropped` as expiring.
+///
+/// The surviving interface is fixed and v4, so what a case varies is only the bind and the drops,
+/// and it is reached through the seam rather than through the live read: every one of these cases
+/// is a dual-stack host with a privacy address on it, which CI is not.
+fn bind_over_drops(bound: Vec<SocketAddr>, dropped: Vec<Interface>) -> Dialable {
+    Dialable::of_host(
+        Ok((
+            HostAddrs::of_interfaces(vec![interface(
+                "en0",
+                "192.168.1.5",
+                Running::Yes,
+                PointToPoint::No,
+            )]),
+            Gaps::expiring(dropped),
+        )),
+        bound,
+    )
+}
+
+/// One drop in each family, the shape a v4-only bind and a dual-stack bind must read differently:
+/// a global v6 address (the RFC 8981 temporary one) and a private v4 address.
+fn both_families_dropped() -> Vec<Interface> {
+    vec![
+        v6("en0", "2605:59c1:18c2:df08:7c65:e101:392a:62b1"),
+        interface("en1", "192.168.1.9", Running::Yes, PointToPoint::No),
+    ]
+}
+
+/// What a set reports it lost to expiry, or a panic naming what it reported instead.
+fn report(dialable: &Dialable) -> &Expiring {
+    match dialable.missing() {
+        Missing::Expiring(dropped) => dropped,
+        other => panic!("the bind expands the family these addresses sat in, got {other:?}"),
+    }
 }
 
 /// What the other two arms must NOT change. Only the interface list is a read the wire depends on:

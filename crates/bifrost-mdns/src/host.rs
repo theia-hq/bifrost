@@ -46,18 +46,44 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// The sort key behind [`Dialable::all`]'s order, by how far an address reaches without the peer
-    /// first joining something: anyone who can route to it, anyone on that one named link, this
-    /// machine. Private and numeric only to sort: an `Ord` on the enum would order two tunnels by
-    /// link name and lose the interface order the OS reported them in.
-    fn rank(&self) -> u8 {
+    /// Which class this scope belongs to: the same reach, with the instance dropped.
+    ///
+    /// [`Tunnel`](Self::Tunnel) is the only variant carrying one, so this is the whole difference
+    /// between asking about the link `utun4` and asking about tunnels.
+    pub fn class(&self) -> ScopeClass {
         match self {
-            Self::Internet => 0,
-            Self::Network => 1,
-            Self::Tunnel { .. } => 2,
-            Self::ThisMachine => 3,
+            Self::Internet => ScopeClass::Internet,
+            Self::Network => ScopeClass::Network,
+            Self::Tunnel { .. } => ScopeClass::Tunnel,
+            Self::ThisMachine => ScopeClass::ThisMachine,
         }
     }
+}
+
+/// How far a CLASS of address reaches: a [`Scope`] with the instance dropped, so every tunnel
+/// rather than the one on `utun4`.
+///
+/// Consumers group by class rather than by scope: a surface renders one line per class, then asks
+/// whether a class it drew nothing for is one that lost an address. Both questions are about the
+/// class, and with no value for it each site can only ask by comparing discriminants, which is the
+/// same question rewritten once per consumer. Naming it here also makes the classes enumerable,
+/// which is what a consumer sweeping every class needs.
+///
+/// Ordered as [`Dialable::all`] is ordered, by how far the class reaches without the peer first
+/// joining something: anyone who can route to it, anyone on one named link, this machine. The
+/// declaration order is the sort order, which is why it lives on the class and not on [`Scope`]:
+/// an `Ord` on the scope would order two tunnels by link name and lose the interface order the OS
+/// reported them in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScopeClass {
+    /// The class of [`Scope::Internet`].
+    Internet,
+    /// The class of [`Scope::Network`].
+    Network,
+    /// The class of [`Scope::Tunnel`], whatever link an address of it sits on.
+    Tunnel,
+    /// The class of [`Scope::ThisMachine`].
+    ThisMachine,
 }
 
 /// One socket this bind answers on, and how far that socket reaches.
@@ -87,7 +113,8 @@ impl Dialable {
     /// Expand `bound` into the sockets it answers on.
     ///
     /// The interface list is read only when a wildcard is actually present, so a bind that named its
-    /// own addresses never pays the syscall and never misses anything.
+    /// own addresses never pays the syscall and never misses anything: it answers at exactly the
+    /// addresses it named, and nothing this host could say about any other one is a fact about it.
     pub fn of(bound: Vec<SocketAddr>) -> Self {
         if !bound.iter().any(|socket| socket.ip().is_unspecified()) {
             return Self {
@@ -102,15 +129,24 @@ impl Dialable {
     ///
     /// The seam [`of`](Self::of) is written over, so the failed-read half is exercised by a test
     /// that hands it the failure, and every other case by a test that hands it a fixed host.
+    ///
+    /// Where the read's [`Gaps`] become this set's [`Missing`]: only here are both facts in hand,
+    /// the addresses the host would not stand behind and the bind that says which of them this set
+    /// could ever have carried.
     pub(crate) fn of_host(
-        host: Result<(HostAddrs, Missing), io::Error>,
+        host: Result<(HostAddrs, Gaps), io::Error>,
         bound: Vec<SocketAddr>,
     ) -> Self {
         match host {
-            Ok((host, missing)) => Self {
-                addrs: host.expand(bound),
-                missing,
-            },
+            Ok((host, gaps)) => {
+                // Narrowed before `bound` is spent on the expansion, since the same bind answers
+                // both questions: which addresses become entries, and which losses are its own.
+                let missing = gaps.against(&bound);
+                Self {
+                    addrs: host.expand(bound),
+                    missing,
+                }
+            }
             // Total by construction: an empty interface list still expands a wildcard into the
             // loopback socket it genuinely answers on, and the cause rides along for the consumer
             // whose own outcome depends on it.
@@ -128,6 +164,9 @@ impl Dialable {
     /// [`missing`](Self::missing) is a branch its own tests cannot reach, and a branch no test can
     /// reach is a branch that quietly goes missing. Handed [`Missing::Nothing`] it is
     /// [`FromIterator`], which is the constructor to reach for instead.
+    ///
+    /// What is missing is taken as given, never narrowed: there is no bind here to narrow it
+    /// against, and entries already in hand are the whole expansion this set has.
     pub fn short(entries: impl IntoIterator<Item = At>, missing: Missing) -> Self {
         Self {
             missing,
@@ -170,7 +209,7 @@ impl FromIterator<At> for Dialable {
     /// how a caller says otherwise.
     fn from_iter<I: IntoIterator<Item = At>>(entries: I) -> Self {
         let mut addrs: Vec<At> = entries.into_iter().collect();
-        addrs.sort_by_key(|at| at.scope.rank());
+        addrs.sort_by_key(|at| at.scope.class());
         Self {
             addrs,
             missing: Missing::Nothing,
@@ -200,43 +239,30 @@ pub enum Missing {
     /// address that rots in the hand of the peer it is handed to.
     Flags,
     /// The addresses this host reports it is about to stop answering on, dropped so a peer is never
-    /// handed one that rots.
+    /// handed one that rots. Only the ones THIS bind would have expanded: see [`Gaps::against`].
     Expiring(Expiring),
 }
 
 /// The addresses dropped as expiring, by how far each of them reached.
 ///
-/// The scope is the point. A tally alone cannot be rendered: on a host that never had a global
+/// The class is the point. A tally alone cannot be rendered: on a host that never had a global
 /// address, a deprecated unique-local one is a drop that says nothing about the internet, so only
 /// the CLASS a drop emptied tells an operator something they can act on. It is also ALL this
 /// carries, deliberately: the dropped address is the one privacy addressing exists to keep
 /// unpublished, and handing it to a surface to print would defeat the mechanism that dropped it.
+/// A tunnel's link name goes the same way, since the only question anyone asks of a drop is which
+/// class it came out of.
 ///
 /// Non-empty by construction: nothing dropped is [`Missing::Nothing`], never an empty report.
 #[derive(Debug)]
-pub struct Expiring(Vec<Scope>);
+pub struct Expiring(Vec<ScopeClass>);
 
 impl Expiring {
     /// The report for the scopes of the dropped addresses, one entry per address, or `None` when
-    /// nothing was dropped.
+    /// nothing was dropped. Each scope is kept as its [`class`](Scope::class) and no finer.
     pub fn of(scopes: impl IntoIterator<Item = Scope>) -> Option<Self> {
-        let scopes: Vec<Scope> = scopes.into_iter().collect();
-        (!scopes.is_empty()).then_some(Self(scopes))
-    }
-
-    /// The report for the interfaces the flag read took out of this host's list.
-    ///
-    /// They go through the SAME policy the kept ones do, so a drop counts exactly when it would
-    /// have become an entry: an address on a link that is down, or a link-local one, was never
-    /// going to be handed to anyone, and reporting it as lost would send a consumer looking for a
-    /// row that was never coming.
-    pub(crate) fn of_interfaces(dropped: Vec<Interface>) -> Option<Self> {
-        Self::of(
-            HostAddrs::of_interfaces(dropped)
-                .0
-                .into_iter()
-                .map(|addr| addr.scope),
-        )
+        let classes: Vec<ScopeClass> = scopes.into_iter().map(|scope| scope.class()).collect();
+        (!classes.is_empty()).then_some(Self(classes))
     }
 
     /// How many addresses were dropped.
@@ -244,11 +270,73 @@ impl Expiring {
         self.0.len()
     }
 
-    /// Whether one of the dropped addresses reached as far as `scope`, which is what lets a
-    /// consumer say WHICH class went short instead of only that something did. Compared by value,
-    /// so a tunnel is asked about by its own link.
-    pub fn reached(&self, scope: &Scope) -> bool {
-        self.0.contains(scope)
+    /// Whether one of the dropped addresses reached as far as `class`, which is what lets a
+    /// consumer say WHICH class went short instead of only that something did.
+    ///
+    /// Asked of the class rather than of one scope, because the case that matters most is the one
+    /// where nothing of that class is left: a link whose only address expired leaves no surviving
+    /// row to read a link name off, so a question phrased as `Tunnel { link }` is one the consumer
+    /// that needs the answer cannot even form.
+    pub fn reached(&self, class: ScopeClass) -> bool {
+        self.0.contains(&class)
+    }
+}
+
+/// What reading this host could not establish, before a bind says which of it matters.
+///
+/// [`Missing`] belongs to a SET, and the read that produces it holds only half of what it takes to
+/// name: the host knows what it could not check and what it dropped, and only the bind knows which
+/// address families it expands into entries. A v4-only bind on a dual-stack host never had a v6 row
+/// to lose, so a v6 address dropped as expiring is not a loss that set can report: a consumer would
+/// blame expiry for a row the BIND explains, and tell an operator to wait or renew over a family
+/// this bind was never going to answer on. So the read's half travels this far as facts, and
+/// becomes a [`Missing`] in [`Dialable::of_host`], where the bind is.
+#[derive(Debug)]
+pub(crate) enum Gaps {
+    /// Nothing: every address this host reported, each one checked against its own flags.
+    Nothing,
+    /// The per-address IPv6 flags, which this host would not report at all. Says nothing about any
+    /// one address, so no bind narrows it: every address is kept and every one of them is
+    /// unchecked.
+    Flags,
+    /// The addresses this host reports it is about to stop answering on, already through the
+    /// expansion's own policy and non-empty by construction, like the [`Expiring`] a bind narrows
+    /// them into.
+    Expiring(HostAddrs),
+}
+
+impl Gaps {
+    /// The gap left by the interfaces the flag read took out of this host's list, and
+    /// [`Nothing`](Self::Nothing) when it took none that would ever have been handed over.
+    ///
+    /// They go through the SAME policy the kept ones do, so a drop counts exactly when it would
+    /// have become an entry: an address on a link that is down, or a link-local one, was never
+    /// going to be handed to anyone, and reporting it as lost would send a consumer looking for a
+    /// row that was never coming.
+    pub(crate) fn expiring(dropped: Vec<Interface>) -> Self {
+        let dropped = HostAddrs::of_interfaces(dropped);
+        if dropped.0.is_empty() {
+            return Self::Nothing;
+        }
+        Self::Expiring(dropped)
+    }
+
+    /// What a set expanded from `bound` is missing, which is less than this host could not say.
+    ///
+    /// A dropped address in a family `bound` never expands was never a candidate for an entry, so
+    /// it is not this set's loss. A concrete socket answers at exactly itself and expands no family
+    /// at all, which makes a bind of nothing but concrete sockets a bind no drop can be laid at:
+    /// every address it answers on is one it named itself. Narrowing can leave nothing, and nothing
+    /// left is [`Missing::Nothing`] rather than an empty report, which [`Expiring`] is not.
+    fn against(self, bound: &[SocketAddr]) -> Missing {
+        match self {
+            Self::Nothing => Missing::Nothing,
+            Self::Flags => Missing::Flags,
+            Self::Expiring(dropped) => {
+                Expiring::of(dropped.expanded_by(bound).map(|addr| addr.scope))
+                    .map_or(Missing::Nothing, Missing::Expiring)
+            }
+        }
     }
 }
 
@@ -280,17 +368,16 @@ impl HostAddrs {
     ///
     /// Each read can come up empty in its own way, and both ways travel with the result: a list
     /// this host would not hand over is the error, and flags it would not report, or addresses it
-    /// reported as expiring, are the [`Missing`] beside the addresses that survived.
-    fn of_this_host() -> Result<(Self, Missing), io::Error> {
+    /// reported as expiring, are the [`Gaps`] beside the addresses that survived. Gaps and not
+    /// [`Missing`]: which of them a SET is short of is a question only its bind can answer.
+    fn of_this_host() -> Result<(Self, Gaps), io::Error> {
         let interfaces = if_addrs::get_if_addrs()?;
         let (kept, lifetimes) = stable::sift(interfaces);
-        let missing = match lifetimes {
-            stable::Lifetimes::Unread => Missing::Flags,
-            stable::Lifetimes::Expiring(dropped) => {
-                Expiring::of_interfaces(dropped).map_or(Missing::Nothing, Missing::Expiring)
-            }
+        let gaps = match lifetimes {
+            stable::Lifetimes::Unread => Gaps::Flags,
+            stable::Lifetimes::Expiring(dropped) => Gaps::expiring(dropped),
         };
-        Ok((Self::of_interfaces(kept), missing))
+        Ok((Self::of_interfaces(kept), gaps))
     }
 
     /// The addresses of the interfaces a wildcard bind answers on, each with its scope.
@@ -377,7 +464,7 @@ impl HostAddrs {
             );
         }
         // Stable, so the interface order the OS reported survives inside each group.
-        dialable.sort_by_key(|at| at.scope.rank());
+        dialable.sort_by_key(|at| at.scope.class());
         dialable
     }
 
@@ -392,6 +479,24 @@ impl HostAddrs {
         self.0
             .iter()
             .filter(move |host| host.ip.is_ipv4() == wildcard.is_ipv4() && !is_link_local(host.ip))
+    }
+
+    /// These addresses that `bound` as a whole expands: the set-level form of
+    /// [`same_family`](Self::same_family)'s per-wildcard question.
+    ///
+    /// An address is expanded when SOME wildcard in the bind stands for its family, and a concrete
+    /// socket stands for no family at all, since it answers at exactly the address it named. Each
+    /// address is yielded at most once however many wildcards match it, so two wildcards of one
+    /// family on different ports do not make one lost address read as two. Family is the whole
+    /// question: this is asked of a list already through
+    /// [`of_interfaces`](Self::of_interfaces), which is where an address neither consumer could
+    /// use has already gone.
+    fn expanded_by(self, bound: &[SocketAddr]) -> impl Iterator<Item = HostAddr> {
+        self.0.into_iter().filter(move |host| {
+            bound.iter().any(|socket| {
+                socket.ip().is_unspecified() && socket.ip().is_ipv4() == host.ip.is_ipv4()
+            })
+        })
     }
 }
 
