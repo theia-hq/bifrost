@@ -13,6 +13,18 @@
 use tokio::io;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+/// The largest app header this wire carries, in bytes, enforced at both ends.
+///
+/// A header names one blob, so the largest legitimate one is a name: POSIX bounds a whole filesystem
+/// path at 4 KiB (`PATH_MAX`), and 64 KiB leaves sixteen times that for a header that carries more than
+/// a name (a content type, a small manifest beside it). It is also the size of the streaming buffer the
+/// receive path already holds, so the header is never the largest allocation in a transfer.
+///
+/// The bound exists because the length prefix is a `u32`: without it a receiver allocates whatever the
+/// peer declares, up to 4 GiB, before reading one byte of the header it is sizing for. The cap is
+/// checked against the prefix, so an oversized claim costs the receiver nothing.
+pub const MAX_HEADER_LEN: u32 = 64 * 1024;
+
 /// Frames a Bifrost blob transfer. Bumped when the header layout changes.
 const MAGIC: [u8; 4] = *b"BFW1";
 /// The receiver accepted and verified the blob.
@@ -106,7 +118,13 @@ where
     where
         Src: io::AsyncRead + Unpin,
     {
+        // Both ends hold the same bound, so an over-cap header fails here, named by the caller's own
+        // error, rather than as a remote refusal partway through a frame the receiver was always going
+        // to reject.
         let header_len = u32::try_from(header.len()).map_err(|_| Error::HeaderTooLong)?;
+        if header_len > MAX_HEADER_LEN {
+            return Err(Error::HeaderTooLong);
+        }
         self.writer.write_all(&MAGIC).await?;
         self.writer.write_all(&header_len.to_be_bytes()).await?;
         self.writer.write_all(header).await?;
@@ -199,13 +217,24 @@ where
         Ok(())
     }
 
+    /// Read the one length-prefixed field the layout has, the app header, bounded by
+    /// [`MAX_HEADER_LEN`].
+    ///
+    /// The cap is checked against the PREFIX, before the buffer exists: the peer's `u32` is a claim, and
+    /// sizing a buffer to an unverified claim is what lets one frame commit 4 GiB of the host. An
+    /// over-cap claim is [`Error::OversizedHeader`], never [`Error::Truncated`]: the frame is well
+    /// formed and too big, which is a different answer than a stream that ended.
     async fn read_framed(&mut self) -> Result<Vec<u8>> {
         let mut len = [0u8; 4];
         self.reader
             .read_exact(&mut len)
             .await
             .map_err(|_| Error::Truncated)?;
-        let mut bytes = vec![0u8; u32::from_be_bytes(len) as usize];
+        let len = u32::from_be_bytes(len);
+        if len > MAX_HEADER_LEN {
+            return Err(Error::OversizedHeader { len });
+        }
+        let mut bytes = vec![0u8; len as usize];
         self.reader
             .read_exact(&mut bytes)
             .await
@@ -224,7 +253,12 @@ where
 }
 
 /// Why a blob transfer failed.
+///
+/// Non-exhaustive: hardening this wire adds classes, and [`OversizedHeader`](Self::OversizedHeader) is
+/// one. Match the classes you act on and keep a catch-all for the rest, so a class a newer peer can
+/// earn never inherits whichever arm happened to be written first.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// An underlying read or write failed.
     #[error("io")]
@@ -232,9 +266,16 @@ pub enum Error {
     /// The stream did not begin with the expected frame magic.
     #[error("bad frame magic")]
     BadMagic,
-    /// The app header was longer than the header field allows.
+    /// The app header handed to [`Transfer::send`] was over [`MAX_HEADER_LEN`].
     #[error("header too long")]
     HeaderTooLong,
+    /// The peer declared a header over [`MAX_HEADER_LEN`]. Refused from the length prefix alone, so no
+    /// buffer is ever sized to the claim.
+    #[error("peer declared a {len} byte header, over the {MAX_HEADER_LEN} byte cap")]
+    OversizedHeader {
+        /// The header length the peer declared, in bytes.
+        len: u32,
+    },
     /// The source produced a different number of bytes than the blob declared.
     #[error("source length did not match the blob length")]
     LengthMismatch,
@@ -250,3 +291,6 @@ pub enum Error {
 }
 
 type Result<T> = core::result::Result<T, Error>;
+
+#[cfg(test)]
+mod lib_tests;
