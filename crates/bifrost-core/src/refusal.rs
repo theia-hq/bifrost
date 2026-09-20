@@ -12,9 +12,57 @@
 /// absent name) stays host-side, so a stranger, a revoked holder, and a wrong
 /// name receive identical bytes and the refusal is neither a revocation nor a
 /// service-enumeration oracle. `BadRequest` and `Unavailable`
-/// are safe to name: the first is the peer's grammar (public), the second is a
-/// post-admission host-resource failure.
+/// are safe to name: the first is the peer's grammar (public), the second says
+/// only that the failure is the host's own and rules on nothing about the
+/// dialer (see that variant's own doc below).
+///
+/// Non-exhaustive, because the set of refusal CLASSES is not closed and this
+/// crate sits under every stream protocol in the family: a class added here
+/// must not force each of them into a lockstep major release before any of it
+/// can ship. The price is that a consumer now carries an arm for a class it
+/// cannot name, and that arm is the dangerous one. It must SAY that a peer on a
+/// newer version refused with something this build cannot read, and it must
+/// never quietly stand in for one of the classes below: standing in for
+/// `NotAdmitted` invents an authorization ruling out of a message that carried
+/// none, which is the lie this whole type is shaped to prevent.
+///
+/// So a consumer branches on the classes it knows and keeps the last arm loud:
+///
+/// ```
+/// use bifrost_core::Refusal;
+///
+/// /// Whether the dialer should try the same dial again, or `Err` when the
+/// /// class is one this build cannot read.
+/// fn worth_retrying(refusal: &Refusal) -> Result<bool, String> {
+///     match refusal {
+///         // A ruling about the dialer, and a request the peer will reject the
+///         // same way next time.
+///         Refusal::NotAdmitted | Refusal::BadRequest { .. } => Ok(false),
+///         // About the host, so the same dial may well succeed later.
+///         Refusal::Unavailable { .. } => Ok(true),
+///         unreadable => Err(format!("refusal class unknown to this build: {unreadable}")),
+///     }
+/// }
+///
+/// assert_eq!(worth_retrying(&Refusal::NotAdmitted), Ok(false));
+/// ```
+///
+/// That last arm is not optional, and the attribute is what makes it so: the
+/// same match without it does not compile outside this crate, so a newer peer's
+/// class can never inherit whichever arm happened to be written first.
+///
+/// ```compile_fail,E0004
+/// use bifrost_core::Refusal;
+///
+/// fn worth_retrying(refusal: &Refusal) -> bool {
+///     match refusal {
+///         Refusal::NotAdmitted | Refusal::BadRequest { .. } => false,
+///         Refusal::Unavailable { .. } => true,
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Refusal {
     /// The peer's gate did not admit this dial. No payload, by policy.
     #[error("not admitted: no member badge or capability for this service was accepted")]
