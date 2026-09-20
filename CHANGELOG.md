@@ -2,6 +2,37 @@
 
 All notable changes to bifrost, newest first.
 
+## v0.3.0
+
+Adding a refusal class should cost one release, not four.
+
+### Changed
+- **`Refusal` is `#[non_exhaustive]`.** It was a closed set in the crate that sits under every stream
+  protocol in the family, so naming a new class of refusal was a breaking change that had to walk
+  bifrost, tightbeam, services and swoosh in order before any of it could ship. That price was paid
+  by the class never being added. It is now one release here and an arm downstream, added when each
+  consumer is ready rather than all at once.
+
+  The attribute moves the cost onto consumers, and the arm it forces is the dangerous one: a
+  wildcard written to make the build pass is exactly the hole that let swoosh's `forward` dial as a
+  stranger for months behind `_ => Ok(None)`. So the enum's own documentation says what that last
+  arm owes a reader, with a worked example, and a `compile_fail` doctest holds the attribute itself
+  because no runtime test can. Remove the attribute and that doctest fails as "compiled
+  successfully, but it's marked compile_fail".
+
+  Existing code that matches on the three variants needs one more arm. It should name the class it
+  cannot read and refuse to stand in for another: substituting `NotAdmitted` invents an
+  authorization ruling out of a message that carried none.
+
+  No wire change. Three variants, three tag bytes, `MAGIC` untouched.
+
+### Fixed
+- **The `Refusal` enum doc no longer contradicts its own variant.** It still described `Unavailable`
+  as "a post-admission host-resource failure", the narrow reading deliberately removed in 7feda79
+  because a dialer who can recover the admission bit out of a refusal has been handed an oracle. The
+  variant's own documentation twelve lines below had said so ever since. The enum-level text now
+  agrees: the failure is the host's own and rules on nothing about the dialer.
+
 ## v0.2.3
 
 An address we hand out is one that will still be there tomorrow.
