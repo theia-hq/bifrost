@@ -2,6 +2,32 @@
 
 All notable changes to bifrost, newest first.
 
+## v0.4.0
+
+A peer should not be able to name its own allocation.
+
+### Fixed
+- **A framed read sized its buffer to a number the peer chose.** `read_framed` took a `u32` off the
+  wire and allocated that many bytes before reading one of them, so four `0xFF` bytes cost the host
+  4 GiB on demand, and a receiver that then lossy-decoded the buffer peaked at three times that.
+  Found by two independent reviews of every wire in the family at once.
+
+  `MAX_HEADER_LEN` is 64 KiB and the number is derived rather than chosen: the header names one
+  blob, so the largest legitimate one is a name, POSIX bounds a whole path at 4 KiB, and this leaves
+  sixteen times that. It is also exactly the streaming chunk the receive path already holds, so the
+  header can never be the largest allocation in a transfer.
+
+  The bound is enforced at BOTH ends. An over-long header now fails on the sending side with the
+  sender's own error instead of arriving as a remote rejection mid-frame, because whoever defines a
+  wire owns both sides of it.
+
+### Changed
+- **`Error` is `#[non_exhaustive]` and gains `OversizedHeader`.** Same reasoning the refusal type
+  took in v0.3.0: hardening a wire adds classes, and a consumer that carries an arm for a class it
+  cannot name is a consumer that cannot silently inherit the wrong one. `Truncated` was the wrong
+  answer for an oversized frame, which is not a truncated one: a peer whose stream simply ended
+  deserves a different word from one that asked for 4 GiB.
+
 ## v0.3.0
 
 Adding a refusal class should cost one release, not four.
