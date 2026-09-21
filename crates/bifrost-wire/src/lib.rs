@@ -25,8 +25,80 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 /// checked against the prefix, so an oversized claim costs the receiver nothing.
 pub const MAX_HEADER_LEN: u32 = 64 * 1024;
 
-/// Frames a Bifrost blob transfer. Bumped when the header layout changes.
-const MAGIC: [u8; 4] = *b"BFW1";
+/// This wire's identity: the bytes every frame opens with, at every version, forever. A stream that
+/// does not open with these is not a bifrost-wire stream, and that is the only thing an identity
+/// mismatch is allowed to mean.
+const IDENTITY: [u8; 3] = *b"BFW";
+
+/// The frame grammar THIS build speaks, written after [`IDENTITY`] and parsed (never compared whole)
+/// on read: together they are the four magic bytes `BFW1`. Bumped when the header layout changes.
+const VERSION: WireVersion = WireVersion(*b"1");
+
+/// The magic splits by RULE, not by a remembered offset: the identity is the leading run of capitals,
+/// the version is the digits after it, four bytes in all. Held at build time so a magic that breaks the
+/// rule fails to compile rather than splitting somewhere the next reader would not look. A digit is
+/// never a capital, so "all capitals, then all digits" is exactly "the maximal leading capital run".
+const _: () = assert!(
+    all_between(&IDENTITY, b'A', b'Z')
+        && all_between(VERSION.as_bytes(), b'0', b'9')
+        && IDENTITY.len() + VERSION.as_bytes().len() == 4,
+    "the magic must be four bytes: a run of capitals (the identity) then digits (the version)"
+);
+
+/// Whether `bytes` is non-empty and every byte falls in `lo..=hi`. `const` because its one caller is a
+/// build-time claim about the magic.
+const fn all_between(bytes: &[u8], lo: u8, hi: u8) -> bool {
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] < lo || bytes[at] > hi {
+            return false;
+        }
+        at += 1;
+    }
+    !bytes.is_empty()
+}
+
+/// The version half of the frame magic: the byte after [`IDENTITY`], naming which frame grammar the
+/// peer that wrote it speaks.
+///
+/// Parsed as a value rather than folded into one four-byte comparison, because the two halves of the
+/// magic answer different questions. An IDENTITY mismatch says the stream is not ours. A VERSION
+/// mismatch says a bifrost-wire peer on another build, which is a different fact and reaches a
+/// different reader: see [`Error::VersionMismatch`] for why this wire tells its own side rather than
+/// the peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireVersion([u8; 1]);
+
+impl WireVersion {
+    /// Read the version half, after the identity. The width of the field lives here, in the type that
+    /// owns it, so the reader and the writer cannot drift apart.
+    async fn read<R>(reader: &mut R) -> Result<Self>
+    where
+        R: io::AsyncRead + Unpin,
+    {
+        let mut bytes = [0u8; 1];
+        reader
+            .read_exact(&mut bytes)
+            .await
+            .map_err(|_| Error::Truncated)?;
+        Ok(Self(bytes))
+    }
+
+    /// The bytes as they go on the wire.
+    const fn as_bytes(&self) -> &[u8; 1] {
+        &self.0
+    }
+}
+
+impl core::fmt::Display for WireVersion {
+    /// Renders the WHOLE four-byte tag (`BFW1`), because that is the form the source and the changelog
+    /// use, so an operator holding one from a log line can match it against what they read. A peer's
+    /// version byte is arbitrary and need not be printable, so it is escaped rather than trusted: this
+    /// string reaches a terminal.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}{}", IDENTITY.escape_ascii(), self.0.escape_ascii())
+    }
+}
 /// The receiver accepted and verified the blob.
 const ACK_OK: u8 = 1;
 /// The receiver rejected the blob (for example, an integrity failure).
@@ -125,7 +197,8 @@ where
         if header_len > MAX_HEADER_LEN {
             return Err(Error::HeaderTooLong);
         }
-        self.writer.write_all(&MAGIC).await?;
+        self.writer.write_all(&IDENTITY).await?;
+        self.writer.write_all(VERSION.as_bytes()).await?;
         self.writer.write_all(&header_len.to_be_bytes()).await?;
         self.writer.write_all(header).await?;
         self.writer.write_all(&blob.len.to_be_bytes()).await?;
@@ -154,17 +227,27 @@ where
     /// Receive a blob into `sink`, verifying every byte against the sender's root; then acknowledge.
     ///
     /// A hash mismatch or short read is an error and the receiver signals rejection.
+    ///
+    /// The magic is parsed as [`IDENTITY`] plus a [`WireVersion`], never compared as four bytes, so
+    /// that "not our protocol" and "our protocol, another build" stay two facts instead of one. Both
+    /// end the transfer here and neither is written back: this wire is write-then-read, so the peer
+    /// is still streaming its body and is not listening. The distinction is for THIS side's log, and
+    /// that is the whole of what it buys ([`Error::VersionMismatch`]).
     pub async fn recv<Sink>(mut self, sink: &mut Sink) -> Result<Received>
     where
         Sink: io::AsyncWrite + Unpin,
     {
-        let mut magic = [0u8; 4];
+        let mut identity = [0u8; IDENTITY.len()];
         self.reader
-            .read_exact(&mut magic)
+            .read_exact(&mut identity)
             .await
             .map_err(|_| Error::Truncated)?;
-        if magic != MAGIC {
-            return Err(Error::BadMagic);
+        if identity != IDENTITY {
+            return Err(Error::Foreign);
+        }
+        let version = WireVersion::read(&mut self.reader).await?;
+        if version != VERSION {
+            return Err(Error::VersionMismatch { peer: version });
         }
 
         let header = self.read_framed().await?;
@@ -263,9 +346,31 @@ pub enum Error {
     /// An underlying read or write failed.
     #[error("io")]
     Io(#[from] std::io::Error),
-    /// The stream did not begin with the expected frame magic.
-    #[error("bad frame magic")]
-    BadMagic,
+    /// The stream did not open with [`IDENTITY`], so it is not a bifrost-wire stream. The wording is
+    /// exactly true and covers only that: a bifrost-wire peer on another version is never this.
+    #[error("not a bifrost-wire stream")]
+    Foreign,
+    /// A bifrost-wire stream from a build that speaks a different frame grammar.
+    ///
+    /// **This never reaches the peer, and cannot.** The wire is write-then-read: a sender writes the
+    /// whole frame and the whole body and shuts its send half down BEFORE its first read, so when the
+    /// receiver finds this mismatch the sender is still inside its body copy with nothing listening.
+    /// Writing a refusal back would land on a peer that is not reading, and making it read first
+    /// means a round trip in front of every transfer, forever. So the answer this condition owes is
+    /// paid to the RECEIVING side, in this message, which reaches the host log of the machine that
+    /// can act on it. The peer sees the transport failure it was always going to see.
+    ///
+    /// Naming both versions is the point: "bad frame magic" told an operator the peer sent garbage
+    /// when the peer was a bifrost-wire peer one release away, and sent them hunting a broken network
+    /// instead of cutting a release.
+    #[error(
+        "bifrost-wire version mismatch: the frame is {peer}, this build speaks {VERSION}; run the \
+         same release at both ends"
+    )]
+    VersionMismatch {
+        /// The version the peer's frame named.
+        peer: WireVersion,
+    },
     /// The app header handed to [`Transfer::send`] was over [`MAX_HEADER_LEN`].
     #[error("header too long")]
     HeaderTooLong,
