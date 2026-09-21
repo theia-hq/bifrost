@@ -1,6 +1,10 @@
 use tokio::io;
 
-use super::{Blob, Error, MAGIC, MAX_HEADER_LEN, Transfer};
+use super::{Blob, Error, MAX_HEADER_LEN, Transfer};
+
+/// The four magic bytes a well-formed frame opens with, spelled out rather than imported, so a test
+/// cannot agree with the codec by sharing its constant.
+const MAGIC: [u8; 4] = *b"BFW1";
 
 /// A frame prefix: the magic, then a header length, and nothing after it. A receiver that sized a
 /// buffer to `header_len` before checking it would find no body and answer `Truncated`; one that
@@ -88,6 +92,78 @@ async fn a_header_at_the_cap_round_trips() {
         .expect("the sender is acked");
     assert_eq!(received.header, header);
     assert_eq!(sink, b"payload");
+}
+
+/// Splitting the magic moved no byte: a frame still opens with the same four octets it always did.
+/// The split is a change to how the receiver READS the magic, never to what the sender writes, so a
+/// shipped peer on either side is unaffected. Write the version before the identity, or widen either
+/// half, and this goes red.
+#[tokio::test]
+async fn a_frame_still_opens_with_the_same_four_octets() {
+    let payload = b"payload".to_vec();
+    let blob = Blob::hash(&mut payload.as_slice())
+        .await
+        .expect("the blob hashes");
+
+    let mut written = Vec::new();
+    Transfer::new(&mut written, b"".as_slice())
+        .send(b"header", &blob, &mut payload.as_slice())
+        .await
+        .expect_err("there is no peer to ack, and the frame is written before the read");
+
+    assert_eq!(&written[..4], &MAGIC);
+}
+
+/// One well-formed frame prefix with the byte at `at` replaced. The two tests below differ only in
+/// WHICH half of the magic they corrupt, because that single difference is the whole claim.
+fn magic_with(at: usize, byte: u8) -> Vec<u8> {
+    let mut frame = header_claim(0);
+    frame[at] = byte;
+    frame
+}
+
+/// A stream whose IDENTITY is not ours is not a bifrost-wire stream, and that is all it is. Make the
+/// version arm fire for a foreign identity too and the first assertion goes red.
+#[tokio::test]
+async fn a_foreign_identity_is_not_a_version_mismatch() {
+    let mut sink = Vec::new();
+    // `XFW1`: one byte of the identity changed, and nothing else.
+    let error = Transfer::new(Vec::new(), magic_with(0, b'X').as_slice())
+        .recv(&mut sink)
+        .await
+        .expect_err("a foreign identity is not a bifrost-wire stream");
+
+    assert!(
+        !matches!(error, Error::VersionMismatch { .. }),
+        "whatever wrote XFW1 is not a bifrost-wire peer on another build: {error}"
+    );
+    assert!(matches!(error, Error::Foreign), "{error}");
+}
+
+/// The version half of the magic is PARSED, so a bifrost-wire peer on another build is a
+/// distinguishable condition rather than a foreign stream. Revert the parse to a four-byte
+/// comparison and this goes red at the first assertion.
+///
+/// The distinction is worth nothing on the wire here (the sender is mid-body and not reading, so
+/// there is nobody to tell) and everything in the message, which is why the last two assertions pin
+/// both version tags: that string is the whole answer this wire gets to give.
+#[tokio::test]
+async fn a_version_mismatch_is_not_a_foreign_stream() {
+    let mut sink = Vec::new();
+    // `BFW2`: one byte of the version changed, and nothing else.
+    let error = Transfer::new(Vec::new(), magic_with(3, b'2').as_slice())
+        .recv(&mut sink)
+        .await
+        .expect_err("BFW2 is not this build's grammar");
+
+    assert!(
+        !matches!(error, Error::Foreign),
+        "a bifrost-wire peer on another build is not a foreign protocol: {error}"
+    );
+    assert!(matches!(error, Error::VersionMismatch { .. }), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("BFW2"), "{message}");
+    assert!(message.contains("BFW1"), "{message}");
 }
 
 /// A sender refuses its own over-cap header, and refuses it before a byte reaches the wire: the two
