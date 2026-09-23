@@ -2,7 +2,7 @@
 
 All notable changes to bifrost, newest first.
 
-## Unreleased
+## v0.6.0
 
 ### Breaking
 - **A `KeyFile` is named with its kind.** `KeyFile::device(path)` names a device's own key, plain or
