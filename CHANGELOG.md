@@ -2,7 +2,7 @@
 
 All notable changes to bifrost, newest first.
 
-## Unreleased
+## v0.6.1
 
 ### Changed
 - **An iroh bind on n0 no longer asks the local DNS resolver for a peer.** That query named the node it
