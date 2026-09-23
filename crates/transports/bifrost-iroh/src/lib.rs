@@ -8,7 +8,7 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, ConnInfo, CryptoKind, Error, Path};
+use bifrost_core::{Addr, ConnInfo, CryptoKind, Error, HintStream, Path};
 pub use bifrost_transport::{Sealed, Session, Transport};
 use iroh::endpoint::{
     Connection, PathList, PortmapperConfig, RecvStream, RelayMode, SendStream, presets,
@@ -25,6 +25,42 @@ pub const ALPN: &[u8] = b"bifrost/0";
 /// A bound iroh endpoint.
 pub struct Endpoint {
     inner: iroh::Endpoint,
+    /// How this bind finds a peer, which decides whether a dial waits on a discovery feed.
+    finding: Finding,
+}
+
+/// How an endpoint finds a peer, fixed by the bind that made it.
+///
+/// A bind fact rather than a transport fact: the same iroh endpoint type finds peers by key under
+/// an n0-shaped bind and only by hints under a minimal or offline one, so no single answer could be
+/// declared for the type.
+#[derive(Debug, Clone, Copy)]
+enum Finding {
+    /// The bind registered an address lookup (pkarr, DNS) and relays, so iroh finds a peer by its
+    /// key on its own. A dial never waits on a feed; it takes only what the feed already holds at
+    /// that instant (a hint the caller supplied, a LAN record already heard).
+    ByKey,
+    /// A minimal or offline bind with no lookup of its own: a peer is reachable only through hints,
+    /// so a dial waits for the feed's first answer.
+    ByHints,
+}
+
+impl Finding {
+    /// The address a dial under this bind goes with: the one read of the feed the bind allows.
+    ///
+    /// Kept apart from the dial so the choice is testable without a network: only the dial after it
+    /// touches iroh. Both arms read the feed once and drop it, since iroh at this version takes no
+    /// addresses into an attempt already running.
+    async fn seed(self, addr: Addr, updates: HintStream) -> Result<Addr, Error> {
+        match self {
+            // Found by key: what the feed holds at this instant (a caller's hint, a LAN record
+            // already heard), and never a wait for more, since iroh can find the peer without it.
+            Self::ByKey => addr.seeded(updates.ready()),
+            // Found only by hints: a dial with none has nothing to go to, so it waits for the
+            // feed's first answer, bounded by whoever awaits the dial.
+            Self::ByHints => addr.seeded(updates.first().await),
+        }
+    }
 }
 
 impl Endpoint {
@@ -32,7 +68,12 @@ impl Endpoint {
     /// across NATs. The fresh-identity reachable shape: it publishes a record under a key generated per
     /// call that no dialer holds, like [`bind_reachable_with_secret`](Self::bind_reachable_with_secret).
     pub async fn bind() -> Result<Self, BindError> {
-        Self::finish(Reach::default().serving(), SecretKey::generate()).await
+        Self::finish(
+            Reach::default().serving(),
+            SecretKey::generate(),
+            Finding::ByKey,
+        )
+        .await
     }
 
     /// Bind with a persisted identity as a SERVING node: n0 discovery and relays, and publish this
@@ -57,7 +98,12 @@ impl Endpoint {
         secret: [u8; 32],
         reach: Reach,
     ) -> Result<Self, BindError> {
-        Self::finish(reach.serving(), SecretKey::from_bytes(&secret)).await
+        Self::finish(
+            reach.serving(),
+            SecretKey::from_bytes(&secret),
+            Finding::ByKey,
+        )
+        .await
     }
 
     /// Bind for DIALING ONLY over a caller-named [`Reach`]: the same no-record bind as
@@ -68,7 +114,12 @@ impl Endpoint {
         secret: [u8; 32],
         reach: Reach,
     ) -> Result<Self, BindError> {
-        Self::finish(reach.dialing(), SecretKey::from_bytes(&secret)).await
+        Self::finish(
+            reach.dialing(),
+            SecretKey::from_bytes(&secret),
+            Finding::ByKey,
+        )
+        .await
     }
 
     /// Bind a local-only endpoint with a FRESH identity, for same-process tests (the conformance
@@ -78,6 +129,7 @@ impl Endpoint {
         Self::finish(
             iroh::Endpoint::builder(presets::Minimal),
             SecretKey::generate(),
+            Finding::ByHints,
         )
         .await
     }
@@ -94,6 +146,7 @@ impl Endpoint {
                 .relay_mode(RelayMode::Disabled)
                 .portmapper_config(PortmapperConfig::Disabled),
             SecretKey::from_bytes(&secret),
+            Finding::ByHints,
         )
         .await
     }
@@ -106,6 +159,7 @@ impl Endpoint {
         Self::finish(
             iroh::Endpoint::builder(presets::Minimal).bind_addr(bind_addr)?,
             SecretKey::from_bytes(&secret),
+            Finding::ByHints,
         )
         .await
     }
@@ -113,13 +167,14 @@ impl Endpoint {
     async fn finish(
         builder: iroh::endpoint::Builder,
         secret: SecretKey,
+        finding: Finding,
     ) -> Result<Self, BindError> {
         let inner = builder
             .secret_key(secret)
             .alpns(vec![ALPN.to_vec()])
             .bind()
             .await?;
-        Ok(Self { inner })
+        Ok(Self { inner, finding })
     }
 }
 
@@ -158,6 +213,16 @@ impl Transport for Endpoint {
             .await
             .map_err(|err| Error::Connect(Box::new(err)))?;
         Ok(IrohSession { conn })
+    }
+
+    /// The feed is read as the bind allows ([`Finding::seed`]): a bind that finds peers by key
+    /// never waits on it, and a hints-only bind waits for its first answer.
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        updates: HintStream,
+    ) -> Result<IrohSession, Error> {
+        self.connect(self.finding.seed(addr, updates).await?).await
     }
 
     async fn accept(&self) -> Result<IrohSession, Error> {

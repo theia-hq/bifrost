@@ -19,6 +19,8 @@ zeroize.workspace = true
 bifrost.workspace = true
 bifrost-conformance = { path = "../../bifrost-conformance" }
 bifrost-quirk.workspace = true
+
+futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [lints]

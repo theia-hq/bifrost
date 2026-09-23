@@ -1,6 +1,6 @@
 use core::net::SocketAddr;
 
-use crate::NodeId;
+use crate::{AddrUpdate, Error, NodeId};
 
 /// How to reach a peer: its identity, plus optional direct-address hints.
 ///
@@ -21,6 +21,25 @@ impl Addr {
         Self {
             node,
             hints: Vec::new(),
+        }
+    }
+
+    /// Fold a feed's first observation into this address: the one read of discovery a dial makes.
+    ///
+    /// [`Hints`](AddrUpdate::Hints) replaces the hints this address carried. [`Removed`], [`Settled`],
+    /// or nothing at all leave it as it is, so the transport tries with what the caller held. An error
+    /// fails the dial, as a failed lookup always has.
+    ///
+    /// [`Removed`]: AddrUpdate::Removed
+    /// [`Settled`]: AddrUpdate::Settled
+    pub fn seeded(self, first: Option<Result<AddrUpdate, Error>>) -> Result<Self, Error> {
+        match first {
+            Some(Ok(AddrUpdate::Hints(hints))) if !hints.is_empty() => Ok(Self {
+                node: self.node,
+                hints,
+            }),
+            Some(Err(err)) => Err(err),
+            _ => Ok(self),
         }
     }
 }

@@ -7,16 +7,20 @@
 
 mod support;
 
+use core::net::SocketAddr;
 use core::time::Duration;
 use std::io;
 
-use bifrost::{Addr, Error, Node, NodeId, StaticDiscovery, Transport};
+use bifrost::{
+    Addr, Announced, Discovery, Error, HintStream, Node, NodeId, StaticDiscovery, Transport,
+};
 use bifrost_conformance::{
     close_drains, identity_binding, reach_roundtrip, unknown_conn_info, wrong_key_rejected,
 };
 use bifrost_noise::{Noise, NoiseError, wire};
 use bifrost_transport::Session;
-use support::{BarePeer, Forger, Replayer, Sabotage, Saboteur, Splicer, Wire};
+use futures_util::stream;
+use support::{BarePeer, Forger, Replayer, Sabotage, Saboteur, Splicer, Wire, WireSession};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// The recorded third frame of a dialer flight: `tag || frame(msg1) || frame(msg3)`.
@@ -569,4 +573,111 @@ async fn stream_cap_counts_concurrent_streams() {
         .open_bi()
         .await
         .expect("a closed stream frees its slot");
+}
+
+/// The wrapper forwards a feed-carrying dial to its inner transport rather than reading the feed
+/// itself. The inner here finds its peer on its own and never reads the feed, and the feed never
+/// answers: forwarded, the dial goes at once; inherited, the wrapper would wait on the silent feed
+/// and shadow the inner transport's decision until the deadline.
+#[tokio::test(start_paused = true)]
+async fn the_wrapper_forwards_a_feed_dial_to_its_inner_transport() {
+    let receiver = sealed(90);
+    let inner = SelfFinding {
+        wire: Wire::bind(seed(91)),
+        route: receiver.local_addr().hints,
+    };
+    let sender = Node::new(
+        Noise::new(inner, seed(91)).expect("wrap the inner"),
+        Silent,
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(receiver.accept(), sender.connect(receiver.node_id()))
+    })
+    .await;
+
+    let (accepted, dialed) =
+        outcome.expect("the dial must reach the inner transport's own route without waiting");
+    accepted.expect("the receiver accepts");
+    assert_eq!(
+        dialed.expect("the dial succeeds").peer(),
+        receiver.node_id()
+    );
+}
+
+/// A dial whose inner transport is still waiting on a silent feed when the attempt deadline passes
+/// reports a dial timeout: no session ever existed, so no handshake can have been what timed out.
+#[tokio::test(start_paused = true)]
+async fn a_dial_still_waiting_on_discovery_times_out_as_a_dial() {
+    let sender = Node::new(sealed(92), Silent);
+
+    match sender.connect(node(93)).await {
+        Err(Error::Connect(source)) => assert!(
+            matches!(
+                source.downcast_ref::<NoiseError>(),
+                Some(NoiseError::DialTimeout)
+            ),
+            "a dial that never returned must not read as a handshake timeout, got {source}"
+        ),
+        Err(other) => panic!("expected a dial timeout, got {other}"),
+        Ok(_) => panic!("a silent feed must not yield a session"),
+    }
+}
+
+/// An inner transport that finds its peer by itself, as a self-discovering bind does: a
+/// feed-carrying dial ignores the feed and goes to the route it already knows.
+struct SelfFinding {
+    wire: Wire,
+    route: Vec<SocketAddr>,
+}
+
+impl Transport for SelfFinding {
+    type Security = Announced;
+    type Session = WireSession;
+
+    fn node_id(&self) -> NodeId {
+        self.wire.node_id()
+    }
+
+    fn local_addr(&self) -> Addr {
+        self.wire.local_addr()
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.wire.bound_sockets()
+    }
+
+    async fn connect(&self, addr: Addr) -> Result<WireSession, Error> {
+        self.wire.connect(addr).await
+    }
+
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        _updates: HintStream,
+    ) -> Result<WireSession, Error> {
+        self.wire
+            .connect(Addr {
+                node: addr.node,
+                hints: self.route.clone(),
+            })
+            .await
+    }
+
+    async fn accept(&self) -> Result<WireSession, Error> {
+        self.wire.accept().await
+    }
+
+    async fn close(&self) {
+        self.wire.close().await;
+    }
+}
+
+/// A source that never answers and never ends.
+struct Silent;
+
+impl Discovery for Silent {
+    fn subscribe(&self, _node: NodeId) -> HintStream {
+        HintStream::new(stream::pending())
+    }
 }

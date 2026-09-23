@@ -53,7 +53,9 @@
 
 use core::net::SocketAddr;
 
-pub use bifrost_core::{Addr, ConnInfo, Error, NodeId, NodeIdParseError, Path};
+pub use bifrost_core::{
+    Addr, AddrUpdate, ConnInfo, Error, HintStream, NodeId, NodeIdParseError, Path,
+};
 use tokio::io;
 
 mod security;
@@ -100,8 +102,30 @@ pub trait Transport {
     /// compile that confusion into every backend that stayed silent.
     fn bound_sockets(&self) -> Vec<SocketAddr>;
 
-    /// Dial a peer.
+    /// Dial a peer: the floor, a one-shot dial with whatever hints the caller holds.
     async fn connect(&self, addr: Addr) -> Result<Self::Session, Error>;
+
+    /// Dial a peer whose hints a discovery feed supplies. Additive: a caller holding only an
+    /// [`Addr`] keeps calling [`connect`](Self::connect), and nothing about that path changes.
+    ///
+    /// The default consumes the feed for the FIRST observation, then dials once: `Hints` dials with
+    /// them, `Removed` or the end of the feed dials the bare `addr`, and an `Err` fails the dial. It
+    /// never waits beyond that first observation and never adds a timer, so the caller's deadline is
+    /// the only bound; and the feed is dropped before the dial starts, so no later item can reach
+    /// this attempt or start another one.
+    ///
+    /// Whether to wait at all is a fact about how the transport was bound, so it lives here and not
+    /// in the caller. A transport that finds peers by itself overrides this to dial now; one that
+    /// can use updates during an attempt overrides it to keep consuming. A wrapper that implements
+    /// only [`connect`](Self::connect) inherits this default and silently shadows any such override
+    /// in its inner transport, so a wrapper forwards this method to its inner one.
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        updates: HintStream,
+    ) -> Result<Self::Session, Error> {
+        self.connect(addr.seeded(updates.first().await)?).await
+    }
 
     /// Accept the next inbound session.
     async fn accept(&self) -> Result<Self::Session, Error>;
