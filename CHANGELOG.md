@@ -2,6 +2,14 @@
 
 All notable changes to bifrost, newest first.
 
+## Unreleased
+
+### Changed
+- **An iroh bind on n0 no longer asks the local DNS resolver for a peer.** That query named the node it
+  was about to dial, usually in plaintext to whatever resolver the network hands out. Peers are still
+  found through n0's pkarr server over HTTPS. The cost: where HTTPS to n0 is blocked but DNS is not,
+  there is no longer a DNS fallback.
+
 ## v0.6.0
 
 ### Breaking
