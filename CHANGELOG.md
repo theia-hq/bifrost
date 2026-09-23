@@ -2,6 +2,24 @@
 
 All notable changes to bifrost, newest first.
 
+## Unreleased
+
+### Breaking
+- **A `KeyFile` is named with its kind.** `KeyFile::device(path)` names a device's own key, plain or
+  sealed as its owner chooses; `KeyFile::root(path)` names a root key. `From<PathBuf>` and
+  `From<&Path>` are gone, so every caller says which kind of key it expects at a path. An existing
+  device key file is unchanged on disk and loads through `KeyFile::device`.
+- **`Secret::derive_child` is gone.** It had no caller. The derivation itself stays in
+  `bifrost-core` (`derive_ed25519_child_secret`, `NodeId::derive_ed25519`).
+
+### New
+- **A root key is its own sealed file kind.** A sealed root key records kind 2 in its header, where a
+  device key records kind 1, and the kind is authenticated with the rest of the header. A file is read
+  only as the kind its `KeyFile` names: a sealed device key where a root key belongs, or the reverse,
+  is refused as `FormatError::WrongKind`. A root key is never written plain: a plain write, adopt, or
+  migration through `KeyFile::root` refuses as `Error::PlainRoot`. A plain 32-byte file carries no
+  kind, so it still loads from either slot, and the caller decides whether to use it.
+
 ## v0.5.0
 
 ### Breaking

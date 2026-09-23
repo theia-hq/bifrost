@@ -10,7 +10,7 @@
 //! | ------ | --- | --------------------------------------------------------------- |
 //! | 0      | 8   | signature `THEIAKEY`                                            |
 //! | 8      | 1   | format version, `1`                                             |
-//! | 9      | 1   | file kind, `1` = a node's ed25519 key file                      |
+//! | 9      | 1   | file kind, `1` = a device key, `2` = a root key                 |
 //! | 10     | 1   | protection method, `1` = passphrase                             |
 //! | 11     | 1   | key derivation function, `1` = Argon2id, version `0x13`         |
 //! | 12     | 4   | Argon2id memory, KiB                                            |
@@ -27,6 +27,11 @@
 //! Argon2id cost included, fails the unlock rather than producing a key. The version, kind, method,
 //! and derivation bytes are where the format grows: a new value is a new meaning, and an unknown value
 //! is refused by name, never guessed at.
+//!
+//! The kind says what the key is FOR, and a file is only ever read as the kind its reader expects: a
+//! sealed device key presented where a root key belongs is refused by its kind, and so is the reverse.
+//! Both kinds carry an ed25519 seed under the same layout; only the byte, which the seal authenticates,
+//! tells them apart. A plain file has no header and so no kind: it is the seed and nothing else.
 
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use bifrost_core::{CryptoKind, NodeId};
@@ -35,6 +40,7 @@ use chacha20poly1305::{Tag, XChaCha20Poly1305, XNonce};
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoError, FormatError};
+use crate::kind::Kind;
 use crate::method::Method;
 use crate::passphrase::Passphrase;
 use crate::secret::{SEED_LEN, Secret};
@@ -50,10 +56,33 @@ pub(crate) const SIGNATURE: [u8; 8] = *b"THEIAKEY";
 
 /// The one format version this build reads and writes.
 const VERSION: u8 = 1;
-/// File kind: a node's own ed25519 key file. A backup of one is this same kind, byte for byte a sealed key
-/// file for the same node, so restoring it is installing a copy that was already verified. An artifact
-/// that is NOT a key file for its node takes a new kind, so it can never be mistaken for one.
-const KIND_KEY_FILE: u8 = 1;
+/// File kind: a device's own ed25519 key file. A backup of one is this same kind, byte for byte a sealed
+/// key file for the same node, so restoring it is installing a copy that was already verified. An
+/// artifact that is NOT a device key file takes a new kind, so it can never be mistaken for one.
+const KIND_DEVICE_KEY: u8 = 1;
+/// File kind: a root key, the key other keys are vouched for by. The same layout as a device key, told
+/// apart by this byte alone, so neither can be read in the other's place.
+const KIND_ROOT_KEY: u8 = 2;
+
+impl Kind {
+    /// The byte this kind is recorded as.
+    const fn byte(self) -> u8 {
+        match self {
+            Self::Device => KIND_DEVICE_KEY,
+            Self::Root => KIND_ROOT_KEY,
+        }
+    }
+
+    /// The kind a byte records, or `None` for a byte no kind is registered at.
+    const fn of_byte(byte: u8) -> Option<Self> {
+        match byte {
+            KIND_DEVICE_KEY => Some(Self::Device),
+            KIND_ROOT_KEY => Some(Self::Root),
+            _ => None,
+        }
+    }
+}
+
 /// Protection method: sealed under a passphrase.
 const METHOD_PASSPHRASE: u8 = 1;
 /// Key derivation: Argon2id at version `0x13`.
@@ -94,13 +123,15 @@ pub(crate) enum Parsed<'a> {
     Sealed(Envelope),
 }
 
-/// Parse a key file's bytes: the only place a key file is interpreted.
+/// Parse a key file's bytes, read where a key of `expected` kind belongs: the only place a key file is
+/// interpreted.
 ///
 /// The signature decides the shape first, so a sealed file cut down to 32 bytes is refused as a
-/// damaged sealed file and never read as a plain seed (that would silently become a different key).
-pub(crate) fn parse(bytes: &[u8]) -> Result<Parsed<'_>, FormatError> {
+/// damaged sealed file and never read as a plain seed (that would silently become a different key). A
+/// sealed file of the other kind is refused by its kind.
+pub(crate) fn parse(bytes: &[u8], expected: Kind) -> Result<Parsed<'_>, FormatError> {
     if bytes.starts_with(&SIGNATURE) {
-        return Envelope::parse(bytes).map(Parsed::Sealed);
+        return Envelope::parse(bytes, expected).map(Parsed::Sealed);
     }
     <&[u8; SEED_LEN]>::try_from(bytes)
         .map(Parsed::Plain)
@@ -119,7 +150,7 @@ pub(crate) struct Envelope {
 }
 
 impl Envelope {
-    fn parse(bytes: &[u8]) -> Result<Self, FormatError> {
+    fn parse(bytes: &[u8], expected: Kind) -> Result<Self, FormatError> {
         // The version governs the length, so it is read before the length is judged: a file from a
         // later version is named as that, not as a damaged version 1 file.
         let Some(&version) = bytes.get(AT_VERSION) else {
@@ -133,9 +164,14 @@ impl Envelope {
         let image = <[u8; SEALED_LEN]>::try_from(bytes).map_err(|_| FormatError::SealedSize {
             found: bytes.len() as u64,
         })?;
-        match image[AT_KIND] {
-            KIND_KEY_FILE => {}
-            found => return Err(FormatError::Kind { found }),
+        match Kind::of_byte(image[AT_KIND]) {
+            Some(found) if found == expected => {}
+            Some(found) => return Err(FormatError::WrongKind { expected, found }),
+            None => {
+                return Err(FormatError::Kind {
+                    found: image[AT_KIND],
+                });
+            }
         }
         let method = match image[AT_METHOD] {
             METHOD_PASSPHRASE => Method::Passphrase,
@@ -159,15 +195,28 @@ impl Envelope {
         })
     }
 
-    /// Seal `secret` under `passphrase` at the default cost, with a fresh salt and nonce drawn for
-    /// this seal alone: re-sealing the same seed under the same passphrase never reuses either.
-    pub(crate) fn seal(secret: &Secret, passphrase: &Passphrase) -> Result<Self, CryptoError> {
+    /// Seal `secret` as a key of `kind` under `passphrase` at the default cost, with a fresh salt and
+    /// nonce drawn for this seal alone: re-sealing the same seed under the same passphrase never reuses
+    /// either.
+    pub(crate) fn seal(
+        secret: &Secret,
+        kind: Kind,
+        passphrase: &Passphrase,
+    ) -> Result<Self, CryptoError> {
         let mut salt = [0; SALT_LEN];
         let mut nonce = [0; NONCE_LEN];
         getrandom::fill(&mut salt).map_err(CryptoError::entropy)?;
         getrandom::fill(&mut nonce).map_err(CryptoError::entropy)?;
         let public = secret.node_id();
-        Self::seal_with(secret, public, passphrase, Cost::DEFAULT, &salt, &nonce)
+        Self::seal_with(
+            secret,
+            kind,
+            public,
+            passphrase,
+            Cost::DEFAULT,
+            &salt,
+            &nonce,
+        )
     }
 
     /// Seal with every input chosen by the caller. Only [`seal`](Self::seal) reaches this outside the
@@ -175,6 +224,7 @@ impl Envelope {
     /// to build a file whose header names a key other than the one it seals.
     pub(crate) fn seal_with(
         secret: &Secret,
+        kind: Kind,
         public: NodeId,
         passphrase: &Passphrase,
         cost: Cost,
@@ -184,7 +234,7 @@ impl Envelope {
         let mut image = [0; SEALED_LEN];
         image[..AT_VERSION].copy_from_slice(&SIGNATURE);
         image[AT_VERSION] = VERSION;
-        image[AT_KIND] = KIND_KEY_FILE;
+        image[AT_KIND] = kind.byte();
         image[AT_METHOD] = METHOD_PASSPHRASE;
         image[AT_KDF] = KDF_ARGON2ID;
         image[AT_MEMORY..AT_PASSES].copy_from_slice(&cost.memory_kib.to_be_bytes());

@@ -105,15 +105,6 @@ impl Secret {
     pub fn with_bytes<R>(&self, lend: impl FnOnce(&[u8; SEED_LEN]) -> R) -> R {
         lend(&self.0)
     }
-
-    /// The child seed derived from this one under `label`, itself a `Secret`: derived material is
-    /// still secret, so it is born in the same wiping owner. It is the node identity's own hardened
-    /// derivation, so the child binds exactly the node id `NodeId::derive_ed25519` computes for this
-    /// seed and label.
-    pub fn derive_child(&self, label: &str) -> Self {
-        // The derivation hands the child over in a wiping owner, which wipes it as it drops here.
-        Self::copy_of(&bifrost_core::derive_ed25519_child_secret(&self.0, label))
-    }
 }
 
 /// Wipes the seed where it lives, on the heap, before the allocation is freed.

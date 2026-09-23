@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::envelope::{self, Envelope, Parsed};
 use crate::error::{CryptoError, Error, FormatError};
+use crate::kind::Kind;
 use crate::method::Protection;
 use crate::secret::Secret;
 use crate::stored::{Locked, Stored};
@@ -27,29 +28,66 @@ const READ_CAP: u64 = 4096;
 ///
 /// The caller owns the path and its directory: this type creates neither directories nor policy about
 /// where a key lives, and it never creates a key on its own.
+///
+/// A key file is named together with its [`Kind`], and there is no other way to name one: a bare path
+/// does not convert into a key file, so every caller says which kind of key it means to find there.
+///
+/// `from` resolves to the reflexive `From<KeyFile>`, so the path is a mismatched type:
+///
+/// ```compile_fail,E0308
+/// # fn name(path: std::path::PathBuf) -> keystore::KeyFile {
+/// keystore::KeyFile::from(path)
+/// # }
+/// ```
+///
+/// ```compile_fail,E0277
+/// # fn name(path: &std::path::Path) -> keystore::KeyFile {
+/// path.into()
+/// # }
+/// ```
+///
+/// Named with its kind, the same path is a key file:
+///
+/// ```
+/// # fn name(path: std::path::PathBuf) -> keystore::KeyFile {
+/// keystore::KeyFile::device(path)
+/// # }
+/// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct KeyFile {
     path: PathBuf,
-}
-
-impl From<PathBuf> for KeyFile {
-    fn from(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-impl From<&Path> for KeyFile {
-    fn from(path: &Path) -> Self {
-        Self {
-            path: path.to_owned(),
-        }
-    }
+    kind: Kind,
 }
 
 impl KeyFile {
+    /// The device key file at `path`: this machine's own key, plain or sealed as its owner chooses.
+    /// A sealed root key at the path is refused by its kind.
+    pub fn device(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            kind: Kind::Device,
+        }
+    }
+
+    /// The root key file at `path`. Every write seals it: a [`Protection::Plain`] write refuses as
+    /// [`Error::PlainRoot`]. A sealed device key at the path is refused by its kind. A plain 32-byte
+    /// file there still loads, as [`Stored::Plain`], because a plain file carries no kind to refuse
+    /// it by; whether to use it is the caller's decision.
+    pub fn root(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            kind: Kind::Root,
+        }
+    }
+
     /// The path this key file lives at.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The kind of key this file is named for.
+    pub const fn kind(&self) -> Kind {
+        self.kind
     }
 
     /// Load the key file: `None` only when nothing is at the path, and otherwise the key or its
@@ -67,7 +105,7 @@ impl KeyFile {
         let Some(Contents { bytes, seen }) = self.read()? else {
             return Ok(None);
         };
-        let stored = match envelope::parse(&bytes) {
+        let stored = match envelope::parse(&bytes, self.kind) {
             Ok(Parsed::Plain(seed)) => Stored::Plain(Secret::copy_of(seed)),
             Ok(Parsed::Sealed(envelope)) => {
                 Stored::Locked(Locked::new(self.path.clone(), envelope))
@@ -83,7 +121,11 @@ impl KeyFile {
     /// [`Error::Occupied`], and the refusal is decided by the filesystem at the instant of publishing,
     /// so two writers racing for one path cannot both win. A symbolic link at the path is something,
     /// even one that points nowhere: a write never lands through a link.
+    ///
+    /// A root key file refuses a [`Protection::Plain`] write as [`Error::PlainRoot`], before anything
+    /// is staged.
     pub fn write(&self, secret: &Secret, protection: Protection<'_>) -> Result<(), Error> {
+        self.writable(protection)?;
         self.sweep();
         let image = self.encode(secret, protection)?;
         self.create(&image, protection, secret.node_id())
@@ -161,7 +203,11 @@ impl KeyFile {
     /// is loaded through the link, so it must be protected through it too. Renaming over the link
     /// itself would leave the link's target, the file actually kept, holding the old form, while the
     /// path reported the new one. Refusals after that point name the file the link resolved to.
+    ///
+    /// A root key file refuses a migration to [`Protection::Plain`] as [`Error::PlainRoot`], before
+    /// anything is read.
     pub fn migrate(&self, from: Protection<'_>, to: Protection<'_>) -> Result<(), Error> {
+        self.writable(to)?;
         let real = self.resolved()?;
         real.sweep();
         let (secret, seen) = real.unlock(from)?;
@@ -169,10 +215,23 @@ impl KeyFile {
         real.replace(&image, to, secret.node_id(), &seen)
     }
 
+    /// Whether this file may be written under `protection`: anything but a plain root key.
+    fn writable(&self, protection: Protection<'_>) -> Result<(), Error> {
+        match (self.kind, protection) {
+            (Kind::Root, Protection::Plain) => Err(Error::PlainRoot {
+                path: self.path.clone(),
+            }),
+            (Kind::Root | Kind::Device, _) => Ok(()),
+        }
+    }
+
     /// This key file at the path it finally names, every symbolic link on the way resolved.
     fn resolved(&self) -> Result<Self, Error> {
         match fs::canonicalize(&self.path) {
-            Ok(path) => Ok(Self { path }),
+            Ok(path) => Ok(Self {
+                path,
+                kind: self.kind,
+            }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Err(Error::Absent {
                 path: self.path.clone(),
             }),
@@ -234,7 +293,7 @@ impl KeyFile {
     ) -> Result<Zeroizing<Vec<u8>>, Error> {
         match protection {
             Protection::Plain => Ok(secret.with_bytes(|seed| Zeroizing::new(seed.to_vec()))),
-            Protection::Passphrase(passphrase) => Envelope::seal(secret, passphrase)
+            Protection::Passphrase(passphrase) => Envelope::seal(secret, self.kind, passphrase)
                 .map(|envelope| Zeroizing::new(envelope.image().to_vec()))
                 .map_err(|source| Error::Crypto {
                     path: self.path.clone(),
@@ -435,7 +494,11 @@ impl Staged<'_> {
     /// Read the staged file back through the loader and unlock it with `protection`: it must hold
     /// `node`. What is about to become the key file is proven to open before it does.
     fn verify(&self, protection: Protection<'_>, node: NodeId) -> Result<(), Error> {
-        let opened = match (KeyFile::from(self.temp.as_path()).load(), protection) {
+        let staged = KeyFile {
+            path: self.temp.clone(),
+            kind: self.target.kind,
+        };
+        let opened = match (staged.load(), protection) {
             (Ok(Some(Stored::Plain(secret))), Protection::Plain) => Some(secret),
             (Ok(Some(Stored::Locked(locked))), Protection::Passphrase(passphrase)) => {
                 locked.unlock(passphrase).ok()

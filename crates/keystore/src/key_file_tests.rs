@@ -5,6 +5,7 @@ use zeroize::Zeroizing;
 use super::{KeyFile, lacks_hard_links};
 use crate::envelope::{AT_PUBLIC, Envelope, HEADER_LEN, SEALED_LEN};
 use crate::error::{Error, FormatError};
+use crate::kind::Kind;
 use crate::method::{Method, Protection};
 use crate::passphrase::Passphrase;
 use crate::secret::Secret;
@@ -16,7 +17,7 @@ fn passphrase(text: &str) -> Passphrase {
 }
 
 fn key_file(dir: &TestDir) -> KeyFile {
-    KeyFile::from(dir.join("identity.key"))
+    KeyFile::device(dir.join("identity.key"))
 }
 
 fn plain_file(dir: &TestDir, seed: [u8; 32]) -> (KeyFile, Secret) {
@@ -564,7 +565,7 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
 
     // A well-formed sealed file, but sealed under a passphrase other than the one the migration is
     // moving to: the stage is written, the test-unlock fails, and the rename must not happen.
-    let wrong = Envelope::seal(&secret, &passphrase("something else")).unwrap();
+    let wrong = Envelope::seal(&secret, Kind::Device, &passphrase("something else")).unwrap();
     assert!(matches!(
         file.replace(
             wrong.image(),
@@ -576,7 +577,7 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
     ));
     // And a form that opens, but to another node.
     let other = Secret::copy_of(&[8; 32]);
-    let elsewhere = Envelope::seal(&other, &under).unwrap();
+    let elsewhere = Envelope::seal(&other, Kind::Device, &under).unwrap();
     assert!(matches!(
         file.replace(
             elsewhere.image(),
@@ -617,7 +618,7 @@ fn a_migration_through_a_link_rewrites_the_file_the_link_names() {
     // The key is kept in a managed directory and linked into place, as a dotfile manager lays it out.
     let kept_dir = dir.join("dotfiles");
     fs::create_dir(&kept_dir).unwrap();
-    let kept = KeyFile::from(kept_dir.join("identity.key"));
+    let kept = KeyFile::device(kept_dir.join("identity.key"));
     let secret = Secret::copy_of(&[6; 32]);
     kept.write(&secret, Protection::Plain).unwrap();
     let file = key_file(&dir);
@@ -666,7 +667,7 @@ fn a_new_key_that_does_not_read_back_is_never_published() {
     let secret = Secret::copy_of(&[6; 32]);
     // Sealed under another passphrase than the one the write is for: the stage is written, its
     // test-unlock fails, and nothing may appear at the path.
-    let wrong = Envelope::seal(&secret, &passphrase("something else")).unwrap();
+    let wrong = Envelope::seal(&secret, Kind::Device, &passphrase("something else")).unwrap();
     assert!(matches!(
         file.create(
             wrong.image(),
@@ -676,6 +677,132 @@ fn a_new_key_that_does_not_read_back_is_never_published() {
         Err(Error::Unverified { .. })
     ));
     assert!(dir.names().is_empty());
+}
+
+fn root_file(dir: &TestDir) -> KeyFile {
+    KeyFile::root(dir.join("root.key"))
+}
+
+/// The same path, named as the other kind.
+fn as_device(file: &KeyFile) -> KeyFile {
+    KeyFile::device(file.path())
+}
+
+fn wrong_kind(outcome: Result<Option<Stored>, Error>) -> (Kind, Kind) {
+    match outcome {
+        Err(Error::Format {
+            source: FormatError::WrongKind { expected, found },
+            ..
+        }) => (expected, found),
+        other => panic!("expected a refusal by kind, found {other:?}"),
+    }
+}
+
+#[test]
+fn a_root_key_is_written_sealed_as_the_root_kind() {
+    let dir = TestDir::new();
+    let file = root_file(&dir);
+    let under = passphrase("correct horse battery staple");
+    let secret = Secret::copy_of(&[4; 32]);
+    file.write(&secret, Protection::Passphrase(&under)).unwrap();
+
+    assert_eq!(file.kind(), Kind::Root);
+    assert_eq!(bytes(&file).len(), SEALED_LEN);
+    assert_eq!(
+        locked(&file).unlock(&under).unwrap().node_id(),
+        secret.node_id()
+    );
+    assert_eq!(
+        wrong_kind(as_device(&file).load()),
+        (Kind::Device, Kind::Root)
+    );
+}
+
+#[test]
+fn a_device_key_file_in_the_root_slot_is_refused_by_kind() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (device, secret) = sealed_file(&dir, [4; 32], &under);
+    let root = KeyFile::root(device.path());
+    let before = bytes(&device);
+
+    assert_eq!(wrong_kind(root.load()), (Kind::Root, Kind::Device));
+    // Every other door refuses it for the same reason, and none of them changes it.
+    assert!(matches!(
+        root.adopt(&secret, Protection::Passphrase(&under)),
+        Err(Error::Format {
+            source: FormatError::WrongKind { .. },
+            ..
+        })
+    ));
+    let new = passphrase("a new passphrase for it");
+    assert!(matches!(
+        root.migrate(Protection::Passphrase(&under), Protection::Passphrase(&new)),
+        Err(Error::Format {
+            source: FormatError::WrongKind { .. },
+            ..
+        })
+    ));
+    assert_eq!(bytes(&device), before);
+}
+
+#[test]
+fn a_plain_file_in_the_root_slot_loads_as_plain() {
+    // A plain file carries no kind to refuse it by: it loads, and the caller decides what to do with
+    // a root key it finds unsealed.
+    let dir = TestDir::new();
+    let (device, secret) = plain_file(&dir, [4; 32]);
+    let root = KeyFile::root(device.path());
+    assert_eq!(plain(&root).node_id(), secret.node_id());
+}
+
+#[test]
+fn a_root_key_is_never_written_plain() {
+    let dir = TestDir::new();
+    let file = root_file(&dir);
+    let secret = Secret::copy_of(&[4; 32]);
+
+    assert!(matches!(
+        file.write(&secret, Protection::Plain),
+        Err(Error::PlainRoot { .. })
+    ));
+    assert!(matches!(
+        file.adopt(&secret, Protection::Plain),
+        Err(Error::PlainRoot { .. })
+    ));
+    assert!(dir.names().is_empty());
+
+    let under = passphrase("correct horse battery staple");
+    file.write(&secret, Protection::Passphrase(&under)).unwrap();
+    let sealed = bytes(&file);
+    assert!(matches!(
+        file.migrate(Protection::Passphrase(&under), Protection::Plain),
+        Err(Error::PlainRoot { .. })
+    ));
+    assert_eq!(bytes(&file), sealed);
+    assert_eq!(dir.names(), ["root.key"]);
+}
+
+#[test]
+fn a_root_key_stays_a_root_key_through_every_migration() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let new = passphrase("a new passphrase for it");
+    // A plain file found in the root slot, sealed: it becomes a root key, not a device key.
+    let (device, secret) = plain_file(&dir, [4; 32]);
+    let file = KeyFile::root(device.path());
+    file.migrate(Protection::Plain, Protection::Passphrase(&under))
+        .unwrap();
+    assert_eq!(wrong_kind(device.load()), (Kind::Device, Kind::Root));
+
+    // And a new passphrase keeps it one.
+    file.migrate(Protection::Passphrase(&under), Protection::Passphrase(&new))
+        .unwrap();
+    assert_eq!(
+        locked(&file).unlock(&new).unwrap().node_id(),
+        secret.node_id()
+    );
+    assert_eq!(wrong_kind(device.load()), (Kind::Device, Kind::Root));
 }
 
 #[cfg(unix)]

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use bifrost_core::NodeId;
 
 use crate::envelope::SEALED_LEN;
+use crate::kind::Kind;
 use crate::method::Method;
 
 /// Why a key file could not be loaded, written, adopted, migrated, or unlocked.
@@ -105,6 +106,13 @@ pub enum Error {
         /// The node the adopt offered.
         incoming: NodeId,
     },
+    /// A write asked to store a root key plain. A root key is only ever written sealed: a plain one is
+    /// every device it vouches for in one readable file.
+    #[error("a root key is always sealed; {} was not written plain", path.display())]
+    PlainRoot {
+        /// The key file.
+        path: PathBuf,
+    },
     /// A migration found no file to migrate.
     #[error("there is no key file at {}", path.display())]
     Absent {
@@ -205,6 +213,15 @@ pub enum FormatError {
     Kind {
         /// The kind byte.
         found: u8,
+    },
+    /// A sealed file of a known kind, read where the other kind belongs: a device key presented as a
+    /// root key, or a root key as a device key.
+    #[error("the sealed file is a {found}, not a {expected}")]
+    WrongKind {
+        /// The kind the reader expected.
+        expected: Kind,
+        /// The kind the file records.
+        found: Kind,
     },
     /// A protection method this build does not know.
     #[error("protection method {found} is not one this build knows")]
