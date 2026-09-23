@@ -6,7 +6,7 @@
 //! same conformance suite, so the interface is genuinely transport-agnostic and not iroh-shaped.
 //!
 //! Discovery is built in via a process-global registry keyed by [`NodeId`], so this is a
-//! self-discovering transport: `connect` resolves the peer with no external `Discovery` object,
+//! self-discovering transport: `connect` finds the peer with no external `Discovery` object,
 //! exactly as the design intends.
 
 use core::net::SocketAddr;
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, CryptoKind, Error};
+use bifrost_core::{Addr, CryptoKind, Error, HintStream};
 pub use bifrost_transport::{InProcess, Session, Transport};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -113,6 +113,16 @@ impl Transport for MemTransport {
             opens: dialer_opens,
             incoming: AsyncMutex::new(accepter_opened),
         })
+    }
+
+    /// Dials at once and never reads the feed: the in-process registry is how mem finds a peer, so
+    /// no hint could change where this dial goes and waiting for one would only add latency.
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        _updates: HintStream,
+    ) -> Result<MemSession, Error> {
+        self.connect(addr).await
     }
 
     async fn accept(&self) -> Result<MemSession, Error> {

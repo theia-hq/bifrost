@@ -14,8 +14,9 @@
 mod node;
 
 pub use bifrost_core::{
-    Addr, ConnInfo, CryptoKind, Discovery, Error, Layered, NoDiscovery, NodeId, NodeIdParseError,
-    Path, Refusal, RefusalDetail, RefusalDetailError, StaticDiscovery,
+    Addr, AddrUpdate, ConnInfo, CryptoKind, Discovery, Error, HintStream, Latest, Layered,
+    NoDiscovery, NodeId, NodeIdParseError, Path, Refusal, RefusalDetail, RefusalDetailError,
+    StaticDiscovery,
 };
 pub use bifrost_transport::{
     Announced, ChannelProtection, Confidential, InProcess, PeerProof, PeerProven, Sealed, Secure,

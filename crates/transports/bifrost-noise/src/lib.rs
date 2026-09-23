@@ -49,8 +49,10 @@
 //! inner stream then carries framed logical streams (`OPEN`, `DATA`, `FIN`, `RESET`), so a
 //! single-stream inner gains many streams and a many-stream inner is not asked for more than one.
 //! Stream ids are unique by side (initiator even, responder odd), frames are capped at 16 KiB,
-//! per-stream and outbound queues are bounded, and the handshake of a connect or accept has a
-//! deadline (a wait for an accept-side handshake slot is outside it). A
+//! per-stream and outbound queues are bounded, and a connect attempt (its inner dial, discovery wait
+//! included, then its handshake) and an accept's handshake each have a deadline (a wait for an
+//! accept-side handshake slot is outside it). A connect that runs out of time before its inner dial
+//! returns reports [`NoiseError::DialTimeout`], not a handshake timeout. A
 //! reader that stops reading propagates backpressure through the peer's writer instead of buffering
 //! without end.
 //!
@@ -91,7 +93,7 @@
 use core::net::SocketAddr;
 use std::sync::Arc;
 
-use bifrost_core::{Addr, Error, NodeId};
+use bifrost_core::{Addr, Error, HintStream, NodeId};
 use bifrost_transport::{Announced, Sealed, SecurityProfile, Session, Transport};
 use ed25519_dalek::SigningKey;
 pub use error::NoiseError;
@@ -202,24 +204,21 @@ where
 
     async fn connect(&self, addr: Addr) -> Result<Self::Session, Error> {
         let dialed = addr.node;
-        let attempt = async {
-            let session = self.inner.connect(addr).await?;
-            let (mut write, mut read) = session.open_bi().await?;
-            let established =
-                initiate(&mut write, &mut read, &self.identity, self.node, dialed).await?;
-            Ok::<_, NoiseError>((session, write, read, established))
-        };
-        match time::timeout(wire::HANDSHAKE_TIMEOUT, attempt).await {
-            Ok(Ok((session, write, read, established))) => Ok(NoiseSession::start(
-                session,
-                write,
-                read,
-                established,
-                Role::Initiator,
-            )),
-            Ok(Err(err)) => Err(err.into_connect()),
-            Err(_) => Err(NoiseError::HandshakeTimeout.into_connect()),
-        }
+        self.initiate_over(dialed, self.inner.connect(addr)).await
+    }
+
+    /// Forwarded rather than inherited: the inherited default would read the feed here and call
+    /// the inner transport's plain `connect`, shadowing whatever the inner transport's bind decided
+    /// about waiting. Forwarding keeps that decision where it is made, and the feed's wait sits
+    /// inside the same attempt deadline as the dial it serves.
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        updates: HintStream,
+    ) -> Result<Self::Session, Error> {
+        let dialed = addr.node;
+        self.initiate_over(dialed, self.inner.connect_with_updates(addr, updates))
+            .await
     }
 
     async fn accept(&self) -> Result<Self::Session, Error> {
@@ -258,6 +257,51 @@ where
     }
 }
 
+impl<T: Transport> Noise<T>
+where
+    T::Security: Wrappable,
+    <T::Session as Session>::Write: 'static,
+    <T::Session as Session>::Read: 'static,
+{
+    /// Run the initiator handshake over the session `dial` yields, the dial and the handshake
+    /// together under one attempt deadline. Both connect paths share it, so the forwarded one
+    /// cannot drift from the plain one.
+    ///
+    /// On expiry the error names the phase the time went to: a dial that never returned (the
+    /// discovery wait and the inner connect) is a [`NoiseError::DialTimeout`], and only a handshake
+    /// that had a session to run on is a [`NoiseError::HandshakeTimeout`].
+    async fn initiate_over(
+        &self,
+        dialed: NodeId,
+        dial: impl Future<Output = Result<T::Session, Error>>,
+    ) -> Result<NoiseSession<T::Session>, Error> {
+        let mut reached = false;
+        let attempt = async {
+            let session = dial.await?;
+            reached = true;
+            let (mut write, mut read) = session.open_bi().await?;
+            let established =
+                initiate(&mut write, &mut read, &self.identity, self.node, dialed).await?;
+            Ok::<_, NoiseError>((session, write, read, established))
+        };
+        // Bound first, so the attempt (and its borrow of `reached`) is gone before the match reads
+        // the flag.
+        let outcome = time::timeout(wire::HANDSHAKE_TIMEOUT, attempt).await;
+        match outcome {
+            Ok(Ok((session, write, read, established))) => Ok(NoiseSession::start(
+                session,
+                write,
+                read,
+                established,
+                Role::Initiator,
+            )),
+            Ok(Err(err)) => Err(err.into_connect()),
+            Err(_) if reached => Err(NoiseError::HandshakeTimeout.into_connect()),
+            Err(_) => Err(NoiseError::DialTimeout.into_connect()),
+        }
+    }
+}
+
 /// The frozen v0 spelling of the wrapper protocol.
 ///
 /// A wire contract has one home: these constants are it. The prologue and tag carry the version;
@@ -292,7 +336,8 @@ pub mod wire {
     /// Frame kind for an abandoned stream.
     pub const FRAME_RESET: u8 = 3;
 
-    /// The deadline covering one connect or accept attempt, handshake included.
+    /// The deadline covering one attempt: for a connect, the inner dial (discovery wait included)
+    /// and the handshake together; for an accept, the handshake.
     pub(crate) const HANDSHAKE_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(10);
 
     /// The largest handshake message accepted. XX messages here stay under 256 bytes.

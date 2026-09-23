@@ -35,9 +35,17 @@ pub enum NoiseError {
     #[error("peer did not present the wrapper tag")]
     BadTag,
 
-    /// The handshake did not complete within its deadline.
+    /// The inner transport returned a session, but the handshake over it did not complete within
+    /// the attempt deadline.
     #[error("handshake timed out")]
     HandshakeTimeout,
+
+    /// The attempt deadline passed before the inner transport returned a session: discovery had
+    /// not answered, no address answered, or the peer did not respond. Distinct from
+    /// [`HandshakeTimeout`](Self::HandshakeTimeout) because no handshake ever began, so an
+    /// operator is pointed at reach, not at the wrapper protocol.
+    #[error("dial timed out before any session: no address answered in time")]
+    DialTimeout,
 
     /// A message length exceeded the wrapper's bound.
     ///

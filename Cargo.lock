@@ -183,6 +183,7 @@ dependencies = [
  "bifrost-iroh",
  "bifrost-mem",
  "bifrost-quirk",
+ "futures-util",
  "tokio",
 ]
 
@@ -193,6 +194,7 @@ dependencies = [
  "blake3",
  "data-encoding",
  "ed25519-dalek 2.2.0",
+ "futures-core",
  "thiserror 2.0.20",
 ]
 
@@ -202,6 +204,7 @@ version = "0.0.0"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
+ "futures-util",
  "iroh",
  "thiserror 2.0.20",
  "tokio",
@@ -213,6 +216,7 @@ name = "bifrost-mdns"
 version = "0.0.0"
 dependencies = [
  "bifrost-core",
+ "futures-util",
  "if-addrs",
  "libc",
  "swarm-discovery",
@@ -241,6 +245,7 @@ dependencies = [
  "bifrost-quirk",
  "bifrost-transport",
  "ed25519-dalek 2.2.0",
+ "futures-util",
  "snow",
  "thiserror 2.0.20",
  "tokio",

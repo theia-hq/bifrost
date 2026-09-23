@@ -2,6 +2,41 @@
 
 All notable changes to bifrost, newest first.
 
+## Unreleased
+
+### Changed
+- **Discovery is a subscription, and a dial no longer waits a fixed time for it.**
+  `Discovery::subscribe(node)` replaces `resolve`. It returns a `HintStream` of `AddrUpdate`s: `Hints`
+  (the node's current addresses), `Removed` (none any more), or `Settled` (the source has finished its
+  first look and found nothing). `wait_ready` and the 1.5 s dial wait behind it are gone.
+
+  `Node::connect` hands the feed to the transport, and the transport reads it as its bind allows. mem
+  and the iroh n0 binds dial at once with whatever the feed already holds. A bind that can only reach
+  a peer through its addresses (iroh local and offline, quirk) waits for the first answer, for as long
+  as the caller's own deadline allows. A source implementing `Discovery` replaces `resolve` with
+  `subscribe`, and the trait documents what a feed owes the dial reading it. `Transport` gains
+  `connect_with_updates`, whose default reads the first answer and calls `connect`, so an existing
+  transport compiles unchanged.
+
+- **A cold dial on an iroh n0 bind no longer waits for mDNS.** On a LAN with no internet, a dial made
+  before mDNS has heard the peer (typically in the first 1.5 s after the node starts) now fails where
+  it used to wait and succeed. Dialing again once the peer has been heard succeeds. With internet,
+  iroh finds the peer by its key as before, and the first bytes may go through the relay until a
+  direct path is found.
+
+- **A merged discovery feed fails the dial when every source has failed.** `Layered` still lets one
+  source's failure pass while the other can serve the dial. When every source has stopped with no
+  addresses and at least one of them failed, the dial now fails with that error instead of going ahead
+  with no address and failing for a less useful reason.
+
+- **A sealed dial that runs out of time before reaching the peer says so.** `NoiseError::DialTimeout`
+  is new. The 10 s attempt deadline covers the discovery wait and the inner dial as well as the
+  handshake, and running out before the inner dial returned is now a `DialTimeout`, not a
+  `HandshakeTimeout`.
+
+- **An mDNS feed ends when its `MdnsDiscovery` is dropped**, rather than staying pending on a service
+  that can say no more.
+
 ## v0.4.0
 
 A peer should not be able to name its own allocation.

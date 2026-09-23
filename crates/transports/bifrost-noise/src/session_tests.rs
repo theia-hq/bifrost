@@ -247,6 +247,26 @@ async fn accept_times_out_on_a_stalled_peer() {
     }
 }
 
+/// A dial that returns a session and then stalls is a handshake timeout: the time went to the
+/// wrapper protocol, not to reaching the peer.
+#[tokio::test(start_paused = true)]
+async fn connect_times_out_in_the_handshake_on_a_stalled_peer() {
+    let seed = [13u8; NodeId::KEY_LEN];
+    let wrapper = Noise::new(Stalled, seed).expect("wrap");
+    let peer = NodeId::from_ed25519_secret(&[14u8; NodeId::KEY_LEN]);
+    match wrapper.connect(Addr::from_node(peer)).await {
+        Err(Error::Connect(source)) => assert!(
+            matches!(
+                source.downcast_ref::<NoiseError>(),
+                Some(NoiseError::HandshakeTimeout)
+            ),
+            "a dial that returned a session times out in the handshake, got {source}"
+        ),
+        Err(_) => panic!("expected a connect timeout"),
+        Ok(_) => panic!("a stalled peer must not yield a session"),
+    }
+}
+
 /// A listener runs at most `MAX_HANDSHAKES` accepts at once; further accepts wait for a slot, so a
 /// flood cannot grow unbounded handshake state.
 #[tokio::test(start_paused = true)]

@@ -34,7 +34,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// A message sent to a peer reached by key over a bidirectional stream echoes back byte-identical.
 ///
-/// Exercises the whole reach contract: discovery resolves the target, the transport establishes a
+/// Exercises the whole reach contract: discovery finds the target, the transport establishes a
 /// session, a bidirectional stream carries bytes both ways, and the session closes cleanly. Panics
 /// with a descriptive message on failure, so it reads as a test assertion.
 pub async fn reach_roundtrip<T, D>(sender: Node<T, D>, receiver: T)
