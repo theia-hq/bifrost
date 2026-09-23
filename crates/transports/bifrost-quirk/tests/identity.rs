@@ -55,12 +55,12 @@ async fn connect_accepts_the_dialed_identity() {
 async fn bind_with_secret_matches_the_iroh_node_id() {
     let secret = [0x5a; 32];
 
-    let quirk = Endpoint::bind_with_secret(secret)
+    let quirk = Endpoint::bind_with_secret(&secret)
         .await
         .expect("bind quirk");
     // The dialing constructor: this test registers nothing, and a dial bind must not write a record
     // (F1, 0.9.1).
-    let iroh = bifrost_iroh::Endpoint::bind_dialing_with_secret(secret)
+    let iroh = bifrost_iroh::Endpoint::bind_dialing_with_secret(&secret)
         .await
         .expect("bind iroh");
 
@@ -69,4 +69,18 @@ async fn bind_with_secret_matches_the_iroh_node_id() {
         iroh.node_id(),
         "the same secret must yield the same NodeId across transports"
     );
+}
+
+/// The bind borrows the secret and returns a future that no longer does, so a caller can bind
+/// through `secret.with_bytes(..)`. The seed is dropped before the future is used: a future that
+/// still borrowed it would not compile here.
+#[test]
+fn a_bind_future_holds_no_borrow_of_the_secret() {
+    fn owns_everything<F: Future + Send + 'static>(bind: F) -> F {
+        bind
+    }
+    let seed = Box::new([0x5a; 32]);
+    let bind = owns_everything(Endpoint::bind_with_secret(&seed));
+    drop(seed);
+    drop(bind);
 }

@@ -7,6 +7,7 @@ members = [
     "crates/bifrost-mdns",
     "crates/bifrost-transport",
     "crates/bifrost-wire",
+    "crates/keystore",
     "crates/transports/bifrost-iroh",
     "crates/transports/bifrost-mem",
     "crates/transports/bifrost-noise",
@@ -57,6 +58,7 @@ undocumented_unsafe_blocks = "deny"
 
 [workspace.lints.rust]
 unused_must_use = "deny"
-# Allowed back per-file, and only in the two platform reads under `bifrost-mdns/src/host/stable/`,
-# so the next `unsafe` anywhere in the workspace has to be argued rather than merely written.
+# Allowed back per-file, and only in the two platform reads under `bifrost-mdns/src/host/stable/` and
+# the one `geteuid` call in `keystore/src/uid.rs`, so the next `unsafe` anywhere in the workspace has
+# to be argued rather than merely written.
 unsafe_code = "deny"

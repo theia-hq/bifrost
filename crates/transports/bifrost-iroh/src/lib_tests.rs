@@ -106,7 +106,7 @@ fn a_ready_error_fails_either_bind() {
 #[tokio::test]
 async fn the_dialing_bind_registers_no_publisher() {
     let services = lookup_services(
-        Endpoint::bind_dialing_with_secret([7u8; 32])
+        Endpoint::bind_dialing_with_secret(&[7u8; 32])
             .await
             .expect("dialing bind"),
     )
@@ -119,7 +119,7 @@ async fn the_dialing_bind_registers_no_publisher() {
 #[tokio::test]
 async fn the_serving_bind_registers_the_publisher_and_both_resolvers() {
     let services = lookup_services(
-        Endpoint::bind_reachable_with_secret([8u8; 32])
+        Endpoint::bind_reachable_with_secret(&[8u8; 32])
             .await
             .expect("serving bind"),
     )
@@ -135,7 +135,7 @@ async fn the_serving_bind_registers_the_publisher_and_both_resolvers() {
 #[tokio::test]
 async fn a_named_resolver_registers_one_lookup_for_a_dialing_bind() {
     let services = lookup_services(
-        Endpoint::bind_dialing_with_secret_via([9u8; 32], named_reach())
+        Endpoint::bind_dialing_with_secret_via(&[9u8; 32], named_reach())
             .await
             .expect("dialing bind over a named reach"),
     )
@@ -147,7 +147,7 @@ async fn a_named_resolver_registers_one_lookup_for_a_dialing_bind() {
 #[tokio::test]
 async fn a_named_resolver_registers_publisher_and_resolver_for_a_serving_bind() {
     let services = lookup_services(
-        Endpoint::bind_reachable_with_secret_via([10u8; 32], named_reach())
+        Endpoint::bind_reachable_with_secret_via(&[10u8; 32], named_reach())
             .await
             .expect("serving bind over a named reach"),
     )
@@ -302,4 +302,34 @@ fn collect(dir: PathBuf, found: &mut Vec<PathBuf>) {
             found.push(path);
         }
     }
+}
+
+/// Every persisted-identity bind borrows the secret and returns a future that no longer does, so a
+/// caller can bind through `secret.with_bytes(..)` and the seed never has to be copied out. The seed
+/// is dropped before each future is used: a future that still borrowed it would not compile here.
+#[test]
+fn a_bind_future_holds_no_borrow_of_the_secret() {
+    fn owns_everything<F: Future + Send + 'static>(bind: F) -> F {
+        bind
+    }
+    let seed = Box::new([7u8; 32]);
+    let binds = (
+        owns_everything(Endpoint::bind_reachable_with_secret(&seed)),
+        owns_everything(Endpoint::bind_dialing_with_secret(&seed)),
+        owns_everything(Endpoint::bind_reachable_with_secret_via(
+            &seed,
+            Reach::default(),
+        )),
+        owns_everything(Endpoint::bind_dialing_with_secret_via(
+            &seed,
+            Reach::default(),
+        )),
+        owns_everything(Endpoint::bind_local_with_secret(&seed)),
+        owns_everything(Endpoint::bind_offline(
+            &seed,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        )),
+    );
+    drop(seed);
+    drop(binds);
 }

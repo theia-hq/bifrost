@@ -100,7 +100,6 @@ pub use error::NoiseError;
 pub use session::{NoiseSession, StreamRead, StreamWrite};
 use tokio::sync::Semaphore;
 use tokio::time;
-use zeroize::Zeroize;
 
 mod error;
 mod handshake;
@@ -155,8 +154,8 @@ where
     /// Fails with [`NoiseError::IdentityMismatch`] when `inner.node_id()` is not
     /// [`NodeId::from_ed25519_secret`] of `seed`: one address carries one identity, and a wrapper
     /// whose identity differed from its inner could not be routed to.
-    pub fn new(inner: T, seed: [u8; NodeId::KEY_LEN]) -> Result<Self, NoiseError> {
-        let node = NodeId::from_ed25519_secret(&seed);
+    pub fn new(inner: T, seed: &[u8; NodeId::KEY_LEN]) -> Result<Self, NoiseError> {
+        let node = NodeId::from_ed25519_secret(seed);
         let inner_node = inner.node_id();
         if node != inner_node {
             return Err(NoiseError::IdentityMismatch {
@@ -164,9 +163,8 @@ where
                 inner: inner_node,
             });
         }
-        let mut seed = seed;
-        let identity = SigningKey::from_bytes(&seed);
-        seed.zeroize();
+        // Borrowed, so the one copy of the seed is the one inside the `SigningKey`, which wipes itself.
+        let identity = SigningKey::from_bytes(seed);
         Ok(Self {
             inner,
             identity,
