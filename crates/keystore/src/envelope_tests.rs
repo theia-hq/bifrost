@@ -3,9 +3,11 @@ use zeroize::Zeroizing;
 
 use super::{
     AT_KDF, AT_KIND, AT_LANES, AT_MEMORY, AT_METHOD, AT_NONCE, AT_PASSES, AT_PUBLIC, AT_SALT,
-    AT_TAG, AT_VERSION, Cost, Envelope, HEADER_LEN, Parsed, Refusal, SEALED_LEN, SIGNATURE, parse,
+    AT_TAG, AT_VERSION, Cost, Envelope, HEADER_LEN, Parsed, Refusal, SEALED_LEN, SIGNATURE,
+    TAG_LEN, parse,
 };
 use crate::error::FormatError;
+use crate::kind::Kind;
 use crate::method::Method;
 use crate::passphrase::Passphrase;
 use crate::secret::Secret;
@@ -45,6 +47,22 @@ const GOLDEN_NFC_SEALED: [u8; SEALED_LEN - HEADER_LEN] = [
     0x5c, 0x1e, 0x4f, 0x69, 0x10, 0x56, 0x6e, 0x89, 0x77, 0x73, 0xf1, 0xec, 0xb2, 0x09, 0x53, 0x75,
 ];
 
+/// The tag that seals [`GOLDEN`]'s seed as a root key: the same inputs, with the kind byte at 2. The
+/// kind is part of the header, so it is authenticated, and only the tag differs. Computed outside this
+/// crate the same way as [`GOLDEN`] (Argon2id by the OpenSSL 3.6 CLI, the cipher from RFC 8439 and the
+/// XChaCha draft), and that computation reproduces [`GOLDEN`]'s own tag at kind 1.
+const GOLDEN_ROOT_TAG: [u8; TAG_LEN] = [
+    0x1e, 0x76, 0x0e, 0xf4, 0x1e, 0x30, 0xae, 0x4c, 0xbb, 0xca, 0x77, 0xb1, 0x68, 0x33, 0x3d, 0x65,
+];
+
+/// [`GOLDEN`], sealed as a root key: kind byte 2 and [`GOLDEN_ROOT_TAG`].
+fn golden_root() -> [u8; SEALED_LEN] {
+    let mut image = GOLDEN;
+    image[AT_KIND] = 2;
+    image[AT_TAG..].copy_from_slice(&GOLDEN_ROOT_TAG);
+    image
+}
+
 /// The golden seed's ed25519 public key, as `openssl pkey` derived it.
 #[rustfmt::skip]
 const GOLDEN_PUBLIC: [u8; 32] = [
@@ -69,7 +87,7 @@ fn passphrase(text: &str) -> Passphrase {
 }
 
 fn sealed(bytes: &[u8]) -> Envelope {
-    match parse(bytes) {
+    match parse(bytes, Kind::Device) {
         Ok(Parsed::Sealed(envelope)) => envelope,
         Ok(Parsed::Plain(_)) => panic!("parsed as a plain seed"),
         Err(error) => panic!("did not parse: {error}"),
@@ -77,7 +95,11 @@ fn sealed(bytes: &[u8]) -> Envelope {
 }
 
 fn refusal(bytes: &[u8]) -> FormatError {
-    match parse(bytes) {
+    refusal_as(bytes, Kind::Device)
+}
+
+fn refusal_as(bytes: &[u8], expected: Kind) -> FormatError {
+    match parse(bytes, expected) {
         Err(error) => error,
         Ok(Parsed::Plain(_)) => panic!("{} bytes were read as a plain seed", bytes.len()),
         Ok(Parsed::Sealed(_)) => panic!("{} bytes were accepted as a sealed file", bytes.len()),
@@ -88,6 +110,7 @@ fn refusal(bytes: &[u8]) -> FormatError {
 fn floor_image(secret: &Secret, public: NodeId, under: &Passphrase) -> [u8; SEALED_LEN] {
     *Envelope::seal_with(
         secret,
+        Kind::Device,
         public,
         under,
         Cost::FLOOR,
@@ -131,6 +154,7 @@ fn this_build_writes_the_golden_vector_byte_for_byte() {
     let secret = Secret::copy_of(&golden_seed());
     let envelope = Envelope::seal_with(
         &secret,
+        Kind::Device,
         secret.node_id(),
         &passphrase("correct horse battery staple"),
         Cost::parse(64 * 1024, 3, 1).unwrap(),
@@ -142,11 +166,88 @@ fn this_build_writes_the_golden_vector_byte_for_byte() {
 }
 
 #[test]
+fn the_golden_root_vector_opens_to_its_seed_only_as_a_root_key() {
+    let image = golden_root();
+    let envelope = match parse(&image, Kind::Root) {
+        Ok(Parsed::Sealed(envelope)) => envelope,
+        _ => panic!("the root vector did not parse as a root key"),
+    };
+    assert_eq!(
+        envelope.node_id(),
+        NodeId::new(CryptoKind::Ed25519, GOLDEN_PUBLIC)
+    );
+    let secret = envelope
+        .open(&passphrase("correct horse battery staple"))
+        .unwrap();
+    secret.with_bytes(|seed| assert_eq!(seed, &golden_seed()));
+}
+
+#[test]
+fn this_build_writes_the_golden_root_vector_byte_for_byte() {
+    let secret = Secret::copy_of(&golden_seed());
+    let envelope = Envelope::seal_with(
+        &secret,
+        Kind::Root,
+        secret.node_id(),
+        &passphrase("correct horse battery staple"),
+        Cost::parse(64 * 1024, 3, 1).unwrap(),
+        &golden_salt(),
+        &golden_nonce(),
+    )
+    .unwrap();
+    assert_eq!(envelope.image(), &golden_root());
+}
+
+#[test]
+fn a_sealed_key_is_read_only_as_its_own_kind() {
+    assert_eq!(
+        refusal_as(&GOLDEN, Kind::Root),
+        FormatError::WrongKind {
+            expected: Kind::Root,
+            found: Kind::Device
+        }
+    );
+    assert_eq!(
+        refusal_as(&golden_root(), Kind::Device),
+        FormatError::WrongKind {
+            expected: Kind::Device,
+            found: Kind::Root
+        }
+    );
+}
+
+#[test]
+fn a_plain_seed_has_no_kind_to_refuse_it_by() {
+    for expected in [Kind::Device, Kind::Root] {
+        assert!(matches!(
+            parse(&[9; 32], expected),
+            Ok(Parsed::Plain(seed)) if seed == &[9; 32]
+        ));
+    }
+}
+
+#[test]
+fn a_device_key_relabelled_as_a_root_key_does_not_unlock() {
+    // The kind byte is authenticated with the rest of the header: rewriting it gets past the parser,
+    // which reads it before anything is verified, and then fails the unlock rather than opening a
+    // device key as a root key.
+    let mut relabelled = GOLDEN;
+    relabelled[AT_KIND] = 2;
+    let Ok(Parsed::Sealed(envelope)) = parse(&relabelled, Kind::Root) else {
+        panic!("a relabelled file did not parse as a root key");
+    };
+    assert!(matches!(
+        envelope.open(&passphrase("correct horse battery staple")),
+        Err(Refusal::Unlock)
+    ));
+}
+
+#[test]
 fn every_seal_uses_the_golden_cost_and_draws_a_fresh_salt_and_nonce() {
     let secret = Secret::copy_of(&golden_seed());
     let under = passphrase("correct horse battery staple");
-    let first = Envelope::seal(&secret, &under).unwrap();
-    let second = Envelope::seal(&secret, &under).unwrap();
+    let first = Envelope::seal(&secret, Kind::Device, &under).unwrap();
+    let second = Envelope::seal(&secret, Kind::Device, &under).unwrap();
     for envelope in [&first, &second] {
         assert_eq!(
             envelope.image()[AT_MEMORY..AT_SALT],
@@ -209,7 +310,7 @@ fn a_header_naming_another_node_is_refused_even_with_the_right_passphrase() {
 
 #[test]
 fn a_plain_file_is_exactly_32_bytes() {
-    assert!(matches!(parse(&[9; 32]), Ok(Parsed::Plain(seed)) if seed == &[9; 32]));
+    assert!(matches!(parse(&[9; 32], Kind::Device), Ok(Parsed::Plain(seed)) if seed == &[9; 32]));
     for found in [0, 1, 31, 33, 143, 144, 145] {
         assert_eq!(
             refusal(&vec![9; found]),
@@ -251,13 +352,15 @@ fn an_unknown_version_is_named_before_its_length_is_judged() {
 
 #[test]
 fn only_registered_kinds_methods_and_derivations_parse() {
-    // Method 1 is the passphrase. No other value is registered, so a method reserved for the future
-    // cannot be carried by a file this build accepts.
-    for found in [0, 2, 3, 255] {
+    // Kinds 1 and 2 are the device and root keys; method 1 is the passphrase. No other value is
+    // registered, so a kind or a method reserved for the future cannot be carried by a file this build
+    // accepts.
+    for found in [0, 3, 255] {
         let mut image = GOLDEN;
         image[AT_KIND] = found;
         assert_eq!(refusal(&image), FormatError::Kind { found });
-
+    }
+    for found in [0, 2, 3, 255] {
         let mut image = GOLDEN;
         image[AT_METHOD] = found;
         assert_eq!(refusal(&image), FormatError::Method { found });
@@ -304,7 +407,7 @@ fn a_cost_outside_the_bounds_is_refused_before_any_key_is_derived() {
 fn the_bounds_are_inclusive_and_hold_both_costs_this_crate_uses() {
     for (memory_kib, passes, lanes) in [(256 * 1024, 10, 8), (19 * 1024, 2, 1)] {
         assert!(matches!(
-            parse(&with_cost(memory_kib, passes, lanes)),
+            parse(&with_cost(memory_kib, passes, lanes), Kind::Device),
             Ok(Parsed::Sealed(_))
         ));
     }

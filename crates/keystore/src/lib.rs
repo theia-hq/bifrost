@@ -1,8 +1,11 @@
 //! Storage for a node's secret key: one [`Secret`], one versioned file format, and the four codecs
 //! that load, write, adopt, and migrate a key file.
 //!
-//! A key file holds one ed25519 seed under one [`Method`]: `plain`, the raw 32-byte seed, or
-//! `passphrase`, the seed sealed under a passphrase. The method is a property of the FILE. It is read
+//! A key file holds one ed25519 seed of one [`Kind`] under one [`Method`]. The kind says what the key
+//! is for, a device's own key or a root key, and is chosen by naming the file
+//! ([`KeyFile::device`], [`KeyFile::root`]); a sealed file of the other kind is refused, and a root
+//! key is never written plain. The method is `plain`, the raw 32-byte seed, or `passphrase`, the seed
+//! sealed under a passphrase. The method is a property of the FILE. It is read
 //! from the file's own bytes, never from configuration, and it changes only when [`KeyFile::migrate`]
 //! rewrites the file. [`KeyFile::load`] states which case it found (nothing there, a plain key, a
 //! locked key) or why it refuses, and it never returns a key the file does not hold.
@@ -20,6 +23,7 @@
 mod envelope;
 mod error;
 mod key_file;
+mod kind;
 mod method;
 mod passphrase;
 mod secret;
@@ -29,6 +33,7 @@ mod uid;
 
 pub use error::{CryptoError, Error, FormatError};
 pub use key_file::KeyFile;
+pub use kind::Kind;
 pub use method::{Method, Protection};
 pub use passphrase::{Passphrase, PassphraseError};
 pub use secret::Secret;

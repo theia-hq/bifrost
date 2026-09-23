@@ -48,7 +48,7 @@ interfaces runs unchanged over any of them.
 | --------------------- | ------------------------------------------------------------------- |
 | `bifrost`             | facade: the connection API (`Node`, `Transport`, `Session`, `Discovery`) |
 | `bifrost-core`        | identity: `NodeId`, an ed25519 public key with a crypto-suite tag   |
-| `keystore`            | a node's secret key on disk: one file, plain or sealed under a passphrase |
+| `keystore`            | a node's secret key on disk: a device key, plain or sealed under a passphrase, or a root key, always sealed |
 | `bifrost-transport`   | the `Transport` and `Session` traits                                |
 | `bifrost-iroh`        | transport backend over iroh (QUIC with NAT hole-punching)           |
 | `bifrost-mem`         | in-process transport backend for hermetic tests                     |
