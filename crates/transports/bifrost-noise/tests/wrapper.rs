@@ -7,16 +7,21 @@
 
 mod support;
 
+use core::net::SocketAddr;
 use core::time::Duration;
 use std::io;
 
-use bifrost::{Addr, Error, Node, NodeId, StaticDiscovery, Transport};
+use bifrost::{
+    Addr, Announced, Discovery, Error, HintStream, Node, NodeId, StaticDiscovery, Transport,
+};
 use bifrost_conformance::{
-    close_drains, identity_binding, reach_roundtrip, unknown_conn_info, wrong_key_rejected,
+    PeerNotice, close_drains, close_ends_held_streams, identity_binding, reach_roundtrip,
+    unknown_conn_info, wrong_key_rejected,
 };
 use bifrost_noise::{Noise, NoiseError, wire};
 use bifrost_transport::Session;
-use support::{BarePeer, Forger, Replayer, Sabotage, Saboteur, Splicer, Wire};
+use futures_util::stream;
+use support::{BarePeer, Forger, Replayer, Sabotage, Saboteur, Splicer, Wire, WireSession};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// The recorded third frame of a dialer flight: `tag || frame(msg1) || frame(msg3)`.
@@ -41,7 +46,7 @@ fn node(byte: u8) -> NodeId {
 // A test helper, not a `#[test]` fn, so `allow-expect-in-tests` does not reach the expect inside it.
 #[allow(clippy::expect_used)]
 fn sealed(byte: u8) -> Noise<Wire> {
-    Noise::new(Wire::bind(seed(byte)), seed(byte)).expect("wrap the inner")
+    Noise::new(Wire::bind(seed(byte)), &seed(byte)).expect("wrap the inner")
 }
 
 fn dial_addr(receiver: &Noise<Wire>) -> Addr {
@@ -103,7 +108,7 @@ async fn wrapper_unknown_conn_info() {
 async fn accept_binds_peer_to_handshake_not_announcement() {
     let victim = node(13);
     let receiver =
-        Noise::new(Wire::bind_lying(seed(14), Some(victim)), seed(14)).expect("receiver");
+        Noise::new(Wire::bind_lying(seed(14), Some(victim)), &seed(14)).expect("receiver");
     let dialer = sealed(15);
     let (accepted, dialed) = tokio::join!(receiver.accept(), dialer.connect(dial_addr(&receiver)));
 
@@ -129,7 +134,7 @@ async fn dial_pins_responder_to_dialed_node() {
     let receiver = sealed(16);
     let dialer_inner = Wire::bind(seed(17));
     let written = dialer_inner.writes();
-    let dialer = Noise::new(dialer_inner, seed(17)).expect("dialer");
+    let dialer = Noise::new(dialer_inner, &seed(17)).expect("dialer");
     let victim = node(18);
     let addr = Addr {
         node: victim,
@@ -201,7 +206,7 @@ async fn handshake_replay_rejected() {
     let receiver = sealed(23);
     let dialer_inner = Wire::bind(seed(24));
     let written = dialer_inner.writes();
-    let dialer = Noise::new(dialer_inner, seed(24)).expect("dialer");
+    let dialer = Noise::new(dialer_inner, &seed(24)).expect("dialer");
 
     let (first, _) = tokio::join!(receiver.accept(), dialer.connect(dial_addr(&receiver)));
     first.expect("the first handshake completes");
@@ -420,7 +425,7 @@ async fn spliced_msg3_is_rejected_and_listener_survives() {
     let recording_receiver = sealed(76);
     let dialer_inner = Wire::bind(seed(77));
     let written = dialer_inner.writes();
-    let dialer = Noise::new(dialer_inner, seed(77)).expect("dialer");
+    let dialer = Noise::new(dialer_inner, &seed(77)).expect("dialer");
     let (first, _) = tokio::join!(
         recording_receiver.accept(),
         dialer.connect(dial_addr(&recording_receiver))
@@ -458,10 +463,10 @@ async fn spliced_msg3_is_rejected_and_listener_survives() {
 async fn application_bytes_do_not_appear_on_the_inner_wire() {
     let receiver_inner = Wire::bind(seed(81));
     let receiver_written = receiver_inner.writes();
-    let receiver = Noise::new(receiver_inner, seed(81)).expect("receiver");
+    let receiver = Noise::new(receiver_inner, &seed(81)).expect("receiver");
     let dialer_inner = Wire::bind(seed(82));
     let dialer_written = dialer_inner.writes();
-    let dialer = Noise::new(dialer_inner, seed(82)).expect("dialer");
+    let dialer = Noise::new(dialer_inner, &seed(82)).expect("dialer");
 
     let (accepted, dialed) = tokio::join!(receiver.accept(), dialer.connect(dial_addr(&receiver)));
     let accepted = accepted.expect("accepted");
@@ -569,4 +574,158 @@ async fn stream_cap_counts_concurrent_streams() {
         .open_bi()
         .await
         .expect("a closed stream frees its slot");
+}
+
+/// The wrapper forwards a feed-carrying dial to its inner transport rather than reading the feed
+/// itself. The inner here finds its peer on its own and never reads the feed, and the feed never
+/// answers: forwarded, the dial goes at once; inherited, the wrapper would wait on the silent feed
+/// and shadow the inner transport's decision until the deadline.
+#[tokio::test(start_paused = true)]
+async fn the_wrapper_forwards_a_feed_dial_to_its_inner_transport() {
+    let receiver = sealed(90);
+    let inner = SelfFinding {
+        wire: Wire::bind(seed(91)),
+        route: receiver.local_addr().hints,
+    };
+    let sender = Node::new(
+        Noise::new(inner, &seed(91)).expect("wrap the inner"),
+        Silent,
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(receiver.accept(), sender.connect(receiver.node_id()))
+    })
+    .await;
+
+    let (accepted, dialed) =
+        outcome.expect("the dial must reach the inner transport's own route without waiting");
+    accepted.expect("the receiver accepts");
+    assert_eq!(
+        dialed.expect("the dial succeeds").peer(),
+        receiver.node_id()
+    );
+}
+
+/// A dial whose inner transport is still waiting on a silent feed when the attempt deadline passes
+/// reports a dial timeout: no session ever existed, so no handshake can have been what timed out.
+#[tokio::test(start_paused = true)]
+async fn a_dial_still_waiting_on_discovery_times_out_as_a_dial() {
+    let sender = Node::new(sealed(92), Silent);
+
+    match sender.connect(node(93)).await {
+        Err(Error::Connect(source)) => assert!(
+            matches!(
+                source.downcast_ref::<NoiseError>(),
+                Some(NoiseError::DialTimeout)
+            ),
+            "a dial that never returned must not read as a handshake timeout, got {source}"
+        ),
+        Err(other) => panic!("expected a dial timeout, got {other}"),
+        Ok(_) => panic!("a silent feed must not yield a session"),
+    }
+}
+
+/// An inner transport that finds its peer by itself, as a self-discovering bind does: a
+/// feed-carrying dial ignores the feed and goes to the route it already knows.
+struct SelfFinding {
+    wire: Wire,
+    route: Vec<SocketAddr>,
+}
+
+impl Transport for SelfFinding {
+    type Security = Announced;
+    type Session = WireSession;
+
+    fn node_id(&self) -> NodeId {
+        self.wire.node_id()
+    }
+
+    fn local_addr(&self) -> Addr {
+        self.wire.local_addr()
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.wire.bound_sockets()
+    }
+
+    async fn connect(&self, addr: Addr) -> Result<WireSession, Error> {
+        self.wire.connect(addr).await
+    }
+
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        _updates: HintStream,
+    ) -> Result<WireSession, Error> {
+        self.wire
+            .connect(Addr {
+                node: addr.node,
+                hints: self.route.clone(),
+            })
+            .await
+    }
+
+    async fn accept(&self) -> Result<WireSession, Error> {
+        self.wire.accept().await
+    }
+
+    async fn close(&self) {
+        self.wire.close().await;
+    }
+}
+
+/// A source that never answers and never ends.
+struct Silent;
+
+impl Discovery for Silent {
+    fn subscribe(&self, _node: NodeId) -> HintStream {
+        HintStream::new(stream::pending())
+    }
+}
+
+/// Closing a sealed session tears every stream down, a held one included, and closes the inner session,
+/// so the peer's reader ends and tears its own streams down in turn.
+#[tokio::test]
+async fn wrapper_close_ends_held_streams() {
+    let receiver = sealed(40);
+    let mut discovery = StaticDiscovery::new();
+    discovery.insert(receiver.node_id(), receiver.local_addr().hints);
+    let sender = Node::new(sealed(41), discovery);
+    close_ends_held_streams(sender, receiver, PeerNotice::Told).await;
+}
+
+/// Dropping a sealed session under a stream a detached task still holds must fail that stream, never
+/// end it cleanly: a truncated transfer must not pass for a complete one.
+#[tokio::test]
+async fn a_dropped_noise_session_never_reads_a_clean_eof() {
+    let receiver = sealed(42);
+    let dialer = sealed(43);
+    let addr = dial_addr(&receiver);
+    let dialing = async {
+        let session = dialer.connect(addr).await.expect("connect");
+        let (mut send, recv) = session.open_bi().await.expect("open");
+        send.write_all(b"partial").await.expect("write");
+        (session, send, recv)
+    };
+    let accepting = async {
+        let session = receiver.accept().await.expect("accept");
+        let (send, mut recv) = session.accept_bi().await.expect("accept stream");
+        let mut first = [0u8; 7];
+        recv.read_exact(&mut first)
+            .await
+            .expect("the bytes sent so far");
+        (session, send, recv)
+    };
+    let ((_dialed, _send, _recv), (accepted, held_send, mut held_recv)) =
+        tokio::join!(dialing, accepting);
+    drop(accepted);
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), held_recv.read_to_end(&mut rest))
+        .await
+        .expect("a stream whose session dropped ends");
+    drop(held_send);
+    assert!(
+        read.is_err(),
+        "a dropped session's held stream reads an error, not a clean end: {read:?}"
+    );
 }

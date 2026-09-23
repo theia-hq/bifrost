@@ -8,12 +8,16 @@ rust-version.workspace = true
 
 [dependencies]
 bifrost.workspace = true
-tokio.workspace = true
+# `time`: the close case bounds how long a severed stream may take to fail.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 bifrost-iroh.workspace = true
 bifrost-mem.workspace = true
 bifrost-quirk.workspace = true
+
+futures-util.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

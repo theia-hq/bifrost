@@ -53,16 +53,18 @@ fn distinct_labels_and_roots_derive_distinct_devices() {
 #[test]
 fn a_child_secret_is_domain_separated_from_the_root_and_other_derivations() {
     let root = [9u8; NodeId::KEY_LEN];
-    let child = derive_ed25519_child_secret(&root, "desk");
+    // Typed, so a return that stops wiping itself is a compile error here.
+    let child: zeroize::Zeroizing<[u8; NodeId::KEY_LEN]> =
+        derive_ed25519_child_secret(&root, "desk");
     // The child is never the root itself: the root stays on the owner's laptop; only a scoped child is
     // handed out as the derived-key payload a device adopts.
-    assert_ne!(child, root);
+    assert_ne!(*child, root);
     // Domain-separated from any other KDF over the same root. A sibling derivation uses the same BLAKE3
     // primitive with a DIFFERENT context; a device seed and any sibling seed for one root must never
     // coincide, or adopting a device would leak the sibling seed (and vice versa). This pins the separation
     // so a refactor that collapses the contexts trips here.
     let sibling_seed = blake3::derive_key("theia sibling derivation v1", &root);
-    assert_ne!(child, sibling_seed);
+    assert_ne!(*child, sibling_seed);
 }
 
 #[test]

@@ -86,6 +86,9 @@ impl Session for FabricatedSession {
     }
 
     async fn wait_closed(&self) {}
+
+    /// A double that carries no streams has nothing to end.
+    fn close(&self) {}
 }
 
 /// A responder that answers every dial by claiming the key it was dialed under, without holding it.
@@ -144,6 +147,9 @@ impl Session for ImpersonatedSession {
     }
 
     async fn wait_closed(&self) {}
+
+    /// A double that carries no streams has nothing to end.
+    fn close(&self) {}
 }
 
 /// A process-global directory of live echo endpoints: the true node id to its inbound session.
@@ -289,6 +295,10 @@ impl Session for EchoSession {
         let mut incoming = self.incoming.lock().await;
         while incoming.recv().await.is_some() {}
     }
+
+    /// Does nothing: this double exists for the identity cases and is never run through
+    /// `close_ends_held_streams`, which it would fail.
+    fn close(&self) {}
 }
 
 /// A session that speaks for a key the dialer never asked for fails [`identity_binding`].

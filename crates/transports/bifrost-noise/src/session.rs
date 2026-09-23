@@ -157,6 +157,10 @@ impl Exit {
         self.notify.notify_one();
     }
 
+    fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Acquire)
+    }
+
     async fn wait(&self) {
         if self.dead.load(Ordering::Acquire) {
             return;
@@ -277,14 +281,27 @@ impl<S: Session> NoiseSession<S> {
     }
 }
 
-impl<S: Session> Drop for NoiseSession<S> {
-    /// Dropping a session cancels both frame pumps. The pumps own the inner stream halves, so
-    /// cancelling them is what releases the inner connection; a keep-alive would otherwise outlive
-    /// the session value. Queued frames not yet written are discarded, which is what dropping a
-    /// session means: a caller that needs delivery awaits `wait_closed` first.
-    fn drop(&mut self) {
+impl<S: Session> NoiseSession<S> {
+    /// End this side of the session: every live stream torn, both pumps cancelled.
+    ///
+    /// The streams are torn FIRST, through the same [`tear_down`] the read loop runs at its end. A
+    /// cancelled reader never reaches that end, so without this its routes would drop with their
+    /// streams still unmarked, and a held read would see its queue end and report a clean EOF: a
+    /// truncated stream passing for a complete one.
+    fn end(&self) {
+        tear_down(&self.routes, &self.exit);
         self.writer.abort();
         self.reader.abort();
+    }
+}
+
+impl<S: Session> Drop for NoiseSession<S> {
+    /// Dropping a session ends it: the pumps own the inner stream halves, so cancelling them is what
+    /// releases the inner connection, and a keep-alive would otherwise outlive the session value.
+    /// Queued frames not yet written are discarded, which is what dropping a session means: a caller
+    /// that needs delivery awaits `wait_closed` first.
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -298,6 +315,9 @@ impl<S: Session> Session for NoiseSession<S> {
     }
 
     async fn open_bi(&self) -> Result<(StreamWrite, StreamRead), Error> {
+        if self.exit.is_dead() {
+            return Err(Error::Closed);
+        }
         let Some(life) = StreamLife::acquire(&self.live) else {
             return Err(NoiseError::TooManyStreams.into_stream());
         };
@@ -325,6 +345,9 @@ impl<S: Session> Session for NoiseSession<S> {
     }
 
     async fn accept_bi(&self) -> Result<(StreamWrite, StreamRead), Error> {
+        if self.exit.is_dead() {
+            return Err(Error::Closed);
+        }
         let mut incoming = self.incoming.lock().await;
         let Inbound { id, rx, life } = incoming.recv().await.ok_or(Error::Closed)?;
         Ok((
@@ -340,6 +363,13 @@ impl<S: Session> Session for NoiseSession<S> {
             () = self.inner.wait_closed() => {}
             () = self.exit.wait() => {}
         }
+    }
+
+    /// Tears every stream down locally, then closes the inner session, which is how the peer learns:
+    /// its inner streams end, and its reader tears its own streams down in turn.
+    fn close(&self) {
+        self.end();
+        self.inner.close();
     }
 
     fn conn_info(&self) -> ConnInfo {
@@ -706,10 +736,18 @@ async fn read_loop<R: AsyncRead + Unpin>(
     if fatal {
         abort_writer.abort();
     }
-    // The session is over. Mark every live stream torn first (sticky, so a full queue cannot lose
-    // it), then best-effort enqueue a reset and drop the routes; `accept_bi` sees `Closed` when the
-    // reader task drops its `incoming` sender. This runs for a fatal frame and for a clean inner
-    // end alike.
+    // Runs for a fatal frame and for a clean inner end alike; `accept_bi` sees `Closed` when this task
+    // drops its `incoming` sender.
+    tear_down(&routes, &exit);
+}
+
+/// The session is over: mark every live stream torn first (sticky, so a full queue cannot lose it),
+/// then best-effort enqueue a reset, drop the routes, and signal the exit.
+///
+/// The one teardown, with three callers: the end of the read loop, [`Session::close`], and `Drop`. The
+/// order is what matters. A stream's read maps its queue ending to a reset only if the stream is
+/// already marked torn when its route's sender drops; marked after, it reads a clean EOF.
+fn tear_down(routes: &StdMutex<HashMap<u32, Route>>, exit: &Exit) {
     {
         let mut routes = routes.lock().unwrap_or_else(|p| p.into_inner());
         for (_, route) in routes.drain() {

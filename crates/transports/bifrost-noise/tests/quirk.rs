@@ -16,10 +16,10 @@ fn seed(byte: u8) -> [u8; NodeId::KEY_LEN] {
 // A test helper, not a `#[test]` fn, so `allow-expect-in-tests` does not reach the expects inside it.
 #[allow(clippy::expect_used)]
 async fn sealed(byte: u8) -> Noise<Endpoint> {
-    let inner = Endpoint::bind_with_secret(seed(byte))
+    let inner = Endpoint::bind_with_secret(&seed(byte))
         .await
         .expect("bind quirk");
-    Noise::new(inner, seed(byte)).expect("wrap quirk")
+    Noise::new(inner, &seed(byte)).expect("wrap quirk")
 }
 
 /// A wrapped-quirk session carries the same blob round-trip as any other transport.

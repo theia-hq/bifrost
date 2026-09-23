@@ -10,7 +10,9 @@ rust-version.workspace = true
 blake3.workspace = true
 data-encoding.workspace = true
 ed25519-dalek.workspace = true
+futures-core.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

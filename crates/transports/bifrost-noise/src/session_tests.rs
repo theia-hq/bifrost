@@ -74,6 +74,9 @@ impl Session for FakeSession {
     }
 
     async fn wait_closed(&self) {}
+
+    /// A double whose streams carry nothing has nothing to end.
+    fn close(&self) {}
 }
 
 /// The wrapper declares `Sealed` for an `Announced` inner and satisfies `Secure`.
@@ -84,7 +87,7 @@ fn wrapper_declares_sealed_and_is_secure() {
         Fake {
             node: NodeId::from_ed25519_secret(&seed),
         },
-        seed,
+        &seed,
     )
     .expect("wrap");
     assert_eq!(
@@ -123,7 +126,7 @@ fn constructor_refuses_a_mismatched_identity() {
         node: NodeId::from_ed25519_secret(&[1u8; NodeId::KEY_LEN]),
     };
     assert!(matches!(
-        Noise::new(inner, [2u8; NodeId::KEY_LEN]),
+        Noise::new(inner, &[2u8; NodeId::KEY_LEN]),
         Err(NoiseError::IdentityMismatch { .. })
     ));
 }
@@ -233,7 +236,7 @@ async fn stream_read_handles_partial_buffers_reset_and_eof() {
 #[tokio::test(start_paused = true)]
 async fn accept_times_out_on_a_stalled_peer() {
     let seed = [13u8; NodeId::KEY_LEN];
-    let wrapper = Noise::new(Stalled, seed).expect("wrap");
+    let wrapper = Noise::new(Stalled, &seed).expect("wrap");
     match wrapper.accept().await {
         Err(Error::Accept(source)) => assert!(
             matches!(
@@ -247,12 +250,32 @@ async fn accept_times_out_on_a_stalled_peer() {
     }
 }
 
+/// A dial that returns a session and then stalls is a handshake timeout: the time went to the
+/// wrapper protocol, not to reaching the peer.
+#[tokio::test(start_paused = true)]
+async fn connect_times_out_in_the_handshake_on_a_stalled_peer() {
+    let seed = [13u8; NodeId::KEY_LEN];
+    let wrapper = Noise::new(Stalled, &seed).expect("wrap");
+    let peer = NodeId::from_ed25519_secret(&[14u8; NodeId::KEY_LEN]);
+    match wrapper.connect(Addr::from_node(peer)).await {
+        Err(Error::Connect(source)) => assert!(
+            matches!(
+                source.downcast_ref::<NoiseError>(),
+                Some(NoiseError::HandshakeTimeout)
+            ),
+            "a dial that returned a session times out in the handshake, got {source}"
+        ),
+        Err(_) => panic!("expected a connect timeout"),
+        Ok(_) => panic!("a stalled peer must not yield a session"),
+    }
+}
+
 /// A listener runs at most `MAX_HANDSHAKES` accepts at once; further accepts wait for a slot, so a
 /// flood cannot grow unbounded handshake state.
 #[tokio::test(start_paused = true)]
 async fn accept_waits_for_a_handshake_slot() {
     let seed = [13u8; NodeId::KEY_LEN];
-    let wrapper = Arc::new(Noise::new(Stalled, seed).expect("wrap"));
+    let wrapper = Arc::new(Noise::new(Stalled, &seed).expect("wrap"));
     let held: Vec<_> = (0..MAX_HANDSHAKES)
         .map(|_| wrapper.handshakes.try_acquire().expect("handshake slot"))
         .collect();
@@ -330,6 +353,9 @@ impl Session for StalledSession {
     }
 
     async fn wait_closed(&self) {}
+
+    /// A double whose streams carry nothing has nothing to end.
+    fn close(&self) {}
 }
 
 /// A reader that never produces a byte.

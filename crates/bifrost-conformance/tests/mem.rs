@@ -1,6 +1,7 @@
 use bifrost::{NoDiscovery, Node, Transport};
 use bifrost_conformance::{
-    close_drains, identity_binding, reach_roundtrip, unknown_conn_info, wrong_key_rejected,
+    PeerNotice, close_drains, close_ends_held_streams, identity_binding, reach_roundtrip,
+    unknown_conn_info, wrong_key_rejected,
 };
 use bifrost_mem::MemTransport;
 
@@ -58,4 +59,13 @@ fn mem_binds_no_sockets() {
         transport.bound_sockets().is_empty(),
         "an in-process transport binds no socket"
     );
+}
+
+/// Closing an in-process session ends every stream either side holds, with an error, and the peer
+/// learns at once: the pair shares one close signal.
+#[tokio::test]
+async fn mem_close_ends_held_streams() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    close_ends_held_streams(sender, receiver, PeerNotice::Told).await;
 }

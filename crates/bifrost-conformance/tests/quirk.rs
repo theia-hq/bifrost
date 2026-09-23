@@ -1,7 +1,8 @@
 use bifrost::{CryptoKind, Node, NodeId, StaticDiscovery, Transport};
 use bifrost_conformance::{
-    bound_sockets_are_bind_truth, close_drains, direct_conn_info, identity_binding,
-    reach_roundtrip, wildcard_bind_is_not_rewritten, wrong_key_rejected,
+    PeerNotice, bound_sockets_are_bind_truth, close_drains, close_ends_held_streams,
+    direct_conn_info, identity_binding, reach_roundtrip, wildcard_bind_is_not_rewritten,
+    wrong_key_rejected,
 };
 use bifrost_quirk::Endpoint;
 
@@ -81,4 +82,22 @@ async fn quirk_bound_sockets_are_bind_truth() {
 async fn quirk_wildcard_bind_is_not_rewritten() {
     let endpoint = Endpoint::bind().await.expect("bind endpoint");
     wildcard_bind_is_not_rewritten(&endpoint);
+}
+
+/// Closing a quirk session ends every stream it holds locally, with an error. The peer is not told:
+/// the wire has no close frame yet, so the peer-side checks are an owned gap rather than a pass.
+#[tokio::test]
+async fn quirk_close_ends_held_streams() {
+    let receiver = Endpoint::bind().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    close_ends_held_streams(
+        sender,
+        receiver,
+        PeerNotice::NotYet(
+            "the wire has no close frame, so the peer learns only by its own silence handling; \
+             owner: the backend's repo, whose roadmap carries the close frame; trigger: Session::close \
+             landing",
+        ),
+    )
+    .await;
 }

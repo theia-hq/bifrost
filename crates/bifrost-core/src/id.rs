@@ -2,6 +2,7 @@ use core::fmt;
 use core::str::FromStr;
 
 use data_encoding::BASE32_NOPAD;
+use zeroize::Zeroizing;
 
 /// The cryptographic suite a [`NodeId`] belongs to.
 ///
@@ -100,11 +101,17 @@ impl NodeId {
 /// never coincide, and two distinct labels never collide. Any 32 bytes is a valid ed25519 seed (the
 /// scalar is hashed and clamped internally by [`ed25519_dalek::SigningKey`]), so the KDF output is used
 /// directly with no rejection. Hardened: recovering or predicting a child needs the root secret.
+///
+/// The child is as secret as the root, so it is returned in a [`Zeroizing`] owner: it is wiped
+/// wherever it is finally dropped, and a caller has to copy it out on purpose to leave it unwiped.
 pub fn derive_ed25519_child_secret(
     root: &[u8; NodeId::KEY_LEN],
     label: &str,
-) -> [u8; NodeId::KEY_LEN] {
-    blake3::derive_key(&format!("theia device identity v1: {label}"), root)
+) -> Zeroizing<[u8; NodeId::KEY_LEN]> {
+    Zeroizing::new(blake3::derive_key(
+        &format!("theia device identity v1: {label}"),
+        root,
+    ))
 }
 
 impl fmt::Display for NodeId {

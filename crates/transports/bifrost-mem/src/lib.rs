@@ -6,28 +6,30 @@
 //! same conformance suite, so the interface is genuinely transport-agnostic and not iroh-shaped.
 //!
 //! Discovery is built in via a process-global registry keyed by [`NodeId`], so this is a
-//! self-discovering transport: `connect` resolves the peer with no external `Discovery` object,
+//! self-discovering transport: `connect` finds the peer with no external `Discovery` object,
 //! exactly as the design intends.
 
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, CryptoKind, Error};
+use bifrost_core::{Addr, CryptoKind, Error, HintStream};
 pub use bifrost_transport::{InProcess, Session, Transport};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
+
+mod stream;
+
+pub use crate::stream::{MemRead, MemWrite};
+use crate::stream::{Severance, halves};
 
 /// Buffer size for each in-memory stream, matching the wire's streaming chunk.
 const CAP: usize = 64 * 1024;
 
 /// One bidirectional stream, split into its writable and readable halves.
-type Stream = (
-    io::WriteHalf<io::DuplexStream>,
-    io::ReadHalf<io::DuplexStream>,
-);
+type Stream = (MemWrite, MemRead);
 
 /// Process-global directory of live endpoints: `NodeId` to its inbound-session sender.
 static REGISTRY: LazyLock<Mutex<HashMap<NodeId, mpsc::UnboundedSender<MemSession>>>> =
@@ -100,10 +102,13 @@ impl Transport for MemTransport {
         let (dialer_opens, dialer_opened) = mpsc::unbounded_channel();
         let (accepter_opens, accepter_opened) = mpsc::unbounded_channel();
 
+        // One close signal for the pair: either side closing ends every stream on both.
+        let severance = Arc::new(Severance::default());
         let accepter = MemSession {
             peer: self.node,
             opens: accepter_opens,
             incoming: AsyncMutex::new(dialer_opened),
+            severance: Arc::clone(&severance),
         };
         peer.send(accepter)
             .map_err(|_| Error::Connect(Box::new(MemError::Unreachable)))?;
@@ -112,7 +117,18 @@ impl Transport for MemTransport {
             peer: addr.node,
             opens: dialer_opens,
             incoming: AsyncMutex::new(accepter_opened),
+            severance,
         })
+    }
+
+    /// Dials at once and never reads the feed: the in-process registry is how mem finds a peer, so
+    /// no hint could change where this dial goes and waiting for one would only add latency.
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        _updates: HintStream,
+    ) -> Result<MemSession, Error> {
+        self.connect(addr).await
     }
 
     async fn accept(&self) -> Result<MemSession, Error> {
@@ -130,36 +146,53 @@ pub struct MemSession {
     peer: NodeId,
     opens: mpsc::UnboundedSender<Stream>,
     incoming: AsyncMutex<mpsc::UnboundedReceiver<Stream>>,
+    /// Shared with the peer's session: set by either side's [`close`](Session::close).
+    severance: Arc<Severance>,
 }
 
 impl Session for MemSession {
     type Security = InProcess;
-    type Write = io::WriteHalf<io::DuplexStream>;
-    type Read = io::ReadHalf<io::DuplexStream>;
+    type Write = MemWrite;
+    type Read = MemRead;
 
     fn peer(&self) -> NodeId {
         self.peer
     }
 
     async fn open_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
+        if self.severance.is_severed() {
+            return Err(Error::Closed);
+        }
         let (near, far) = io::duplex(CAP);
-        let (near_read, near_write) = io::split(near);
-        let (far_read, far_write) = io::split(far);
         self.opens
-            .send((far_write, far_read))
+            .send(halves(far, &self.severance))
             .map_err(|_| Error::Closed)?;
-        Ok((near_write, near_read))
+        Ok(halves(near, &self.severance))
     }
 
     async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
         let mut incoming = self.incoming.lock().await;
-        incoming.recv().await.ok_or(Error::Closed)
+        tokio::select! {
+            biased;
+            () = self.severance.severed() => Err(Error::Closed),
+            stream = incoming.recv() => stream.ok_or(Error::Closed),
+        }
     }
 
     async fn wait_closed(&self) {
-        // Resolves when the peer drops its session: its `opens` sender closes, so our receiver ends.
+        // Resolves when the peer drops its session (its `opens` sender closes, so our receiver ends),
+        // or when either side closes the pair.
         let mut incoming = self.incoming.lock().await;
-        while incoming.recv().await.is_some() {}
+        tokio::select! {
+            () = self.severance.severed() => {}
+            () = async { while incoming.recv().await.is_some() {} } => {}
+        }
+    }
+
+    /// Sever the pair: every stream either side handed out now errors, never reads a clean end, and
+    /// both sides' `wait_closed` resolve. There is no wire, so the peer learns at once.
+    fn close(&self) {
+        self.severance.sever();
     }
 }
 
