@@ -164,6 +164,13 @@ impl Session for QuirkSession {
         self.conn.wait_closed().await;
     }
 
+    /// Stops the connection's engines, so its stream halves fail wherever they are held. The peer is
+    /// NOT told: quirk's wire has no close frame yet, so it learns only by its own silence handling.
+    /// That frame is quirk's to add, and the conformance suite records the gap by name.
+    fn close(&self) {
+        self.conn.close();
+    }
+
     /// quirk is direct-only (no relay yet), so the path is always [`Path::Direct`] and the remote is
     /// the peer's socket address. It carries no rtt estimator of its own yet, so `rtt` stays `None`;
     /// a caller that wants an rtt over quirk measures one with an application-level round-trip probe. Reads

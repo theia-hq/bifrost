@@ -1,7 +1,8 @@
 use bifrost::{Node, StaticDiscovery, Transport};
 use bifrost_conformance::{
-    bound_sockets_are_bind_truth, close_drains, direct_conn_info, identity_binding,
-    reach_roundtrip, wildcard_bind_is_not_rewritten, wrong_key_rejected,
+    PeerNotice, bound_sockets_are_bind_truth, close_drains, close_ends_held_streams,
+    direct_conn_info, identity_binding, reach_roundtrip, wildcard_bind_is_not_rewritten,
+    wrong_key_rejected,
 };
 use bifrost_iroh::Endpoint;
 
@@ -81,4 +82,13 @@ async fn iroh_bound_sockets_are_bind_truth() {
 async fn iroh_wildcard_bind_is_not_rewritten() {
     let endpoint = Endpoint::bind_local().await.expect("bind endpoint");
     wildcard_bind_is_not_rewritten(&endpoint);
+}
+
+/// Closing an iroh session closes the QUIC connection, so every stream on it fails on both ends, even
+/// one a detached task still holds.
+#[tokio::test]
+async fn iroh_close_ends_held_streams() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    close_ends_held_streams(sender, receiver, PeerNotice::Told).await;
 }

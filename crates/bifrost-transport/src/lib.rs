@@ -165,6 +165,28 @@ pub trait Session {
     /// Wait until the peer closes the session, keeping it alive so final bytes are delivered.
     async fn wait_closed(&self);
 
+    /// End the session now, ABRUPTLY, and every stream on it, whoever holds that stream.
+    ///
+    /// Dropping a session is not always the end of it: a transport whose streams keep their connection
+    /// alive leaves it open while any stream is held, and a stream handed to a detached task can be held
+    /// for as long as that task lives. A caller that must END a session, not merely stop serving it,
+    /// calls this. The contract every transport meets, and the conformance suite checks:
+    ///
+    /// - **Abrupt.** Bytes not yet acknowledged are discarded. For a clean end, finish every stream and
+    ///   await [`wait_closed`](Self::wait_closed) instead; this is the opposite operation.
+    /// - **Every stream ends.** A held stream's reads and writes then fail with an error, never a clean
+    ///   end, so a transfer the close cut short can never pass for a complete one.
+    /// - **The peer learns of it.** Its reads on the session's streams error, and its
+    ///   [`wait_closed`](Self::wait_closed) resolves. A transport that cannot yet tell the peer says so
+    ///   on its own impl.
+    /// - **Afterwards,** [`open_bi`](Self::open_bi) and [`accept_bi`](Self::accept_bi) fail, and the
+    ///   local [`wait_closed`](Self::wait_closed) resolves.
+    /// - **Idempotent,** never blocks, and never panics.
+    ///
+    /// Required, with no default: a no-op default would be false for every transport whose streams
+    /// outlive the session value, and a wrapper would inherit it silently.
+    fn close(&self);
+
     /// A best-effort snapshot of how this session reaches the peer (direct vs relayed, rtt, remote).
     ///
     /// Additive and optional: the default returns [`Path::Unknown`] with no rtt or remote, so a

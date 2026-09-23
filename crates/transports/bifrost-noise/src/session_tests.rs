@@ -74,6 +74,9 @@ impl Session for FakeSession {
     }
 
     async fn wait_closed(&self) {}
+
+    /// A double whose streams carry nothing has nothing to end.
+    fn close(&self) {}
 }
 
 /// The wrapper declares `Sealed` for an `Announced` inner and satisfies `Secure`.
@@ -350,6 +353,9 @@ impl Session for StalledSession {
     }
 
     async fn wait_closed(&self) {}
+
+    /// A double whose streams carry nothing has nothing to end.
+    fn close(&self) {}
 }
 
 /// A reader that never produces a byte.
