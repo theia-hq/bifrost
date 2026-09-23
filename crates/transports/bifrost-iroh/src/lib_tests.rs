@@ -303,4 +303,3 @@ fn collect(dir: PathBuf, found: &mut Vec<PathBuf>) {
         }
     }
 }
-

@@ -586,10 +586,7 @@ async fn the_wrapper_forwards_a_feed_dial_to_its_inner_transport() {
         wire: Wire::bind(seed(91)),
         route: receiver.local_addr().hints,
     };
-    let sender = Node::new(
-        Noise::new(inner, seed(91)).expect("wrap the inner"),
-        Silent,
-    );
+    let sender = Node::new(Noise::new(inner, seed(91)).expect("wrap the inner"), Silent);
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(receiver.accept(), sender.connect(receiver.node_id()))
