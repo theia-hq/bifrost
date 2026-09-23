@@ -15,7 +15,8 @@ use bifrost::{
     Addr, Announced, Discovery, Error, HintStream, Node, NodeId, StaticDiscovery, Transport,
 };
 use bifrost_conformance::{
-    close_drains, identity_binding, reach_roundtrip, unknown_conn_info, wrong_key_rejected,
+    PeerNotice, close_drains, close_ends_held_streams, identity_binding, reach_roundtrip,
+    unknown_conn_info, wrong_key_rejected,
 };
 use bifrost_noise::{Noise, NoiseError, wire};
 use bifrost_transport::Session;
@@ -680,4 +681,51 @@ impl Discovery for Silent {
     fn subscribe(&self, _node: NodeId) -> HintStream {
         HintStream::new(stream::pending())
     }
+}
+
+/// Closing a sealed session tears every stream down, a held one included, and closes the inner session,
+/// so the peer's reader ends and tears its own streams down in turn.
+#[tokio::test]
+async fn wrapper_close_ends_held_streams() {
+    let receiver = sealed(40);
+    let mut discovery = StaticDiscovery::new();
+    discovery.insert(receiver.node_id(), receiver.local_addr().hints);
+    let sender = Node::new(sealed(41), discovery);
+    close_ends_held_streams(sender, receiver, PeerNotice::Told).await;
+}
+
+/// Dropping a sealed session under a stream a detached task still holds must fail that stream, never
+/// end it cleanly: a truncated transfer must not pass for a complete one.
+#[tokio::test]
+async fn a_dropped_noise_session_never_reads_a_clean_eof() {
+    let receiver = sealed(42);
+    let dialer = sealed(43);
+    let addr = dial_addr(&receiver);
+    let dialing = async {
+        let session = dialer.connect(addr).await.expect("connect");
+        let (mut send, recv) = session.open_bi().await.expect("open");
+        send.write_all(b"partial").await.expect("write");
+        (session, send, recv)
+    };
+    let accepting = async {
+        let session = receiver.accept().await.expect("accept");
+        let (send, mut recv) = session.accept_bi().await.expect("accept stream");
+        let mut first = [0u8; 7];
+        recv.read_exact(&mut first)
+            .await
+            .expect("the bytes sent so far");
+        (session, send, recv)
+    };
+    let ((_dialed, _send, _recv), (accepted, held_send, mut held_recv)) =
+        tokio::join!(dialing, accepting);
+    drop(accepted);
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), held_recv.read_to_end(&mut rest))
+        .await
+        .expect("a stream whose session dropped ends");
+    drop(held_send);
+    assert!(
+        read.is_err(),
+        "a dropped session's held stream reads an error, not a clean end: {read:?}"
+    );
 }

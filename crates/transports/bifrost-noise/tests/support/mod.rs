@@ -219,6 +219,13 @@ impl Session for WireSession {
         }
         notified.await;
     }
+
+    /// Signals the end to both ends, as a drop does. The one stream is not severed here: every caller
+    /// is the wrapper, whose own close first stops the pumps that hold it, so the halves drop with them.
+    fn close(&self) {
+        self.ended.closed.store(true, Ordering::Release);
+        self.ended.notify.notify_one();
+    }
 }
 
 /// The close signal shared by the two ends of one connection.
@@ -307,6 +314,9 @@ impl Session for Forged {
     }
 
     async fn wait_closed(&self) {}
+
+    /// A double whose streams carry nothing has nothing to end.
+    fn close(&self) {}
 }
 
 /// A wire-speaking impostor: it runs the real protocol with its own key but claims `claim`.

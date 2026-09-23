@@ -114,6 +114,104 @@ where
     );
 }
 
+/// Whether a transport's [`Session::close`] reaches the peer yet.
+///
+/// Every transport must say, so a gap is recorded where it is run, with its owner, and never skipped in
+/// silence.
+#[derive(Clone, Copy, Debug)]
+pub enum PeerNotice {
+    /// The peer learns of the close: its reads on the session's streams error and its `wait_closed`
+    /// resolves. The contract.
+    Told,
+    /// The transport cannot tell the peer yet, for the named reason and owner. The peer-side checks are
+    /// not run; every local one is.
+    NotYet(&'static str),
+}
+
+/// How long a closed session's streams have to fail. Generous: this bounds a hang, not a latency.
+const CLOSE_BOUND: core::time::Duration = core::time::Duration::from_secs(5);
+
+/// [`Session::close`] ends every stream on the session, whoever holds it, and with an error, never a
+/// clean end.
+///
+/// The shape is the one a cut takes: the receiver moves a stream's halves into a detached task that
+/// keeps holding them, keeps its session value alive, and closes it. Then, within a bound: the held
+/// read fails rather than reading end-of-stream, a second close is harmless, `open_bi` fails, and (where
+/// the transport can tell the peer) the dialer's read fails and its `wait_closed` resolves. A transport
+/// whose streams outlive a close fails here, which is what a no-op close is. Panics with a descriptive
+/// message on failure, so it reads as a test assertion.
+pub async fn close_ends_held_streams<T, D>(sender: Node<T, D>, receiver: T, peer: PeerNotice)
+where
+    T: Transport,
+    D: Discovery,
+    <T::Session as Session>::Read: 'static,
+    <T::Session as Session>::Write: 'static,
+{
+    let target = receiver.node_id();
+    let dialing = async {
+        let session = sender.connect(target).await.expect("connect");
+        let (mut send, recv) = session.open_bi().await.expect("open stream");
+        // Some transports announce a stream only once it carries a byte.
+        send.write_all(b"held").await.expect("write");
+        send.flush().await.expect("flush");
+        (session, send, recv)
+    };
+    let accepting = async {
+        let session = receiver.accept().await.expect("accept session");
+        let (send, recv) = session.accept_bi().await.expect("accept stream");
+        (session, send, recv)
+    };
+    let ((dialed, _dialed_send, mut dialed_recv), (accepted, held_send, held_recv)) =
+        tokio::join!(dialing, accepting);
+
+    // The detached holder: it keeps both halves and reports how its read finally ended.
+    let (ended_tx, ended_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _send = held_send;
+        let _ = ended_tx.send(read_to_the_end(held_recv).await);
+    });
+
+    accepted.close();
+    accepted.close();
+
+    let held = tokio::time::timeout(CLOSE_BOUND, ended_rx)
+        .await
+        .expect("a stream held past a close must end, not outlive its session")
+        .expect("the holder reports");
+    assert!(
+        held.is_err(),
+        "a stream held past a close must fail, never read a clean end"
+    );
+    assert!(
+        accepted.open_bi().await.is_err(),
+        "a closed session opens no new stream"
+    );
+
+    if let PeerNotice::Told = peer {
+        let dialer_read = tokio::time::timeout(CLOSE_BOUND, read_to_the_end(&mut dialed_recv))
+            .await
+            .expect("the peer's stream must end when the session is closed");
+        assert!(
+            dialer_read.is_err(),
+            "the peer's stream fails on a close, never reads a clean end"
+        );
+        tokio::time::timeout(CLOSE_BOUND, dialed.wait_closed())
+            .await
+            .expect("the peer's wait_closed resolves on a close");
+    }
+    sender.close().await;
+}
+
+/// Read `recv` until it errors or ends: `Err` for an error, `Ok` for a clean end.
+async fn read_to_the_end(mut recv: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<()> {
+    let mut buf = [0u8; 1024];
+    loop {
+        if recv.read(&mut buf).await? == 0 {
+            return Ok(());
+        }
+    }
+}
+
 /// A session attributes the dialed identity on both ends: the dialer's [`Session::peer`] is the key
 /// it dialed, and the acceptor's is the dialer's own identity.
 ///

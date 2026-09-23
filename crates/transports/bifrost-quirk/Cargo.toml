@@ -9,7 +9,7 @@ rust-version.workspace = true
 [dependencies]
 bifrost-core.workspace = true
 bifrost-transport.workspace = true
-quirk = { git = "https://github.com/theia-hq/quirk", rev = "73bf620ceb6a3b630a1bd38a4d8fef48ee595a79" }
+quirk = { git = "https://github.com/theia-hq/quirk", rev = "2ec62493271add1b02d32a81af259bdac7793584" }
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -282,6 +282,12 @@ impl Session for IrohSession {
         self.conn.closed().await;
     }
 
+    /// A QUIC connection stays open while any of its streams is held, so dropping the session alone can
+    /// leave it carrying streams a detached task still owns. Closing it ends every one of them at once.
+    fn close(&self) {
+        self.conn.close(0u32.into(), b"closed");
+    }
+
     /// Map iroh's live path set onto a best-effort [`ConnInfo`]. iroh tracks every open path and marks
     /// one as selected for transmission; hole-punching means a session can start [`Path::Relayed`] and
     /// upgrade to [`Path::Direct`] as a direct path opens, so this reports the CURRENT state honestly.

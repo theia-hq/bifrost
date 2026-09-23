@@ -392,6 +392,9 @@ impl Session for Recorded {
     }
 
     async fn wait_closed(&self) {}
+
+    /// A double that carries no streams has nothing to end.
+    fn close(&self) {}
 }
 
 /// A distinct ed25519 [`NodeId`] seeded by one byte, enough to tell test identities apart.
