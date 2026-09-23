@@ -6,17 +6,19 @@ peer is, not *where*. bifrost gives you the connection and nothing more; what yo
 you.
 
 It carries the connection over its own backends: iroh (QUIC with NAT hole-punching), an in-process
-backend for tests, and [quirk](https://github.com/theia-hq/quirk), a QUIC-shaped transport written from scratch over UDP.
+backend for tests, and [quirk](https://github.com/theia-hq/quirk), a QUIC-shaped transport written
+from scratch over UDP. `bifrost-noise` seals a backend that carries plaintext: a Noise handshake over
+one of its streams, proving the peer's key and carrying logical streams inside it.
 
 **The name.** Bifröst is the burning rainbow bridge of Norse myth, the span that reaches from one
 world to any other. This crate is the bridge to a peer: name a public key and it carries a
 connection there.
 
-> Experimental. APIs will change and it is not ready for production use.
+> Experimental. The APIs change without notice; not ready for production use.
 
 ## Add it as a dependency
 
-Git-only for now, not published to crates.io. Point at the repo:
+Not published to crates.io. Point at the repo:
 
 ```toml
 [dependencies]
@@ -38,9 +40,33 @@ let (mut writer, mut reader) = session.open_bi().await?;
 ```
 
 `Transport`, `Session`, and `Discovery` are the pluggable interfaces. Implement `Transport` to add a
-backend; every backend declares its `Security` profile (`Sealed`, `Announced`, or `InProcess`) and is
-held to the same byte-movement behaviour by the conformance suite, so a dial written against these
-interfaces runs unchanged over any of them.
+backend; the conformance suite holds every backend to the same byte-movement behaviour, and each
+declares a `Security` profile (`Sealed`, `Announced`, or `InProcess`) a consumer can require as a bound.
+
+Backends are not interchangeable past that. The interface is bidirectional byte-streams and nothing
+else, and how many a session gives you is the backend's own: iroh and the in-process backend open
+another on demand, while bare quirk carries one per session, so a second `open_bi` returns an error.
+Wrapping quirk in `bifrost-noise` lifts that, up to 64 at a time inside the one.
+
+## If you already use iroh
+
+`bifrost-iroh` is a narrowing of iroh, not an improvement on it. The interface above it is dial-by-key
+and bidirectional streams, and an address is a `NodeId` plus socket-address hints, so anything iroh
+offers outside that shape does not come through. If iroh's own API is what you want, use iroh. Two
+things live above this seam that iroh alone does not give you.
+
+**A backend with no network in it.** `bifrost-mem` moves the same bytes over in-process channels and
+passes the same byte-movement suite as iroh, binding no socket.
+[tightbeam](https://github.com/theia-hq/tightbeam) and [swoosh](https://github.com/theia-hq/swoosh)
+run their product surfaces on it, so their tests exercise real sessions and real streams with no
+network under them. This is the seam's main proven value today.
+
+**Noise over a transport that carries plaintext.** `bifrost-noise` wraps a transport carrying
+plaintext on one stream: it runs `Noise_XX_25519_ChaChaPoly_SHA256` over that stream, proves the peer
+holds the key for the `NodeId` it was dialed under, and carries framed logical streams inside it.
+Without it, quirk is only fit for traffic you would publish. It is exercised over quirk on loopback
+UDP and against a hostile in-process peer, where a fabricated signer, a replayed handshake, and a
+spliced third flight each yield no session.
 
 ## The crates
 
@@ -51,7 +77,7 @@ interfaces runs unchanged over any of them.
 | `bifrost-transport`   | the `Transport` and `Session` traits                                |
 | `bifrost-iroh`        | transport backend over iroh (QUIC with NAT hole-punching)           |
 | `bifrost-mem`         | in-process transport backend for hermetic tests                     |
-| `bifrost-noise`       | a Noise handshake over an announced transport: proves the peer's key, encrypts the session |
+| `bifrost-noise`       | Noise over a plaintext transport: proves the peer's key, seals the session, many streams inside one |
 | `bifrost-quirk`       | transport backend over [quirk](https://github.com/theia-hq/quirk), a QUIC-shaped transport written from scratch |
 | `bifrost-mdns`        | discovery over mDNS on the local network                            |
 | `bifrost-conformance` | transport-agnostic test suite every backend must pass               |
@@ -64,10 +90,10 @@ This page describes the default branch.
 - bifrost establishes the connection and hands you a byte-stream. It says nothing about what those bytes
   mean; that is the caller's protocol.
 - Verified blob transfer lives in `bifrost-wire`, a sibling crate the facade re-exports as `bifrost::wire`.
-- Transports are interchangeable in interface, not in security. iroh, an in-process backend, and quirk
-  all pass the same conformance suite, but each declares its own `Security` profile (`Sealed`,
-  `Announced`, or `InProcess`), and a consumer states the bound it needs: `PeerProven` to trust the
-  peer's key, `Secure` to carry a secret. A transport that does not meet the bound does not compile in.
+- Passing the conformance suite is not a security claim. Each transport declares its own `Security`
+  profile (`Sealed`, `Announced`, or `InProcess`), and a consumer states the bound it needs:
+  `PeerProven` to trust the peer's key, `Secure` to carry a secret. A transport that does not meet the
+  bound does not compile in.
 
 ## License
 
