@@ -2,9 +2,38 @@
 
 All notable changes to bifrost, newest first.
 
-## Unreleased
+## v0.5.0
+
+### Breaking
+- **`Discovery::resolve` is gone;** a source implements `subscribe` (below).
+- **`Session::close` is required** on every transport's session. It drops the session at once, and
+  every stream it held ends; there is no default, because a no-op close would leave streams running
+  after the node decided to cut them.
+- **Transport constructors borrow the seed** (`&[u8; 32]`) instead of taking it by value, and the
+  futures they return hold no borrow of it, so a caller binds through `Secret::with_bytes` and the seed
+  is never copied out. Child seeds come back as `Zeroizing`.
+- **`bifrost-wire` errors split a foreign stream from another build.** `Error::Foreign` means the bytes
+  are not bifrost-wire; `Error::VersionMismatch` means a bifrost-wire peer speaking another grammar.
+
+### New
+- **The `keystore` crate: where a node's secret key lives.** One key file per node, either plain (the
+  32-byte seed, readable only by its owner) or sealed under a passphrase (a 144-byte file: Argon2id
+  derives the key, XChaCha20-Poly1305 encrypts the seed, and the whole header is authenticated, so a
+  locked file can still say which node it belongs to). `KeyFile` loads, writes without ever
+  overwriting, adopts an existing key, and migrates between plain and sealed by writing the new form
+  beside the old, reading it back, and only then replacing it. Passphrases typed as text are normalised
+  to NFC, so a file sealed on one system opens on another. A file larger than 4 KiB, or one demanding
+  more than 256 MiB to unlock, is refused before any work is done. Secrets are wiped from memory on
+  drop.
+- **`Session::close`** on every transport: iroh closes the connection, Noise tears down its streams and
+  pumps, quirk calls `Connection::close`, mem closes its pipes. The conformance suite checks that close
+  ends every stream the session held.
+
 
 ### Changed
+- **The wire magic is read as an identity and a version.** A peer on another build of the same
+  protocol is told apart from a different protocol, so an error names a version skew instead of
+  garbage.
 - **Discovery is a subscription, and a dial no longer waits a fixed time for it.**
   `Discovery::subscribe(node)` replaces `resolve`. It returns a `HintStream` of `AddrUpdate`s: `Hints`
   (the node's current addresses), `Removed` (none any more), or `Settled` (the source has finished its
