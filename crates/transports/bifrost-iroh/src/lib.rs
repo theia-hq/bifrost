@@ -36,7 +36,7 @@ pub struct Endpoint {
 /// declared for the type.
 #[derive(Debug, Clone, Copy)]
 enum Finding {
-    /// The bind registered an address lookup (pkarr, DNS) and relays, so iroh finds a peer by its
+    /// The bind registered an address lookup (pkarr) and relays, so iroh finds a peer by its
     /// key on its own. A dial never waits on a feed; it takes only what the feed already holds at
     /// that instant (a hint the caller supplied, a LAN record already heard).
     ByKey,

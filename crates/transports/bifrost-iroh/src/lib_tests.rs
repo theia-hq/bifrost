@@ -101,58 +101,90 @@ fn a_ready_error_fails_either_bind() {
     }
 }
 
-/// F1 (0.9.1): the dialing bind registers the two resolvers and NO publisher. A third service would
-/// be a publisher re-added to the dialing path, the exact regression.
+/// F1 (0.9.1): the dialing bind registers the pkarr resolver and NO publisher. A second service would
+/// be a publisher (or the DNS lookup) re-added to the dialing path, the exact regression.
 #[tokio::test]
 async fn the_dialing_bind_registers_no_publisher() {
-    let services = lookup_services(
+    let lookups = lookups(
         Endpoint::bind_dialing_with_secret(&[7u8; 32])
             .await
             .expect("dialing bind"),
     )
     .await;
-    assert_eq!(services, 2, "PkarrResolver + DnsAddressLookup only");
+    assert_eq!(lookups.count, 1, "PkarrResolver only");
 }
 
-/// The n0 half is reproduced from `presets::Minimal`, not delegated to `presets::N0`, so this counts
-/// what the preset registers today: the publisher, the pkarr resolver, and the DNS lookup.
+/// The n0 half is built from `presets::Minimal`, not delegated to `presets::N0`, so this counts what
+/// the bind registers: the publisher and the pkarr resolver, and not the preset's DNS lookup.
 #[tokio::test]
-async fn the_serving_bind_registers_the_publisher_and_both_resolvers() {
-    let services = lookup_services(
+async fn the_serving_bind_registers_the_publisher_and_the_resolver() {
+    let lookups = lookups(
         Endpoint::bind_reachable_with_secret(&[8u8; 32])
             .await
             .expect("serving bind"),
     )
     .await;
-    assert_eq!(
-        services, 3,
-        "PkarrPublisher + PkarrResolver + DnsAddressLookup"
-    );
+    assert_eq!(lookups.count, 2, "PkarrPublisher + PkarrResolver");
+}
+
+/// Discovery row D2: neither n0 bind asks the host's DNS resolver for a peer. That lookup queries
+/// `_iroh.<key>` in plaintext on whatever network the host is on, naming whom this node dials, and a
+/// count cannot tell which service came back, so this names the service. The positive half proves the
+/// rendering names services at all, so an iroh rename cannot turn the absence into a vacuous pass.
+#[tokio::test]
+async fn no_n0_bind_registers_a_dns_lookup() {
+    let binds = [
+        (
+            "dialing",
+            Endpoint::bind_dialing_with_secret(&[11u8; 32])
+                .await
+                .expect("dialing bind"),
+        ),
+        (
+            "serving",
+            Endpoint::bind_reachable_with_secret(&[12u8; 32])
+                .await
+                .expect("serving bind"),
+        ),
+    ];
+    for (role, endpoint) in binds {
+        let lookups = lookups(endpoint).await;
+        assert!(
+            lookups.names("PkarrResolver"),
+            "the {role} bind's lookups are not named: {}",
+            lookups.rendered,
+        );
+        assert!(
+            !lookups.names("DnsAddressLookup"),
+            "the {role} bind asks the local DNS resolver: {}",
+            lookups.rendered,
+        );
+    }
 }
 
 /// A named resolver is one pkarr server, so a dialing bind against it registers exactly one lookup:
 /// no publisher (it serves nothing) and no DNS lookup (a pkarr base is not a delegated DNS origin).
 #[tokio::test]
 async fn a_named_resolver_registers_one_lookup_for_a_dialing_bind() {
-    let services = lookup_services(
+    let lookups = lookups(
         Endpoint::bind_dialing_with_secret_via(&[9u8; 32], named_reach())
             .await
             .expect("dialing bind over a named reach"),
     )
     .await;
-    assert_eq!(services, 1, "PkarrResolver only");
+    assert_eq!(lookups.count, 1, "PkarrResolver only");
 }
 
 /// The serving bind adds the publisher against the same pkarr base, and nothing else.
 #[tokio::test]
 async fn a_named_resolver_registers_publisher_and_resolver_for_a_serving_bind() {
-    let services = lookup_services(
+    let lookups = lookups(
         Endpoint::bind_reachable_with_secret_via(&[10u8; 32], named_reach())
             .await
             .expect("serving bind over a named reach"),
     )
     .await;
-    assert_eq!(services, 2, "PkarrPublisher + PkarrResolver");
+    assert_eq!(lookups.count, 2, "PkarrPublisher + PkarrResolver");
 }
 
 /// The "no NAT traversal" claim is a mechanism, not an absence: iroh exposes no public relay or
@@ -269,16 +301,33 @@ fn named_reach() -> Reach {
     }
 }
 
-/// How many lookup services a bind registered. Consumes the endpoint: the count is read before the
-/// close so the answer is about a live endpoint, and every bind here is closed rather than dropped.
-async fn lookup_services(endpoint: Endpoint) -> usize {
+/// The lookup services a bind registered. iroh keeps the services private and exposes only their
+/// count and a `Debug` rendering, which names each service by its type, so both are kept.
+struct Lookups {
+    count: usize,
+    rendered: String,
+}
+
+impl Lookups {
+    /// Whether a service of this type name was registered.
+    fn names(&self, service: &str) -> bool {
+        self.rendered.contains(service)
+    }
+}
+
+/// Reads what a bind registered. Consumes the endpoint: the services are read before the close so the
+/// answer is about a live endpoint, and every bind here is closed rather than dropped.
+async fn lookups(endpoint: Endpoint) -> Lookups {
     let services = endpoint
         .inner
         .address_lookup()
-        .expect("a live endpoint reports its lookups")
-        .len();
+        .expect("a live endpoint reports its lookups");
+    let lookups = Lookups {
+        count: services.len(),
+        rendered: format!("{services:?}"),
+    };
     endpoint.close().await;
-    services
+    lookups
 }
 
 /// Every `.rs` file under this crate's `src/`, so a pin that scans the source covers a module added

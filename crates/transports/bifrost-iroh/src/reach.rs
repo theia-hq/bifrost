@@ -11,7 +11,7 @@ use core::fmt;
 use core::str::FromStr;
 
 use iroh::RelayMap;
-use iroh::address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver};
+use iroh::address_lookup::{PkarrPublisher, PkarrResolver};
 use iroh::endpoint::{Builder, RelayMode, default_relay_mode, presets};
 use url::{Host, Url};
 
@@ -38,10 +38,11 @@ impl Reach {
     }
 
     /// Every bind starts from `presets::Minimal`, which registers no lookup service and settles only
-    /// the crypto provider, and adds each half explicitly. The n0 arms reproduce exactly what
-    /// `presets::N0` registers (the pkarr publisher, the pkarr resolver, the DNS lookup, and the
-    /// default relay mode), so an n0 half is byte for byte what it has always been while a named half
-    /// never silently inherits a service the preset gains later.
+    /// the crypto provider, and adds each half explicitly, so no half silently inherits a service the
+    /// preset gains later. The n0 arms are `presets::N0` minus its DNS lookup, on purpose: that lookup
+    /// asks the host's resolver, often plaintext on a shared network, for `_iroh.<key>`, which names
+    /// every peer this node dials. The pkarr resolver asks the same n0 server over https, and wherever
+    /// n0's relay is reachable so is that server, so dropping DNS costs no reach the relay keeps.
     fn apply(self, role: Role) -> Builder {
         let Self { relay, resolver } = self;
         let relay_mode = match relay {
@@ -57,13 +58,10 @@ impl Reach {
         match (resolver, role) {
             (Resolver::N0, Role::Serving) => builder
                 .address_lookup(PkarrPublisher::n0_dns())
-                .address_lookup(PkarrResolver::n0_dns())
-                .address_lookup(DnsAddressLookup::n0_dns()),
-            // A dialing bind drops the publisher and keeps both resolvers: publishing under a key
+                .address_lookup(PkarrResolver::n0_dns()),
+            // A dialing bind drops the publisher and keeps the resolver: publishing under a key
             // another process is serving overwrites that node's record and sends peers to a dead path.
-            (Resolver::N0, Role::Dialing) => builder
-                .address_lookup(PkarrResolver::n0_dns())
-                .address_lookup(DnsAddressLookup::n0_dns()),
+            (Resolver::N0, Role::Dialing) => builder.address_lookup(PkarrResolver::n0_dns()),
             // A named resolver gets no DNS lookup: a pkarr base is an HTTP path on one server, not a
             // delegated DNS origin, so a DNS query against it would resolve nothing.
             (Resolver::Custom(ResolverUrl(base)), Role::Serving) => builder
@@ -90,7 +88,7 @@ pub enum RelayHome {
 /// caller runs. Two nodes find each other only if they resolve through the same one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Resolver {
-    /// n0's pkarr and DNS servers, the default.
+    /// n0's pkarr server, reached over https, the default.
     #[default]
     N0,
     /// A resolver the caller runs, named by its pkarr base.
