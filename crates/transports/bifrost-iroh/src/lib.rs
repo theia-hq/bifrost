@@ -79,47 +79,54 @@ impl Endpoint {
     /// Bind with a persisted identity as a SERVING node: n0 discovery and relays, and publish this
     /// endpoint's address record (n0 pkarr/DNS) so peers reach it by key. The serving bind: bind this
     /// only from the process that accepts connections under the key.
-    pub async fn bind_reachable_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
-        Self::bind_reachable_with_secret_via(secret, Reach::default()).await
+    ///
+    /// Every persisted-identity bind here borrows the secret and turns it into the endpoint's key
+    /// before it returns; the future it returns holds that key, not the borrow. So a caller holding
+    /// the secret in a wiping owner binds with `secret.with_bytes(Endpoint::bind_..)` and makes no
+    /// copy of it.
+    pub fn bind_reachable_with_secret(
+        secret: &[u8; 32],
+    ) -> impl Future<Output = Result<Self, BindError>> + use<> {
+        Self::bind_reachable_with_secret_via(secret, Reach::default())
     }
 
     /// Bind with a persisted identity for DIALING ONLY: n0 resolution and relays, no address record.
     /// A dialer is not reachable at its key; publishing here overwrites whatever process IS serving
     /// that key (the 0.9.0 F1 finding: a short-lived command wrote its own relay, exited, and dialers
     /// followed a dead relay path). What n0 registers, minus its `PkarrPublisher`.
-    pub async fn bind_dialing_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
-        Self::bind_dialing_with_secret_via(secret, Reach::default()).await
+    pub fn bind_dialing_with_secret(
+        secret: &[u8; 32],
+    ) -> impl Future<Output = Result<Self, BindError>> + use<> {
+        Self::bind_dialing_with_secret_via(secret, Reach::default())
     }
 
     /// Bind as a SERVING node over a caller-named [`Reach`]: the same publish-my-record bind as
     /// [`bind_reachable_with_secret`](Self::bind_reachable_with_secret), with the relay and the
     /// resolver each either n0's or one the caller runs.
-    pub async fn bind_reachable_with_secret_via(
-        secret: [u8; 32],
+    pub fn bind_reachable_with_secret_via(
+        secret: &[u8; 32],
         reach: Reach,
-    ) -> Result<Self, BindError> {
+    ) -> impl Future<Output = Result<Self, BindError>> + use<> {
         Self::finish(
             reach.serving(),
-            SecretKey::from_bytes(&secret),
+            SecretKey::from_bytes(secret),
             Finding::ByKey,
         )
-        .await
     }
 
     /// Bind for DIALING ONLY over a caller-named [`Reach`]: the same no-record bind as
     /// [`bind_dialing_with_secret`](Self::bind_dialing_with_secret), with the relay and the resolver
     /// each either n0's or one the caller runs. A dialer must resolve through the same resolver as
     /// the node it is looking for, or that node's record is not there to find.
-    pub async fn bind_dialing_with_secret_via(
-        secret: [u8; 32],
+    pub fn bind_dialing_with_secret_via(
+        secret: &[u8; 32],
         reach: Reach,
-    ) -> Result<Self, BindError> {
+    ) -> impl Future<Output = Result<Self, BindError>> + use<> {
         Self::finish(
             reach.dialing(),
-            SecretKey::from_bytes(&secret),
+            SecretKey::from_bytes(secret),
             Finding::ByKey,
         )
-        .await
     }
 
     /// Bind a local-only endpoint with a FRESH identity, for same-process tests (the conformance
@@ -137,7 +144,9 @@ impl Endpoint {
     /// Bind a local-only endpoint with a PERSISTED identity: no n0 discovery, no relays, no
     /// portmapper, on an OS-assigned port. Reachable only by direct address hints or the local
     /// discovery composed above, and the same key yields the same [`NodeId`] across runs.
-    pub async fn bind_local_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
+    pub fn bind_local_with_secret(
+        secret: &[u8; 32],
+    ) -> impl Future<Output = Result<Self, BindError>> + use<> {
         Self::finish(
             iroh::Endpoint::builder(presets::Minimal)
                 // `presets::Minimal` leaves both of these at the iroh defaults (relays on, portmapper
@@ -145,23 +154,28 @@ impl Endpoint {
                 // accident of an empty relay map or a future preset change.
                 .relay_mode(RelayMode::Disabled)
                 .portmapper_config(PortmapperConfig::Disabled),
-            SecretKey::from_bytes(&secret),
+            SecretKey::from_bytes(secret),
             Finding::ByHints,
         )
-        .await
     }
 
     /// Bind an OFFLINE endpoint: a persisted identity, no n0 discovery and no relays, at a fixed local
     /// address. Reachable ONLY via direct address hints, so two nodes on a LAN or a Docker
     /// network connect directly with nothing crossing the internet. The fixed port is what makes the
     /// address hardcodable: a peer names `host:port` and reaches it, no discovery service in the loop.
-    pub async fn bind_offline(secret: [u8; 32], bind_addr: SocketAddr) -> Result<Self, BindError> {
-        Self::finish(
-            iroh::Endpoint::builder(presets::Minimal).bind_addr(bind_addr)?,
-            SecretKey::from_bytes(&secret),
-            Finding::ByHints,
-        )
-        .await
+    pub fn bind_offline(
+        secret: &[u8; 32],
+        bind_addr: SocketAddr,
+    ) -> impl Future<Output = Result<Self, BindError>> + use<> {
+        let secret = SecretKey::from_bytes(secret);
+        async move {
+            Self::finish(
+                iroh::Endpoint::builder(presets::Minimal).bind_addr(bind_addr)?,
+                secret,
+                Finding::ByHints,
+            )
+            .await
+        }
     }
 
     async fn finish(

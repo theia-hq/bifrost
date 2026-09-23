@@ -30,12 +30,19 @@ impl Endpoint {
     /// key from the same secret, so the same key yields the same [`NodeId`] over either transport. quirk
     /// has no address registry to publish to, so one constructor covers both roles here. That
     /// identical-identity-across-transports property is what the transport-swap demo rests on.
-    pub async fn bind_with_secret(secret: [u8; 32]) -> Result<Self, BindError> {
-        Ok(Self {
-            inner: quirk::Endpoint::bind_with_secret(secret)
-                .await
-                .map_err(BindError)?,
-        })
+    ///
+    /// Borrows the secret, and the bind it returns does not: `secret.with_bytes(bind_with_secret)`
+    /// makes no copy of its own. quirk itself takes the secret by value, so the one copy made here is
+    /// the one handed to it.
+    pub fn bind_with_secret(
+        secret: &[u8; 32],
+    ) -> impl Future<Output = Result<Self, BindError>> + use<> {
+        let bind = quirk::Endpoint::bind_with_secret(*secret);
+        async move {
+            Ok(Self {
+                inner: bind.await.map_err(BindError)?,
+            })
+        }
     }
 }
 

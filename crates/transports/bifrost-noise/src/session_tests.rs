@@ -84,7 +84,7 @@ fn wrapper_declares_sealed_and_is_secure() {
         Fake {
             node: NodeId::from_ed25519_secret(&seed),
         },
-        seed,
+        &seed,
     )
     .expect("wrap");
     assert_eq!(
@@ -123,7 +123,7 @@ fn constructor_refuses_a_mismatched_identity() {
         node: NodeId::from_ed25519_secret(&[1u8; NodeId::KEY_LEN]),
     };
     assert!(matches!(
-        Noise::new(inner, [2u8; NodeId::KEY_LEN]),
+        Noise::new(inner, &[2u8; NodeId::KEY_LEN]),
         Err(NoiseError::IdentityMismatch { .. })
     ));
 }
@@ -233,7 +233,7 @@ async fn stream_read_handles_partial_buffers_reset_and_eof() {
 #[tokio::test(start_paused = true)]
 async fn accept_times_out_on_a_stalled_peer() {
     let seed = [13u8; NodeId::KEY_LEN];
-    let wrapper = Noise::new(Stalled, seed).expect("wrap");
+    let wrapper = Noise::new(Stalled, &seed).expect("wrap");
     match wrapper.accept().await {
         Err(Error::Accept(source)) => assert!(
             matches!(
@@ -252,7 +252,7 @@ async fn accept_times_out_on_a_stalled_peer() {
 #[tokio::test(start_paused = true)]
 async fn connect_times_out_in_the_handshake_on_a_stalled_peer() {
     let seed = [13u8; NodeId::KEY_LEN];
-    let wrapper = Noise::new(Stalled, seed).expect("wrap");
+    let wrapper = Noise::new(Stalled, &seed).expect("wrap");
     let peer = NodeId::from_ed25519_secret(&[14u8; NodeId::KEY_LEN]);
     match wrapper.connect(Addr::from_node(peer)).await {
         Err(Error::Connect(source)) => assert!(
@@ -272,7 +272,7 @@ async fn connect_times_out_in_the_handshake_on_a_stalled_peer() {
 #[tokio::test(start_paused = true)]
 async fn accept_waits_for_a_handshake_slot() {
     let seed = [13u8; NodeId::KEY_LEN];
-    let wrapper = Arc::new(Noise::new(Stalled, seed).expect("wrap"));
+    let wrapper = Arc::new(Noise::new(Stalled, &seed).expect("wrap"));
     let held: Vec<_> = (0..MAX_HANDSHAKES)
         .map(|_| wrapper.handshakes.try_acquire().expect("handshake slot"))
         .collect();
