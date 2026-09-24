@@ -171,10 +171,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The maximum number of distinct names held in the discovery cache. A LAN has a handful of peers,
 /// so this is generous; the cap stops an on-LAN flood of distinct names (which anyone can emit, no
 /// secret needed) from growing this map without bound. At the cap a new name evicts the oldest name
-/// that matched no subscription, so a flood evicts only its own junk and never a matched peer. It
-/// bounds OUR map only; the wrapped `swarm-discovery` keeps its own unbounded map, which needs a
-/// dependency-level fix (patch, fork, or replace).
+/// no live subscription is waiting on, so a flood evicts only its own junk and never a peer someone
+/// is waiting on. It bounds OUR map only; the wrapped `swarm-discovery` keeps its own unbounded map,
+/// which needs a dependency-level fix (patch, fork, or replace).
 const MAX_PEERS: usize = 1024;
+
+/// The most names held for one subscribed node. A node is heard under about two at once: its
+/// current name, and the one it rotated out of until that expires. Anyone who holds the node's key
+/// can mint names that match it without end, so past this a new one takes the place of that node's
+/// oldest, and a flood of them never shuts out another peer.
+const MAX_NAMES_PER_NODE: usize = 4;
 
 /// The most addresses held for one peer. A real host advertises a handful; the cap stops one forged
 /// record from inflating a peer's hint set, and every dial of it, without bound.
@@ -414,13 +420,10 @@ impl Heard {
             }
             return;
         }
-        // A NEW name past the cap takes the place of the oldest unmatched one, so an on-LAN flood
-        // cannot grow this map without bound and cannot push out a peer someone is waiting on.
-        // With every entry matched, the new name is refused.
-        if table.peers.len() >= MAX_PEERS && !table.evict_unmatched() {
+        let node = table.resolve(name);
+        if !table.make_room(node) {
             return;
         }
-        let node = table.resolve(name);
         if let Some(node) = node {
             tracing::debug!(node = %node.short(), count = hints.len(), "discovered peer over mDNS");
         }
@@ -499,20 +502,47 @@ impl Table {
     fn resolve(&self, name: &str) -> Option<NodeId> {
         self.watchers
             .iter()
-            .filter(|(_, watcher)| watcher.wake.receiver_count() > 0)
+            .filter(|(node, _)| self.is_live(**node))
             .find(|(_, watcher)| watcher.names.matches(name))
             .map(|(node, _)| *node)
     }
 
-    /// Drop the oldest name that matched no subscription; `false` when every name matched one.
-    fn evict_unmatched(&mut self) -> bool {
+    /// Make room for a new name that belongs to `node`, or to no one; `false` when there is none.
+    ///
+    /// A node at [`MAX_NAMES_PER_NODE`] gives up its own oldest name. Otherwise, at [`MAX_PEERS`],
+    /// the oldest name no live subscription is waiting on goes, so neither an on-LAN flood nor a key
+    /// holder's minted names can push out a peer someone is waiting on. With every entry waited on,
+    /// the new name is refused.
+    fn make_room(&mut self, node: Option<NodeId>) -> bool {
+        if let Some(node) = node {
+            let own = self
+                .peers
+                .iter()
+                .filter(|(_, entry)| entry.node == Some(node));
+            if own.clone().count() >= MAX_NAMES_PER_NODE {
+                let oldest = own
+                    .min_by_key(|(_, entry)| entry.heard)
+                    .map(|(name, _)| name.clone());
+                return oldest.is_some_and(|name| self.peers.remove(&name).is_some());
+            }
+        }
+        if self.peers.len() < MAX_PEERS {
+            return true;
+        }
         let oldest = self
             .peers
             .iter()
-            .filter(|(_, entry)| entry.node.is_none())
+            .filter(|(_, entry)| !entry.node.is_some_and(|node| self.is_live(node)))
             .min_by_key(|(_, entry)| entry.heard)
             .map(|(name, _)| name.clone());
         oldest.is_some_and(|name| self.peers.remove(&name).is_some())
+    }
+
+    /// Whether someone is still subscribed to `node`.
+    fn is_live(&self, node: NodeId) -> bool {
+        self.watchers
+            .get(&node)
+            .is_some_and(|watcher| watcher.wake.receiver_count() > 0)
     }
 }
 

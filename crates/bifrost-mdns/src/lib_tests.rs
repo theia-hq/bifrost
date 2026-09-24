@@ -22,8 +22,8 @@ use tokio::time::{self, Instant};
 
 use super::name::counter::matches_run;
 use super::{
-    Heard, MAX_HINTS, MAX_PEERS, MdnsDiscovery, MdnsError, ROTATE, SERVICE, SETTLE_WINDOW, name,
-    rotate, shape,
+    Heard, MAX_HINTS, MAX_NAMES_PER_NODE, MAX_PEERS, MdnsDiscovery, MdnsError, ROTATE, SERVICE,
+    SETTLE_WINDOW, name, rotate, shape,
 };
 
 /// Every node announces and browses under the protocol's own name, `_bifrost._udp.local.`.
@@ -430,6 +430,43 @@ async fn a_name_in_capitals_is_not_a_second_name() {
     assert!(heard.held(n).is_empty(), "n's goodbye takes all of n");
 }
 
+/// Anyone who holds a subscribed key can mint names that match it without end. They take the place
+/// of that node's own older names, never another peer's, so the flood shuts no one else out.
+#[tokio::test(start_paused = true)]
+async fn a_key_holders_flood_never_locks_out_another_peer() {
+    let (mdns, heard) = fresh();
+    let (n, m) = (node(87), node(88));
+    let (_n_feed, _m_feed) = (mdns.subscribe(n), mdns.subscribe(m));
+    for _ in 0..5_000 {
+        heard.learn(&named(n), vec![addr(4087)]);
+    }
+
+    heard.learn(&named(m), vec![addr(4088)]);
+    assert_eq!(heard.held(m), vec![addr(4088)], "m is heard");
+    assert_eq!(heard.held(n), vec![addr(4087)], "n is still heard");
+    assert!(heard.table().peers.len() <= MAX_NAMES_PER_NODE + 1);
+}
+
+/// Once no one is subscribed to a node any more, its names are no one's, and a full table gives
+/// them up to a name someone is waiting on.
+#[tokio::test(start_paused = true)]
+async fn a_finished_subscriptions_names_give_way_at_the_cap() {
+    let (mdns, heard) = fresh();
+    for seed in 0..=MAX_PEERS / MAX_NAMES_PER_NODE {
+        let dialed = wide_node(u16::try_from(seed).expect("fits"));
+        let feed = mdns.subscribe(dialed);
+        for _ in 0..MAX_NAMES_PER_NODE {
+            heard.learn(&named(dialed), vec![addr(1)]);
+        }
+        drop(feed);
+    }
+
+    let m = node(90);
+    let _m_feed = mdns.subscribe(m);
+    heard.learn(&named(m), vec![addr(4090)]);
+    assert_eq!(heard.held(m), vec![addr(4090)], "m is heard");
+}
+
 /// A node subscribed to no one tests no name against any key, however many it hears; one whose
 /// dials have all finished is subscribed to no one.
 #[test]
@@ -565,6 +602,13 @@ fn named(node: NodeId) -> String {
 /// A distinct ed25519 [`NodeId`] seeded by a single byte, enough to tell two test nodes apart.
 fn node(seed: u8) -> NodeId {
     NodeId::new(CryptoKind::Ed25519, [seed; NodeId::KEY_LEN])
+}
+
+/// A distinct ed25519 [`NodeId`] for each of more seeds than one byte holds.
+fn wide_node(seed: u16) -> NodeId {
+    let mut key = [0xaa; NodeId::KEY_LEN];
+    key[..2].copy_from_slice(&seed.to_le_bytes());
+    NodeId::new(CryptoKind::Ed25519, key)
 }
 
 /// A loopback socket address on the given port.
