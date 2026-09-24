@@ -1,4 +1,4 @@
-use bifrost_core::{CryptoKind, NodeId};
+use bifrost_core::{CryptoKind, KeyError, NodeId};
 use zeroize::Zeroizing;
 
 use super::{
@@ -127,7 +127,8 @@ fn the_golden_vector_opens_to_its_seed() {
     assert_eq!(envelope.method(), Method::Passphrase);
     assert_eq!(
         envelope.node_id(),
-        NodeId::new(CryptoKind::Ed25519, GOLDEN_PUBLIC)
+        NodeId::try_new(CryptoKind::Ed25519, GOLDEN_PUBLIC)
+            .expect("a golden public key a secret derived parses")
     );
     let secret = envelope
         .open(&passphrase("correct horse battery staple"))
@@ -174,7 +175,8 @@ fn the_golden_root_vector_opens_to_its_seed_only_as_a_root_key() {
     };
     assert_eq!(
         envelope.node_id(),
-        NodeId::new(CryptoKind::Ed25519, GOLDEN_PUBLIC)
+        NodeId::try_new(CryptoKind::Ed25519, GOLDEN_PUBLIC)
+            .expect("a golden public key a secret derived parses")
     );
     let secret = envelope
         .open(&passphrase("correct horse battery staple"))
@@ -277,14 +279,16 @@ fn a_wrong_passphrase_and_a_damaged_file_are_one_refusal() {
     ));
     // One flipped bit in every authenticated field. The Argon2id fields flip to values still inside
     // the bounds, so the damage reaches the cipher rather than the parser. The public key is the field
-    // only the associated data protects: nothing else ties the header to the ciphertext.
+    // only the associated data protects: nothing else ties the header to the ciphertext. It flips its
+    // sign bit, the one flip that always names another real key, so the parse passes and the cipher
+    // is what refuses it.
     for (field, at, bit) in [
         ("memory", AT_MEMORY + 3, 0x01),
         ("passes", AT_PASSES + 3, 0x01),
         ("lanes", AT_LANES + 3, 0x02),
         ("salt", AT_SALT, 0x01),
         ("nonce", AT_NONCE + 23, 0x80),
-        ("public key", AT_PUBLIC + 7, 0x10),
+        ("public key", AT_PUBLIC + 31, 0x80),
         ("ciphertext", HEADER_LEN + 31, 0x01),
         ("tag", AT_TAG, 0x40),
     ] {
@@ -348,6 +352,23 @@ fn an_unknown_version_is_named_before_its_length_is_judged() {
         image[AT_VERSION] = found;
         assert_eq!(refusal(&image), FormatError::Version { found });
     }
+}
+
+/// The public key the seed `[7; 32]` binds, plus the order-8 torsion point: canonical, not small-order,
+/// and a second spelling of that key. The same vector as the identity parse's own tests.
+const TORSION_TWIN: [u8; 32] = [
+    0x1f, 0x4f, 0x58, 0x0e, 0x73, 0xac, 0x20, 0x8f, 0x06, 0x76, 0x01, 0x90, 0xe9, 0xed, 0xc6, 0xf5,
+    0x91, 0x67, 0x75, 0xda, 0xbd, 0x9c, 0x1c, 0xdc, 0xa3, 0x93, 0x17, 0x5c, 0x2d, 0x6d, 0x10, 0x83,
+];
+
+#[test]
+fn a_key_file_naming_a_torsion_twin_is_refused_at_load() {
+    let mut image = GOLDEN;
+    image[AT_PUBLIC..AT_PUBLIC + TORSION_TWIN.len()].copy_from_slice(&TORSION_TWIN);
+    assert_eq!(
+        refusal(&image),
+        FormatError::PublicKey(KeyError::HasTorsion)
+    );
 }
 
 #[test]

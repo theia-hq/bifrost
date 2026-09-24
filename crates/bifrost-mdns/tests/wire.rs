@@ -12,7 +12,7 @@ use core::time::Duration;
 use std::io;
 use std::net::UdpSocket;
 
-use bifrost_core::{CryptoKind, NodeId};
+use bifrost_core::NodeId;
 use bifrost_mdns::MdnsDiscovery;
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -24,7 +24,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 #[ignore = "drives real multicast; run locally with --ignored"]
 async fn no_record_carries_the_key() {
     let listener = listen().expect("listen on the mDNS group");
-    let serving = NodeId::new(CryptoKind::Ed25519, [90; NodeId::KEY_LEN]);
+    let serving = NodeId::from_ed25519_secret(&[90; NodeId::KEY_LEN]);
     let port = 4090;
     let _mdns = MdnsDiscovery::advertise(serving, [addr(port)])
         .expect("advertises")

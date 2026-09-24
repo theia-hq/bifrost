@@ -20,6 +20,9 @@ bifrost.workspace = true
 bifrost-conformance = { path = "../../bifrost-conformance" }
 bifrost-quirk.workspace = true
 
+# `hazmat` and `digest` let the test forger sign with a chosen nonce under a claimed key, which is how a
+# torsion-twin signature is made; no new crate, only two features of the one already in the tree.
+ed25519-dalek = { workspace = true, features = ["digest", "hazmat"] }
 futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 

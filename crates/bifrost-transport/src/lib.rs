@@ -54,7 +54,7 @@
 use core::net::SocketAddr;
 
 pub use bifrost_core::{
-    Addr, AddrUpdate, ConnInfo, Error, HintStream, NodeId, NodeIdParseError, Path,
+    Addr, AddrUpdate, ConnInfo, Error, HintStream, KeyError, NodeId, NodeIdParseError, Path,
 };
 use tokio::io;
 

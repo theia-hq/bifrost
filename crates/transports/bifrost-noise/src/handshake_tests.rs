@@ -1,4 +1,4 @@
-use bifrost_core::NodeId;
+use bifrost_core::{KeyError, NodeId};
 use ed25519_dalek::{Signer as _, SigningKey};
 use snow::Builder;
 use snow::params::NoiseParams;
@@ -61,6 +61,29 @@ fn payload_layout_is_frozen() {
         ),
         "a static-width payload is not a payload"
     );
+}
+
+/// A payload claiming a torsion twin is refused at the key, whatever its signature: `A + T` for the key
+/// the seed `[7; 32]` binds.
+#[test]
+fn a_payload_claiming_a_torsion_twin_is_refused_as_a_peer_key() {
+    const TWIN_OF_SEVEN: [u8; NodeId::KEY_LEN] = [
+        0x1f, 0x4f, 0x58, 0x0e, 0x73, 0xac, 0x20, 0x8f, 0x06, 0x76, 0x01, 0x90, 0xe9, 0xed, 0xc6,
+        0xf5, 0x91, 0x67, 0x75, 0xda, 0xbd, 0x9c, 0x1c, 0xdc, 0xa3, 0x93, 0x17, 0x5c, 0x2d, 0x6d,
+        0x10, 0x83,
+    ];
+    let signature = sign(
+        &SigningKey::from_bytes(&seed(7)),
+        wire::CTX_INITIATOR,
+        &[0u8; 32],
+        &[9u8; 32],
+    );
+    let mut payload = TWIN_OF_SEVEN.to_vec();
+    payload.extend_from_slice(&signature.to_bytes());
+    assert!(matches!(
+        parse_payload(&payload),
+        Err(NoiseError::PeerKey(KeyError::HasTorsion))
+    ));
 }
 
 /// A signature is bound to one transcript: lifting it into another session, another role, or

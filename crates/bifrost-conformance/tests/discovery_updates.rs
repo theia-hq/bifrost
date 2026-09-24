@@ -16,8 +16,8 @@ use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use bifrost::{
-    Addr, AddrUpdate, Announced, CryptoKind, Discovery, Error, HintStream, Latest, Layered, Node,
-    NodeId, Session, StaticDiscovery, Transport,
+    Addr, AddrUpdate, Announced, Discovery, Error, HintStream, Latest, Layered, Node, NodeId,
+    Session, StaticDiscovery, Transport,
 };
 use bifrost_mem::MemTransport;
 use futures_util::stream;
@@ -399,7 +399,7 @@ impl Session for Recorded {
 
 /// A distinct ed25519 [`NodeId`] seeded by one byte, enough to tell test identities apart.
 fn id(seed: u8) -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [seed; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[seed; NodeId::KEY_LEN])
 }
 
 /// A loopback socket address on the given port.

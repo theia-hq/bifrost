@@ -1,7 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use bifrost_core::NodeId;
+use bifrost_core::{KeyError, NodeId};
 
 use crate::envelope::SEALED_LEN;
 use crate::kind::Kind;
@@ -247,6 +247,9 @@ pub enum FormatError {
         /// Parallel lanes.
         lanes: u32,
     },
+    /// The stored public key is not a usable ed25519 identity.
+    #[error("the stored public key is not a usable identity")]
+    PublicKey(#[source] KeyError),
 }
 
 /// A cryptographic primitive failed to run: the random source, the key derivation, or the cipher.

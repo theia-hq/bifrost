@@ -16,7 +16,8 @@ use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use bifrost_core::{Addr, BoxError, Error, NodeId};
 use bifrost_transport::{Announced, Session, Transport};
-use ed25519_dalek::{Signer as _, SigningKey};
+use ed25519_dalek::hazmat::{ExpandedSecretKey, raw_sign};
+use ed25519_dalek::{Sha512, Signature, Signer as _, SigningKey, VerifyingKey};
 use snow::Builder;
 use snow::params::NoiseParams;
 use tokio::io::{self as tokio_io, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -319,11 +320,25 @@ impl Session for Forged {
     fn close(&self) {}
 }
 
-/// A wire-speaking impostor: it runs the real protocol with its own key but claims `claim`.
+/// A wire-speaking impostor: it runs the real protocol with its own key but claims another.
 pub struct Forger {
     inner: Wire,
     identity: SigningKey,
-    claim: NodeId,
+    /// The key bytes the payload claims.
+    claim: [u8; NodeId::KEY_LEN],
+    /// The identity the dialer's session reports.
+    peer: NodeId,
+    forge: Forge,
+}
+
+/// How a [`Forger`] signs for the key it claims.
+#[derive(Clone, Copy)]
+enum Forge {
+    /// With its own key: the claim is foreign and the signature cannot verify under it.
+    Own,
+    /// As the claimed torsion twin of its own key, grinding the nonce until the torsion component
+    /// cancels, so the signature verifies under `verify_strict` for the claimed bytes.
+    TorsionTwin,
 }
 
 impl Forger {
@@ -332,7 +347,21 @@ impl Forger {
         Self {
             inner: Wire::bind(seed),
             identity: SigningKey::from_bytes(&seed),
-            claim,
+            claim: *claim.key(),
+            peer: claim,
+            forge: Forge::Own,
+        }
+    }
+
+    /// Dial with `seed`'s identity while advertising `twin`, the torsion twin of `seed`'s own key, under
+    /// a signature that verifies for `twin`. No `NodeId` can name `twin`, so only its bytes are held.
+    pub fn torsion_twin(seed: [u8; NodeId::KEY_LEN], twin: [u8; NodeId::KEY_LEN]) -> Self {
+        Self {
+            inner: Wire::bind(seed),
+            identity: SigningKey::from_bytes(&seed),
+            claim: twin,
+            peer: NodeId::from_ed25519_secret(&seed),
+            forge: Forge::TorsionTwin,
         }
     }
 }
@@ -359,11 +388,17 @@ impl Transport for Forger {
         let mut dialog = exchange_two_messages(&mut write, &mut read)
             .await
             .map_err(Error::Connect)?;
-        let payload = finish_payload(&self.identity, self.claim, &dialog.h2, &dialog.own_static);
+        let payload = forge_payload(
+            &self.identity,
+            self.forge,
+            self.claim,
+            &dialog.h2,
+            &dialog.own_static,
+        );
         send_third(&mut write, &mut dialog.state, &payload)
             .await
             .map_err(Error::Connect)?;
-        Ok(Forged::hold(self.claim, session, (write, read)))
+        Ok(Forged::hold(self.peer, session, (write, read)))
     }
 
     async fn accept(&self) -> Result<Forged, Error> {
@@ -709,16 +744,50 @@ where
 
 /// Sign the initiator's transcript with `claim` as the advertised identity.
 fn finish_payload(identity: &SigningKey, claim: NodeId, h2: &[u8], own_static: &[u8]) -> Vec<u8> {
+    forge_payload(identity, Forge::Own, *claim.key(), h2, own_static)
+}
+
+/// The initiator payload claiming `claim`, signed as `forge` says.
+fn forge_payload(
+    identity: &SigningKey,
+    forge: Forge,
+    claim: [u8; NodeId::KEY_LEN],
+    h2: &[u8],
+    own_static: &[u8],
+) -> Vec<u8> {
     let mut signed = Vec::new();
     signed.extend_from_slice(bifrost_noise::wire::CTX_INITIATOR);
     signed.extend_from_slice(h2);
     signed.extend_from_slice(own_static);
-    let signature = identity.sign(&signed);
+    let signature = match forge {
+        Forge::Own => identity.sign(&signed),
+        Forge::TorsionTwin => sign_as_twin(identity, &claim, &signed),
+    };
 
     let mut payload = Vec::with_capacity(bifrost_noise::wire::PAYLOAD_LEN);
-    payload.extend_from_slice(claim.key());
+    payload.extend_from_slice(&claim);
     payload.extend_from_slice(&signature.to_bytes());
     payload
+}
+
+/// A signature over `message` that verifies under `twin`, the torsion twin `A + T` of `identity`'s key
+/// `A`, made with `identity`'s secret alone.
+///
+/// The challenge `k` hashes the twin's bytes, so `sB - k(A + T) = R - kT`, which is `R` exactly when `k`
+/// is a multiple of `T`'s order. Each fresh nonce prefix is a fresh `k`, so one in eight verifies; 256
+/// tries all miss with probability below one in 10^14.
+#[allow(clippy::expect_used)]
+fn sign_as_twin(identity: &SigningKey, twin: &[u8; NodeId::KEY_LEN], message: &[u8]) -> Signature {
+    let claimed = VerifyingKey::from_bytes(twin).expect("a torsion twin decompresses");
+    let mut expanded = ExpandedSecretKey::from(&identity.to_bytes());
+    for nonce in 0..=u8::MAX {
+        expanded.hash_prefix[0] = nonce;
+        let signature = raw_sign::<Sha512>(&expanded, message, &claimed);
+        if claimed.verify_strict(message, &signature).is_ok() {
+            return signature;
+        }
+    }
+    panic!("no nonce in 256 cancelled the torsion component")
 }
 
 /// Write the third XX message with `payload`.

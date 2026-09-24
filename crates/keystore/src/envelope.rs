@@ -186,7 +186,10 @@ impl Envelope {
             u32::from_be_bytes(field(&image, AT_PASSES)),
             u32::from_be_bytes(field(&image, AT_LANES)),
         )?;
-        let node_id = NodeId::new(CryptoKind::Ed25519, field(&image, AT_PUBLIC));
+        // The stored public half names the node while the file is locked, so it is parsed like any key
+        // that enters from outside: a file cannot name an identity nobody could hold.
+        let node_id = NodeId::try_new(CryptoKind::Ed25519, field(&image, AT_PUBLIC))
+            .map_err(FormatError::PublicKey)?;
         Ok(Self {
             image,
             method,

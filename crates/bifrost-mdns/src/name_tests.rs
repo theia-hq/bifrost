@@ -1,6 +1,6 @@
 //! The blinded name: its shape, that it changes, and that only a holder of the key recognises it.
 
-use bifrost_core::{CryptoKind, NodeId};
+use bifrost_core::NodeId;
 
 use super::name::{self, NAME_LEN, Resolver};
 
@@ -80,5 +80,5 @@ fn fresh(node: &NodeId) -> String {
 }
 
 fn node(seed: u8) -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [seed; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[seed; NodeId::KEY_LEN])
 }

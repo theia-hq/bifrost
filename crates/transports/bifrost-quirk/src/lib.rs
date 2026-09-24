@@ -8,20 +8,20 @@
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, Path};
+use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, KeyError, Path};
 pub use bifrost_transport::{Announced, Session, Transport};
 
 /// A quirk-backed endpoint.
 pub struct Endpoint {
     inner: quirk::Endpoint,
+    /// This endpoint's own identity, parsed once at bind so `node_id` never re-reads quirk's key.
+    node: NodeId,
 }
 
 impl Endpoint {
     /// Bind a quirk endpoint with a fresh identity.
     pub async fn bind() -> Result<Self, BindError> {
-        Ok(Self {
-            inner: quirk::Endpoint::bind().await.map_err(BindError)?,
-        })
+        Self::adopt(quirk::Endpoint::bind().await.map_err(BindError::Bind)?)
     }
 
     /// Bind with a persisted identity, from a raw 32-byte ed25519 secret, so the [`NodeId`] is stable
@@ -38,11 +38,14 @@ impl Endpoint {
         secret: &[u8; 32],
     ) -> impl Future<Output = Result<Self, BindError>> + use<> {
         let bind = quirk::Endpoint::bind_with_secret(*secret);
-        async move {
-            Ok(Self {
-                inner: bind.await.map_err(BindError)?,
-            })
-        }
+        async move { Self::adopt(bind.await.map_err(BindError::Bind)?) }
+    }
+
+    /// Wrap a bound quirk endpoint, parsing the key it announces as its own.
+    fn adopt(inner: quirk::Endpoint) -> Result<Self, BindError> {
+        let node = NodeId::try_new(CryptoKind::Ed25519, inner.public_key().to_bytes())
+            .map_err(BindError::Key)?;
+        Ok(Self { inner, node })
     }
 }
 
@@ -51,7 +54,7 @@ impl Transport for Endpoint {
     type Session = QuirkSession;
 
     fn node_id(&self) -> NodeId {
-        NodeId::new(CryptoKind::Ed25519, self.inner.public_key().to_bytes())
+        self.node
     }
 
     fn local_addr(&self) -> Addr {
@@ -91,14 +94,18 @@ impl Transport for Endpoint {
         // invariant that every layer above assumes: the identity we reached must be the one we dialed.
         // A plaintext MITM still defeats this (phase 1 Noise closes that); it closes the accidental
         // mismatch and makes the invariant explicit rather than silently trusting a self-announced key.
-        let reached = NodeId::new(CryptoKind::Ed25519, conn.peer_key());
+        let reached = NodeId::try_new(CryptoKind::Ed25519, conn.peer_key())
+            .map_err(|err| Error::Connect(Box::new(err)))?;
         if reached != dialed {
             return Err(Error::Connect(Box::new(IdentityMismatch {
                 dialed,
                 reached,
             })));
         }
-        Ok(QuirkSession { conn })
+        Ok(QuirkSession {
+            conn,
+            peer: reached,
+        })
     }
 
     async fn accept(&self) -> Result<QuirkSession, Error> {
@@ -107,7 +114,9 @@ impl Transport for Endpoint {
             .accept()
             .await
             .map_err(|err| Error::Accept(Box::new(err)))?;
-        Ok(QuirkSession { conn })
+        let peer = NodeId::try_new(CryptoKind::Ed25519, conn.peer_key())
+            .map_err(|err| Error::Accept(Box::new(err)))?;
+        Ok(QuirkSession { conn, peer })
     }
 
     /// quirk drains per session, not per endpoint: each connection's send engine retransmits until its
@@ -121,6 +130,8 @@ impl Transport for Endpoint {
 /// A quirk-backed session: one connection to a peer.
 pub struct QuirkSession {
     conn: quirk::Connection,
+    /// The key the peer announced, parsed once where the session is built: `peer` cannot refuse.
+    peer: NodeId,
 }
 
 impl Session for QuirkSession {
@@ -129,7 +140,7 @@ impl Session for QuirkSession {
     type Read = quirk::RecvStream;
 
     fn peer(&self) -> NodeId {
-        NodeId::new(CryptoKind::Ed25519, self.conn.peer_key())
+        self.peer
     }
 
     async fn open_bi(&self) -> Result<(quirk::SendStream, quirk::RecvStream), Error> {
@@ -200,8 +211,16 @@ fn missing_hint() -> BoxError {
 
 /// Binding the quirk endpoint failed.
 #[derive(Debug, thiserror::Error)]
-#[error("bind quirk endpoint")]
-pub struct BindError(#[source] quirk::Error);
+pub enum BindError {
+    /// quirk could not bind its socket.
+    #[error("bind quirk endpoint")]
+    Bind(#[source] quirk::Error),
+    /// The endpoint's own key is not a usable identity.
+    ///
+    /// Does not occur for a key quirk derives from its own secret.
+    #[error("endpoint key is not a usable identity")]
+    Key(#[source] KeyError),
+}
 
 /// The peer reached did not present the identity that was dialed.
 ///

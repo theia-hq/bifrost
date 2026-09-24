@@ -32,12 +32,13 @@ impl CryptoKind {
     }
 }
 
-/// A self-certifying node identity: a raw 32-byte public key plus its [`CryptoKind`].
+/// A self-certifying node identity: a checked 32-byte public key plus its [`CryptoKind`].
 ///
-/// This is the only way a peer is named in Bifrost. Whether reaching a `NodeId` PROVES that identity
-/// is the transport's declared security profile, not a property of the type: a `Sealed` transport
-/// proves key possession, while an `Announced` one (quirk phase 0) reaches whatever key answers and
-/// proves nothing. Consumers that need proof require the `PeerProven` bound.
+/// This is the only way a peer is named in Bifrost. Every `NodeId` passed [`try_new`](Self::try_new)'s
+/// check or was derived from a secret, so it is never a small-order point, a non-canonical encoding, or
+/// a torsioned twin of another identity. Whether reaching a `NodeId` proves the peer holds its key is
+/// the transport's security profile, not a property of the type: a `Sealed` transport proves it, an
+/// `Announced` one reaches whatever key answers. Consumers that need proof require the `PeerProven` bound.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId {
     kind: CryptoKind,
@@ -48,18 +49,31 @@ impl NodeId {
     /// The length of the raw key material, in bytes.
     pub const KEY_LEN: usize = 32;
 
-    /// Wrap raw key bytes of a known suite.
-    pub const fn new(kind: CryptoKind, key: [u8; Self::KEY_LEN]) -> Self {
-        Self { kind, key }
+    /// The node id these bytes name, or why they do not name one.
+    ///
+    /// There is no unchecked constructor: a `NodeId` exists only if its bytes are the canonical encoding
+    /// of a prime-order point. The check does not make an identity unique: the negation `-A` of an
+    /// identity `A` passes it, and the holder of `A`'s secret can sign for both. Identities compare by
+    /// exact bytes, so the two are different identities.
+    pub fn try_new(kind: CryptoKind, key: [u8; Self::KEY_LEN]) -> Result<Self, KeyError> {
+        match kind {
+            CryptoKind::Ed25519 => check_ed25519_identity(&key)?,
+        }
+        Ok(Self { kind, key })
     }
 
     /// The node id an ed25519 secret binds under: its public (verifying) key, tagged
     /// [`CryptoKind::Ed25519`]. This is the same id the iroh and quirk backends derive when they bind the
     /// secret, so it can be computed offline, with no transport stood up, to pre-provision an identity a
     /// machine will later adopt.
+    ///
+    /// Infallible: a secret's public key always passes [`try_new`](Self::try_new)'s check.
     pub fn from_ed25519_secret(secret: &[u8; Self::KEY_LEN]) -> Self {
         let signing = ed25519_dalek::SigningKey::from_bytes(secret);
-        Self::new(CryptoKind::Ed25519, signing.verifying_key().to_bytes())
+        Self {
+            kind: CryptoKind::Ed25519,
+            key: signing.verifying_key().to_bytes(),
+        }
     }
 
     /// The node id of a *device* identity derived from a root secret and a label.
@@ -91,6 +105,46 @@ impl NodeId {
     pub fn short(&self) -> String {
         self.to_string().chars().take(16).collect()
     }
+}
+
+/// Why 32 bytes are not a usable ed25519 identity: the first check they fail, in the order below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum KeyError {
+    /// The bytes do not decompress to a point on the ed25519 curve.
+    #[error("not a point on the ed25519 curve")]
+    NotOnCurve,
+    /// A valid point, in an encoding other than the one it compresses to.
+    #[error("non-canonical encoding of a valid point")]
+    NotCanonical,
+    /// A point of order 8 or less: no secret key has it as its public key, and a Diffie-Hellman
+    /// agreement with it is all zeros, which anyone can compute.
+    #[error("a small-order point: no secret key has it as its public key")]
+    SmallOrder,
+    /// A prime-order point plus a torsion component: a torsioned twin of another identity, whose holder
+    /// can sign for it.
+    #[error("carries a torsion component: the holder of another key can sign for it")]
+    HasTorsion,
+}
+
+/// Check that 32 bytes name an ed25519 identity somebody could hold, cheapest clause first.
+///
+/// `from_bytes` only decompresses, so the canonical clause is ours: it re-compresses the point and
+/// refuses any input that is not the spelling the point compresses to.
+fn check_ed25519_identity(key: &[u8; NodeId::KEY_LEN]) -> Result<(), KeyError> {
+    let point = ed25519_dalek::VerifyingKey::from_bytes(key)
+        .map_err(|_| KeyError::NotOnCurve)?
+        .to_edwards();
+    if point.compress().to_bytes() != *key {
+        return Err(KeyError::NotCanonical);
+    }
+    if point.is_small_order() {
+        return Err(KeyError::SmallOrder);
+    }
+    if !point.is_torsion_free() {
+        return Err(KeyError::HasTorsion);
+    }
+    Ok(())
 }
 
 /// The child ed25519 secret derived from a root secret and a label: a domain-separated BLAKE3 KDF over
@@ -149,12 +203,13 @@ impl FromStr for NodeId {
             .map_err(|_| NodeIdParseError::BadEncoding)?;
         let key =
             <[u8; Self::KEY_LEN]>::try_from(raw).map_err(|_| NodeIdParseError::WrongLength)?;
-        Ok(Self { kind, key })
+        Self::try_new(kind, key).map_err(NodeIdParseError::Key)
     }
 }
 
 /// Why a string could not be parsed into a [`NodeId`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NodeIdParseError {
     /// The input was shorter than the suite tag.
     #[error("identity string too short")]
@@ -168,4 +223,7 @@ pub enum NodeIdParseError {
     /// The decoded key was not the expected length.
     #[error("wrong key length")]
     WrongLength,
+    /// The decoded bytes are not a usable ed25519 identity.
+    #[error("not a usable identity")]
+    Key(#[source] KeyError),
 }
