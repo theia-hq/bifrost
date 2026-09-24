@@ -78,7 +78,24 @@ fn a_child_secret_uses_the_bifrost_context() {
 #[test]
 fn display_carries_the_suite_tag() {
     let id = NodeId::new(CryptoKind::Ed25519, [0u8; NodeId::KEY_LEN]);
-    assert!(id.to_string().starts_with("bf01"));
+    assert!(id.to_string().starts_with("ed01"));
+}
+
+/// The key text format both libraries print: this literal is asserted byte for byte wherever an
+/// Ed25519 key is printed in it, so either side drifting fails its own CI.
+const SHARED_VECTOR: &str = "ed01aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq";
+
+#[test]
+fn the_key_text_is_the_shared_vector() {
+    let id = NodeId::new(CryptoKind::Ed25519, [1; 32]);
+    assert_eq!(id.to_string(), SHARED_VECTOR);
+    assert_eq!(SHARED_VECTOR.parse::<NodeId>(), Ok(id));
+}
+
+#[test]
+fn an_uppercase_key_text_parses() {
+    let id = NodeId::new(CryptoKind::Ed25519, [1; 32]);
+    assert_eq!(SHARED_VECTOR.to_uppercase().parse::<NodeId>(), Ok(id));
 }
 
 #[test]
@@ -89,7 +106,7 @@ fn rejects_unknown_suite() {
 
 #[test]
 fn rejects_wrong_length() {
-    let err = "bf01aa".parse::<NodeId>().unwrap_err();
+    let err = "ed01aa".parse::<NodeId>().unwrap_err();
     assert!(matches!(
         err,
         NodeIdParseError::WrongLength | NodeIdParseError::BadEncoding
