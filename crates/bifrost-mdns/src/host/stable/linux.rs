@@ -126,10 +126,11 @@ fn scan(mut datagram: &[u8], expiring: &mut Vec<(u32, Ipv6Addr)>) -> Flow {
         // reach (rtnetlink refuses an unprivileged user-to-user send, and the capability that
         // lifts that can change the address outright), so this is the line that makes the boundary
         // this parse's own rather than one inherited from a kernel registration flag.
-        if kind == libc::RTM_NEWADDR && u32_at(datagram, 12) == Some(0) {
-            if let Some(reported) = expiring_addr(&datagram[NLMSGHDR..length]) {
-                expiring.push(reported);
-            }
+        if kind == libc::RTM_NEWADDR
+            && u32_at(datagram, 12) == Some(0)
+            && let Some(reported) = expiring_addr(&datagram[NLMSGHDR..length])
+        {
+            expiring.push(reported);
         }
         datagram = &datagram[aligned(length).min(datagram.len())..];
     }
