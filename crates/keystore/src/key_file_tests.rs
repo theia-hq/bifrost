@@ -96,6 +96,13 @@ fn a_sealed_write_names_its_node_locked_and_opens_to_the_same_key() {
 
 #[cfg(unix)]
 #[test]
+fn a_sealed_file_opens_with_the_keystore_signature() {
+    let dir = TestDir::new();
+    let (file, _) = sealed_file(&dir, [4; 32], &passphrase("correct horse"));
+    assert_eq!(&bytes(&file)[..8], b"KEYSTORE");
+}
+
+#[test]
 fn a_written_key_is_owner_only() {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -150,7 +157,7 @@ fn a_malformed_file_is_refused_by_name_and_left_alone() {
         (vec![1; 33], FormatError::Size { found: 33 }),
         // A version 1 sealed file cut to the plain length: refused as sealed, never read as a seed.
         (
-            [&b"THEIAKEY"[..], &[1; 24]].concat(),
+            [&b"KEYSTORE"[..], &[1; 24]].concat(),
             FormatError::SealedSize { found: 32 },
         ),
     ] {
@@ -170,7 +177,7 @@ fn a_file_past_the_read_cap_is_refused_on_its_size_without_being_read() {
     // It opens with a version 1 signature, so had it been read the parser would call it a damaged
     // sealed file; a plain size refusal is what shows it was judged on its length alone. Modest on
     // purpose: if the cap regresses, this test must fail, not make the loader read gigabytes.
-    let content = [&b"THEIAKEY"[..], &[1], &vec![0; 64 * 1024]].concat();
+    let content = [&b"KEYSTORE"[..], &[1], &vec![0; 64 * 1024]].concat();
     plant(&file, &content);
     match file.load() {
         Err(Error::Format { source, .. }) => {

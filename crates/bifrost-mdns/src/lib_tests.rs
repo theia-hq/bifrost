@@ -20,7 +20,13 @@ use bifrost_core::{AddrUpdate, CryptoKind, Discovery, HintStream, NodeId};
 use futures_util::{Stream, StreamExt as _};
 use tokio::time::{self, Instant};
 
-use super::{Heard, MAX_HINTS, MdnsDiscovery, SETTLE_WINDOW, shape};
+use super::{Heard, MAX_HINTS, MdnsDiscovery, SERVICE, SETTLE_WINDOW, shape};
+
+/// Every node announces and browses under the protocol's own name, `_bifrost._udp.local.`.
+#[test]
+fn the_service_is_named_for_bifrost() {
+    assert_eq!(SERVICE, "bifrost");
+}
 
 /// Two nodes advertising on the LAN hear each other's advertised address over mDNS.
 #[tokio::test]

@@ -63,8 +63,16 @@ fn a_child_secret_is_domain_separated_from_the_root_and_other_derivations() {
     // primitive with a DIFFERENT context; a device seed and any sibling seed for one root must never
     // coincide, or adopting a device would leak the sibling seed (and vice versa). This pins the separation
     // so a refactor that collapses the contexts trips here.
-    let sibling_seed = blake3::derive_key("theia sibling derivation v1", &root);
+    let sibling_seed = blake3::derive_key("bifrost sibling derivation v1", &root);
     assert_ne!(*child, sibling_seed);
+}
+
+#[test]
+fn a_child_secret_uses_the_bifrost_context() {
+    assert_eq!(
+        *derive_ed25519_child_secret(&[9; 32], "desk"),
+        blake3::derive_key("bifrost device identity v1: desk", &[9; 32])
+    );
 }
 
 #[test]
