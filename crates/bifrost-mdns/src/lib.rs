@@ -6,8 +6,14 @@
 //! `Node` beside any transport, it feeds the same `SocketAddr` hints a static table would, only
 //! learned from the network instead of typed by hand.
 //!
-//! It advertises this node's [`NodeId`] mapped to its local `SocketAddr`(s) and continuously browses
-//! for the same service, building a table of the peers it hears. A
+//! A serving node announces itself on each local network under a name that changes at every start
+//! and every fifteen minutes. Only someone who already holds its key can tell that name is this
+//! node; anyone else sees that a bifrost node is present, at an address and port, and not which
+//! one. Anyone who dials that port still learns the key from the handshake. A node that only dials
+//! announces nothing.
+//!
+//! It continuously browses for the same service, building a table of the names it hears and which
+//! of them belong to a node someone here is subscribed to. A
 //! [`subscribe`](Discovery::subscribe) is a view over that table for one node: it answers with the
 //! peer's LAN addresses as soon as they are heard, and follows them as they change or expire.
 //!
@@ -41,12 +47,16 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bifrost_core::{AddrUpdate, Discovery, HintStream, Latest, NodeId};
 use futures_util::stream;
-use swarm_discovery::{Discoverer, IpClass, Peer};
+use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time::{self, Instant};
 
+use crate::name::Resolver;
+
 mod host;
+mod name;
 mod publish;
 
 pub use host::{At, Dialable, Expiring, Missing, Scope, ScopeClass};
@@ -65,6 +75,13 @@ const SERVICE: &str = "bifrost";
 /// query-response cycle with margin fits inside this. After it, a subscription for a node not heard
 /// settles at once, so a long-lived node never pays it again.
 const SETTLE_WINDOW: Duration = Duration::from_millis(1500);
+
+/// How often a serving node announces under a fresh name, on top of the fresh name at every start.
+///
+/// Fifteen minutes is Bluetooth's default for rotating a private address. The timer is for the
+/// machine that sleeps on one network and wakes on another without restarting; it runs on tokio's
+/// clock and never reads the wall clock.
+const ROTATE: Duration = Duration::from_secs(15 * 60);
 
 /// LAN discovery over mDNS: advertises this node and learns peers heard on the local network.
 ///
@@ -85,14 +102,78 @@ pub struct MdnsDiscovery {
     /// instance, which advertises and hears nothing.
     ///
     /// [`disabled`]: Self::disabled
-    _service: Option<swarm_discovery::DropGuard>,
+    _service: Option<Service>,
 }
 
-/// The maximum number of distinct peers held in the discovery cache. A LAN has a handful of peers, so
-/// this is generous; the cap stops an on-LAN flood of distinct fake NodeIds (which anyone can emit, no
-/// secret needed) from growing this map without bound. It bounds OUR map only; the wrapped
-/// `swarm-discovery` keeps its own unbounded map, which needs a dependency-level fix (patch, fork, or
-/// replace).
+/// The running mDNS service, and for a serving node the task that renames it.
+///
+/// The dependency fixes the instance name when a service is built, so a new name is a new service:
+/// the rotation task starts the next one, and only then drops the one it replaces, so the node is
+/// never silent between the two.
+struct Service {
+    /// The service running now. Shared with the rotation task, which swaps in each new one.
+    current: Arc<Mutex<Option<DropGuard>>>,
+    /// The rotation task, for a node that announces. A browse-only node announces no name, so it
+    /// runs none.
+    rotation: Option<JoinHandle<()>>,
+}
+
+impl Drop for Service {
+    /// Stop the service here and now, and the rotation with it, so no new service starts after this.
+    fn drop(&mut self) {
+        if let Some(rotation) = &self.rotation {
+            rotation.abort();
+        }
+        drop(lock(&self.current).take());
+    }
+}
+
+/// Announce under a fresh name every [`ROTATE`] for as long as `current` holds a service.
+///
+/// `start` builds and starts a service under the name it is given. The next service is started
+/// before the old one is dropped. A name or a service that cannot be made keeps the one running and
+/// is tried again at the next turn: the fallback is the current blinded name, never the key.
+async fn rotate<G>(
+    node: NodeId,
+    current: Arc<Mutex<Option<G>>>,
+    mut start: impl FnMut(String) -> Result<G, MdnsError>,
+) {
+    loop {
+        time::sleep(ROTATE).await;
+        let next = match name::fresh(&node)
+            .map_err(MdnsError::Entropy)
+            .and_then(&mut start)
+        {
+            Ok(next) => next,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not announce under a new mDNS name; keeping the current one");
+                continue;
+            }
+        };
+        let old = {
+            let mut slot = lock(&current);
+            if slot.is_none() {
+                return;
+            }
+            slot.replace(next)
+        };
+        drop(old);
+    }
+}
+
+/// A panic under one of these locks can only have come from an allocation inside a map or slot
+/// write, which leaves the value itself sound, so a poisoned lock is recovered rather than turning
+/// every later dial into one.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The maximum number of distinct names held in the discovery cache. A LAN has a handful of peers,
+/// so this is generous; the cap stops an on-LAN flood of distinct names (which anyone can emit, no
+/// secret needed) from growing this map without bound. At the cap a new name evicts the oldest name
+/// that matched no subscription, so a flood evicts only its own junk and never a matched peer. It
+/// bounds OUR map only; the wrapped `swarm-discovery` keeps its own unbounded map, which needs a
+/// dependency-level fix (patch, fork, or replace).
 const MAX_PEERS: usize = 1024;
 
 /// The most addresses held for one peer. A real host advertises a handful; the cap stops one forged
@@ -135,36 +216,48 @@ impl MdnsDiscovery {
         let advertising = Advertising::of(bound.into_iter().collect());
 
         let heard = Arc::new(Heard::new(Instant::now() + SETTLE_WINDOW));
+        let announce = advertising.advertised().map(|advertised| {
+            let addrs: Vec<IpAddr> = advertised.addrs().iter().map(SocketAddr::ip).collect();
+            (advertised.port(), addrs, advertised.egress_v4())
+        });
+        let announces = announce.is_some();
         let sink = Arc::clone(&heard);
-        // `new_interactive` sets a human-facing cadence (tau=0.7s, phi=2.5): a person is waiting on an
-        // interactive probe, so bias toward finding a peer within a second over minimizing multicast chatter.
-        let mut service = Discoverer::new_interactive(SERVICE.to_owned(), node.to_string())
-            // V4Only: the dependency's IPv6 leg always egresses the default interface, sending to the
-            // link-local mDNS group with scope 0. On a host without an IPv6 path that send fails per
-            // query (EHOSTUNREACH, hundreds of WARN lines in minutes), and the leg runs at all only as
-            // a side effect of the v4 interface pinning below. Queries are v4-preferred regardless and
-            // a response can still carry AAAA records, so this drops only the narrow v6-only reach for
-            // a quiet, deterministic v4 path; a real v4 send failure still warns per interface.
-            .with_ip_class(IpClass::V4Only)
-            .with_callback(move |peer_id, peer| sink.record(peer_id, peer));
-        // Registering no addresses is how the dependency spells browse-only: it keeps querying and
-        // reading responses, and puts no record of its own on the wire.
-        if let Some(advertised) = advertising.advertised() {
-            service = service
-                .with_addrs(
-                    advertised.port(),
-                    advertised.addrs().iter().map(SocketAddr::ip),
-                )
-                .with_multicast_interfaces_v4(advertised.egress_v4());
-        }
-        let service = service
-            .spawn(&Handle::current())
-            .map_err(|err| MdnsError::Spawn(Box::new(err)))?;
+        let handle = Handle::current();
+        // The name is the dependency's `peer_id`, which it puts on the wire twice: as the instance
+        // name and inside the SRV target host `<name>-<port>.local.`. A blinded name covers both.
+        let start = move |name: String| {
+            let sink = Arc::clone(&sink);
+            // `new_interactive` sets a human-facing cadence (tau=0.7s, phi=2.5): a person is waiting on an
+            // interactive probe, so bias toward finding a peer within a second over minimizing multicast chatter.
+            let mut service = Discoverer::new_interactive(SERVICE.to_owned(), name)
+                // V4Only: the dependency's IPv6 leg always egresses the default interface, sending to the
+                // link-local mDNS group with scope 0. On a host without an IPv6 path that send fails per
+                // query (EHOSTUNREACH, hundreds of WARN lines in minutes), and the leg runs at all only as
+                // a side effect of the v4 interface pinning below. Queries are v4-preferred regardless and
+                // a response can still carry AAAA records, so this drops only the narrow v6-only reach for
+                // a quiet, deterministic v4 path; a real v4 send failure still warns per interface.
+                .with_ip_class(IpClass::V4Only)
+                .with_callback(move |name, peer| sink.record(name, peer));
+            // Registering no addresses is how the dependency spells browse-only: it keeps querying and
+            // reading responses, and puts no record of its own on the wire.
+            if let Some((port, addrs, egress)) = &announce {
+                service = service
+                    .with_addrs(*port, addrs.iter().copied())
+                    .with_multicast_interfaces_v4(egress.clone());
+            }
+            service
+                .spawn(&handle)
+                .map_err(|err| MdnsError::Spawn(Box::new(err)))
+        };
+
+        let first = start(name::fresh(&node).map_err(MdnsError::Entropy)?)?;
+        let current = Arc::new(Mutex::new(Some(first)));
+        let rotation = announces.then(|| tokio::spawn(rotate(node, Arc::clone(&current), start)));
 
         Ok(Started {
             discovery: Self {
                 heard: Some(heard),
-                _service: Some(service),
+                _service: Some(Service { current, rotation }),
             },
             advertising,
         })
@@ -239,16 +332,36 @@ struct Heard {
     settles_at: Instant,
 }
 
-/// The peers heard on the LAN, and who is waiting to hear about which of them.
+/// The names heard on the LAN, and who is waiting to hear about which node.
 #[derive(Default)]
 struct Table {
-    peers: HashMap<NodeId, Vec<SocketAddr>>,
+    /// Keyed by the name heard, because a node is heard under a new name at every rotation and
+    /// each name expires on its own.
+    peers: HashMap<String, Entry>,
     /// One wake channel per node someone is subscribed to. Per node, so an observation of one peer
-    /// wakes only that peer's subscribers and a flood on other keys wakes no one else. A `watch`
+    /// wakes only that peer's subscribers and a flood of other names wakes no one else. A `watch`
     /// because a wake only says "re-read the table": it holds no value, so a burst of them
     /// collapses into one. Entries are made by [`Heard::watch`] alone, so their number is bounded by
-    /// this process's own subscriptions, never by the network.
-    watchers: HashMap<NodeId, watch::Sender<()>>,
+    /// this process's own subscriptions, never by the network. They are also the only keys a heard
+    /// name is ever tested against.
+    watchers: HashMap<NodeId, Watcher>,
+}
+
+/// One name heard on the LAN.
+struct Entry {
+    /// The subscribed node this name belongs to, or `None` when it matched no subscription. Tested
+    /// once, when the name is first heard or when a new subscription arrives, never per record.
+    node: Option<NodeId>,
+    hints: Vec<SocketAddr>,
+    /// When this name was last heard, so the freshest of a node's names answers for it and a full
+    /// table evicts the oldest unmatched name first.
+    heard: Instant,
+}
+
+/// A subscribed node: its subscribers' wake channel, and what recognises its names.
+struct Watcher {
+    wake: watch::Sender<()>,
+    names: Resolver,
 }
 
 impl Heard {
@@ -259,24 +372,22 @@ impl Heard {
         }
     }
 
-    /// A panic can only have come from an allocation inside a map write, which leaves the map
-    /// itself sound, so a poisoned lock is recovered rather than turning every later dial into one.
     fn table(&self) -> MutexGuard<'_, Table> {
-        self.table.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.table)
     }
 
-    /// Record a browse observation, keyed by the peer's parsed [`NodeId`].
+    /// Record a browse observation, keyed by the instance name.
     ///
-    /// The peer's instance name is a [`NodeId`] string; anything that does not parse (a foreign
-    /// service instance sharing the name) is ignored rather than erroring. An expired peer is dropped
+    /// The instance name is a blinded name (see `name`); a name that matches no subscribed key is
+    /// held unmatched, and anything that does not decode is ignored. An expired name is dropped
     /// from the table so a stale address is never offered.
-    fn record(&self, peer_id: &str, peer: &Peer) {
-        let Ok(node) = peer_id.parse::<NodeId>() else {
-            tracing::trace!(peer_id, "ignoring an mDNS instance that is not a node id");
+    fn record(&self, name: &str, peer: &Peer) {
+        if !name::decodes(name) {
+            tracing::trace!(name, "ignoring an mDNS instance that is not a bifrost name");
             return;
-        };
+        }
         if peer.is_expiry() {
-            self.forget(node);
+            self.expire(name);
             return;
         }
         let hints = shape(
@@ -284,57 +395,124 @@ impl Heard {
                 .iter()
                 .map(|(ip, port)| SocketAddr::new(*ip, *port)),
         );
-        tracing::debug!(node = %node.short(), count = hints.len(), "discovered peer over mDNS");
-        self.learn(node, hints);
+        self.learn(name, hints);
     }
 
-    /// Hold `hints` for `node` and wake its subscribers. The wake follows the write, so a woken
-    /// subscription always re-reads a table that already includes it.
-    fn learn(&self, node: NodeId, hints: Vec<SocketAddr>) {
+    /// Hold `hints` under `name` and wake the subscribers of the node it belongs to. The wake
+    /// follows the write, so a woken subscription always re-reads a table that already includes it.
+    ///
+    /// A new name is tested once against each subscribed key, and the answer is kept: a
+    /// re-announcement costs a map lookup.
+    fn learn(&self, name: &str, hints: Vec<SocketAddr>) {
         let mut table = self.table();
-        // Refuse a NEW entry past the cap so an on-LAN flood of distinct fake NodeIds cannot grow
-        // this map without bound. A known peer still updates, so real churn is unaffected.
-        if table.peers.len() >= MAX_PEERS && !table.peers.contains_key(&node) {
+        let heard = Instant::now();
+        if let Some(entry) = table.peers.get_mut(name) {
+            entry.hints = hints;
+            entry.heard = heard;
+            if let Some(node) = entry.node {
+                table.wake(node);
+            }
             return;
         }
-        table.peers.insert(node, hints);
-        table.wake(node);
+        // A NEW name past the cap takes the place of the oldest unmatched one, so an on-LAN flood
+        // cannot grow this map without bound and cannot push out a peer someone is waiting on.
+        // With every entry matched, the new name is refused.
+        if table.peers.len() >= MAX_PEERS && !table.evict_unmatched() {
+            return;
+        }
+        let node = table.resolve(name);
+        if let Some(node) = node {
+            tracing::debug!(node = %node.short(), count = hints.len(), "discovered peer over mDNS");
+        }
+        table
+            .peers
+            .insert(name.to_owned(), Entry { node, hints, heard });
+        if let Some(node) = node {
+            table.wake(node);
+        }
     }
 
-    /// Drop `node` from the table and wake its subscribers.
-    fn forget(&self, node: NodeId) {
+    /// Drop `name` from the table and wake the subscribers of the node it belonged to.
+    ///
+    /// Only that name goes: a node heard under a newer name keeps it, so a rotated-out name's
+    /// goodbye never takes away what the fresh name already said.
+    fn expire(&self, name: &str) {
         let mut table = self.table();
-        table.peers.remove(&node);
-        table.wake(node);
+        if let Some(Entry {
+            node: Some(node), ..
+        }) = table.peers.remove(name)
+        {
+            table.wake(node);
+        }
     }
 
-    /// What is held for `node` right now; empty when nothing is.
+    /// What is held for `node` right now, from the name it was most recently heard under; empty
+    /// when nothing is.
     fn held(&self, node: NodeId) -> Vec<SocketAddr> {
-        self.table().peers.get(&node).cloned().unwrap_or_default()
+        self.table()
+            .peers
+            .values()
+            .filter(|entry| entry.node == Some(node))
+            .max_by_key(|entry| entry.heard)
+            .map(|entry| entry.hints.clone())
+            .unwrap_or_default()
     }
 
     /// A wake receiver for `node`, created with the current state already seen.
     ///
-    /// Channels no subscription holds any more are pruned here, the one place entries are made, so
-    /// the map never holds more than the live subscriptions plus the one being made.
+    /// A new subscription tests the names held unmatched once against its key, so a node heard
+    /// before anyone asked for it is found. Channels no subscription holds any more are pruned
+    /// here, the one place entries are made, so the map never holds more than the live
+    /// subscriptions plus the one being made.
     fn watch(&self, node: NodeId) -> watch::Receiver<()> {
         let mut table = self.table();
-        table
-            .watchers
-            .retain(|_, sender| sender.receiver_count() > 0);
-        table
-            .watchers
+        let Table { peers, watchers } = &mut *table;
+        watchers.retain(|_, watcher| watcher.wake.receiver_count() > 0);
+        watchers
             .entry(node)
-            .or_insert_with(|| watch::channel(()).0)
+            .or_insert_with(|| {
+                let names = Resolver::of(&node);
+                for (name, entry) in peers.iter_mut() {
+                    if entry.node.is_none() && names.matches(name) {
+                        entry.node = Some(node);
+                    }
+                }
+                Watcher {
+                    wake: watch::channel(()).0,
+                    names,
+                }
+            })
+            .wake
             .subscribe()
     }
 }
 
 impl Table {
     fn wake(&self, node: NodeId) {
-        if let Some(sender) = self.watchers.get(&node) {
-            sender.send_replace(());
+        if let Some(watcher) = self.watchers.get(&node) {
+            watcher.wake.send_replace(());
         }
+    }
+
+    /// The live subscription `name` belongs to, if any. Tests against subscribed keys only, so a
+    /// node that dials no one tests nothing.
+    fn resolve(&self, name: &str) -> Option<NodeId> {
+        self.watchers
+            .iter()
+            .filter(|(_, watcher)| watcher.wake.receiver_count() > 0)
+            .find(|(_, watcher)| watcher.names.matches(name))
+            .map(|(node, _)| *node)
+    }
+
+    /// Drop the oldest name that matched no subscription; `false` when every name matched one.
+    fn evict_unmatched(&mut self) -> bool {
+        let oldest = self
+            .peers
+            .iter()
+            .filter(|(_, entry)| entry.node.is_none())
+            .min_by_key(|(_, entry)| entry.heard)
+            .map(|(name, _)| name.clone());
+        oldest.is_some_and(|name| self.peers.remove(&name).is_some())
     }
 }
 
@@ -413,9 +591,9 @@ impl Span {
 
 /// Why an advertisement could not be made.
 ///
-/// Only [`Spawn`](Self::Spawn) stops the service: the rest name an advertisement that could not be
-/// composed, which leaves the node browsing and is carried as the cause of
-/// [`Advertising::BrowseOnly`].
+/// Only [`Spawn`](Self::Spawn) and [`Entropy`](Self::Entropy) stop the service: the rest name an
+/// advertisement that could not be composed, which leaves the node browsing and is carried as the
+/// cause of [`Advertising::BrowseOnly`].
 #[derive(Debug, thiserror::Error)]
 pub enum MdnsError {
     /// No local addresses were supplied to advertise.
@@ -435,11 +613,17 @@ pub enum MdnsError {
     /// `Result<_, MdnsError>` in the crate for a cold error path.
     #[error("spawn mdns service")]
     Spawn(#[source] Box<swarm_discovery::SpawnError>),
+    /// The system gave no randomness for the name to announce under. The service refuses to start
+    /// rather than announce under a guessable name, and never falls back to the key.
+    #[error("draw randomness for the mdns name")]
+    Entropy(#[source] getrandom::Error),
 }
 
 #[cfg(test)]
 mod host_tests;
 #[cfg(test)]
 mod lib_tests;
+#[cfg(test)]
+mod name_tests;
 #[cfg(test)]
 mod publish_tests;
