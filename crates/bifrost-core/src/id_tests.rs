@@ -95,7 +95,7 @@ fn the_key_text_is_the_shared_vector() {
 #[test]
 fn an_uppercase_key_text_parses() {
     let id = NodeId::new(CryptoKind::Ed25519, [1; 32]);
-    assert_eq!(SHARED_VECTOR.to_uppercase().parse::<NodeId>(), Ok(id));
+    assert_eq!(SHARED_VECTOR.to_ascii_uppercase().parse::<NodeId>(), Ok(id));
 }
 
 #[test]
@@ -111,4 +111,26 @@ fn rejects_wrong_length() {
         err,
         NodeIdParseError::WrongLength | NodeIdParseError::BadEncoding
     ));
+}
+
+/// `text` with the first `ascii` after the tag swapped for `lookalike`.
+fn swap_first(text: &str, ascii: char, lookalike: char) -> String {
+    let (tag, body) = text.split_at(4);
+    format!("{tag}{}", body.replacen(ascii, &lookalike.to_string(), 1))
+}
+
+#[test]
+fn a_long_s_in_place_of_s_is_refused() {
+    // U+017F uppercases to ASCII `S` under Unicode rules, so a Unicode fold would read this as the key.
+    // Key bytes `[37; 32]` print a key text that holds an `s`.
+    let id = NodeId::new(CryptoKind::Ed25519, [37; 32]);
+    let text = swap_first(&id.to_string(), 's', '\u{17F}');
+    assert_eq!(text.parse::<NodeId>(), Err(NodeIdParseError::BadEncoding));
+}
+
+#[test]
+fn a_dotless_i_in_place_of_i_is_refused() {
+    // U+0131 uppercases to ASCII `I` under Unicode rules.
+    let text = swap_first(SHARED_VECTOR, 'i', '\u{131}');
+    assert_eq!(text.parse::<NodeId>(), Err(NodeIdParseError::BadEncoding));
 }
