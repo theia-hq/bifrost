@@ -16,16 +16,17 @@ pub enum CryptoKind {
 }
 
 impl CryptoKind {
-    /// The four-character wire tag for this suite. Stable across releases.
+    /// The suite tag at the front of a key's text (`ed01` is Ed25519). Stable across releases; the key
+    /// text format is the tag, then the key in RFC 4648 base32, lowercase, unpadded.
     pub const fn tag(self) -> &'static str {
         match self {
-            Self::Ed25519 => "bf01",
+            Self::Ed25519 => "ed01",
         }
     }
 
     fn from_tag(tag: &str) -> Option<Self> {
         match tag {
-            "bf01" => Some(Self::Ed25519),
+            t if t.eq_ignore_ascii_case("ed01") => Some(Self::Ed25519),
             _ => None,
         }
     }
@@ -109,7 +110,7 @@ pub fn derive_ed25519_child_secret(
     label: &str,
 ) -> Zeroizing<[u8; NodeId::KEY_LEN]> {
     Zeroizing::new(blake3::derive_key(
-        &format!("theia device identity v1: {label}"),
+        &format!("bifrost device identity v1: {label}"),
         root,
     ))
 }
@@ -149,7 +150,7 @@ impl FromStr for NodeId {
 /// Why a string could not be parsed into a [`NodeId`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NodeIdParseError {
-    /// The input was shorter than the four-character suite tag.
+    /// The input was shorter than the suite tag.
     #[error("identity string too short")]
     TooShort,
     /// The suite tag was not recognized.

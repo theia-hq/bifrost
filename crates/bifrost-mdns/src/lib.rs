@@ -52,11 +52,11 @@ mod publish;
 pub use host::{At, Dialable, Expiring, Missing, Scope, ScopeClass};
 pub use publish::{Advertised, Advertising};
 
-/// The mDNS service all theia nodes advertise and browse under: `_theia._udp.local.`.
+/// The mDNS service every bifrost node advertises and browses under: `_bifrost._udp.local.`.
 ///
-/// A single shared service name is what lets any two theia nodes find each other regardless of which
+/// A single shared service name is what lets any two bifrost nodes find each other regardless of which
 /// transport each bound: discovery names WHO, the transport decides HOW.
-const SERVICE: &str = "theia";
+const SERVICE: &str = "bifrost";
 
 /// How long a fresh browse gets to hear a node before a miss is final for this source.
 ///
@@ -113,7 +113,7 @@ pub struct Started {
 }
 
 impl MdnsDiscovery {
-    /// Start advertising `node` at the sockets it bound, and browsing the LAN for other theia nodes.
+    /// Start advertising `node` at the sockets it bound, and browsing the LAN for other bifrost nodes.
     ///
     /// `bound` is bind truth: the sockets the node's transport is bound to, with an unspecified IP
     /// (`0.0.0.0`, `[::]`) left as bound rather than rewritten to loopback, which is what
@@ -267,12 +267,12 @@ impl Heard {
 
     /// Record a browse observation, keyed by the peer's parsed [`NodeId`].
     ///
-    /// The peer's instance name is a theia [`NodeId`] string; anything that does not parse (a foreign
+    /// The peer's instance name is a [`NodeId`] string; anything that does not parse (a foreign
     /// service instance sharing the name) is ignored rather than erroring. An expired peer is dropped
     /// from the table so a stale address is never offered.
     fn record(&self, peer_id: &str, peer: &Peer) {
         let Ok(node) = peer_id.parse::<NodeId>() else {
-            tracing::trace!(peer_id, "ignoring non-theia mDNS instance");
+            tracing::trace!(peer_id, "ignoring an mDNS instance that is not a node id");
             return;
         };
         if peer.is_expiry() {

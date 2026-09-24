@@ -63,14 +63,39 @@ fn a_child_secret_is_domain_separated_from_the_root_and_other_derivations() {
     // primitive with a DIFFERENT context; a device seed and any sibling seed for one root must never
     // coincide, or adopting a device would leak the sibling seed (and vice versa). This pins the separation
     // so a refactor that collapses the contexts trips here.
-    let sibling_seed = blake3::derive_key("theia sibling derivation v1", &root);
+    let sibling_seed = blake3::derive_key("bifrost sibling derivation v1", &root);
     assert_ne!(*child, sibling_seed);
+}
+
+#[test]
+fn a_child_secret_uses_the_bifrost_context() {
+    assert_eq!(
+        *derive_ed25519_child_secret(&[9; 32], "desk"),
+        blake3::derive_key("bifrost device identity v1: desk", &[9; 32])
+    );
 }
 
 #[test]
 fn display_carries_the_suite_tag() {
     let id = NodeId::new(CryptoKind::Ed25519, [0u8; NodeId::KEY_LEN]);
-    assert!(id.to_string().starts_with("bf01"));
+    assert!(id.to_string().starts_with("ed01"));
+}
+
+/// The key text format both libraries print: this literal is asserted byte for byte wherever an
+/// Ed25519 key is printed in it, so either side drifting fails its own CI.
+const SHARED_VECTOR: &str = "ed01aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq";
+
+#[test]
+fn the_key_text_is_the_shared_vector() {
+    let id = NodeId::new(CryptoKind::Ed25519, [1; 32]);
+    assert_eq!(id.to_string(), SHARED_VECTOR);
+    assert_eq!(SHARED_VECTOR.parse::<NodeId>(), Ok(id));
+}
+
+#[test]
+fn an_uppercase_key_text_parses() {
+    let id = NodeId::new(CryptoKind::Ed25519, [1; 32]);
+    assert_eq!(SHARED_VECTOR.to_uppercase().parse::<NodeId>(), Ok(id));
 }
 
 #[test]
@@ -81,7 +106,7 @@ fn rejects_unknown_suite() {
 
 #[test]
 fn rejects_wrong_length() {
-    let err = "bf01aa".parse::<NodeId>().unwrap_err();
+    let err = "ed01aa".parse::<NodeId>().unwrap_err();
     assert!(matches!(
         err,
         NodeIdParseError::WrongLength | NodeIdParseError::BadEncoding
