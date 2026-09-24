@@ -8,7 +8,7 @@
 //!
 //! | offset | len | field                                                           |
 //! | ------ | --- | --------------------------------------------------------------- |
-//! | 0      | 8   | signature `THEIAKEY`                                            |
+//! | 0      | 8   | signature `KEYSTORE`                                            |
 //! | 8      | 1   | format version, `1`                                             |
 //! | 9      | 1   | file kind, `1` = a device key, `2` = a root key                 |
 //! | 10     | 1   | protection method, `1` = passphrase                             |
@@ -52,7 +52,7 @@ use crate::secret::{SEED_LEN, Secret};
 /// already holds happens to open with the signature (and would then be refused as a damaged sealed
 /// file) is one in 2^64, where four would make it one in 2^32. The version lives in its own byte for
 /// the same reason: the signature never changes, so it can never collide with itself.
-pub(crate) const SIGNATURE: [u8; 8] = *b"THEIAKEY";
+pub(crate) const SIGNATURE: [u8; 8] = *b"KEYSTORE";
 
 /// The one format version this build reads and writes.
 const VERSION: u8 = 1;

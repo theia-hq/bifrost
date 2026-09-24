@@ -109,7 +109,7 @@ pub fn derive_ed25519_child_secret(
     label: &str,
 ) -> Zeroizing<[u8; NodeId::KEY_LEN]> {
     Zeroizing::new(blake3::derive_key(
-        &format!("theia device identity v1: {label}"),
+        &format!("bifrost device identity v1: {label}"),
         root,
     ))
 }
