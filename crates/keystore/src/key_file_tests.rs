@@ -94,7 +94,6 @@ fn a_sealed_write_names_its_node_locked_and_opens_to_the_same_key() {
     assert_eq!(dir.names(), ["identity.key"]);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_sealed_file_opens_with_the_keystore_signature() {
     let dir = TestDir::new();
@@ -102,6 +101,7 @@ fn a_sealed_file_opens_with_the_keystore_signature() {
     assert_eq!(&bytes(&file)[..8], b"KEYSTORE");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_written_key_is_owner_only() {
     use std::os::unix::fs::PermissionsExt as _;
