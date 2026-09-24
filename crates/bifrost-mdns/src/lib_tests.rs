@@ -503,7 +503,12 @@ async fn the_name_rotates() {
     };
     let first = start(named(serving)).expect("starts");
     let current = Arc::new(Mutex::new(Some(first)));
-    let rotation = tokio::spawn(rotate(serving, Arc::clone(&current), start));
+    let rotation = tokio::spawn(rotate(
+        serving,
+        Arc::clone(&current),
+        Arc::clone(&heard),
+        start,
+    ));
 
     assert_eq!(
         feed.next().await.and_then(Result::ok),
@@ -528,6 +533,51 @@ async fn the_name_rotates() {
     assert!(
         quiet_for(&mut feed, Duration::from_millis(100)).await,
         "the subscriber still holds the node across the change"
+    );
+    rotation.abort();
+}
+
+/// Swapping in a new service drops the old browse, and with it the only thing that would have
+/// expired the names it heard. A name the new browse does not hear again is dropped once it has had
+/// time to, so a peer that left is said to be gone and its old address is not offered for good.
+#[tokio::test(start_paused = true)]
+async fn a_name_the_new_browse_never_hears_is_dropped() {
+    let (mdns, heard) = fresh();
+    let (left, stays) = (node(93), node(94));
+    let mut left_feed = mdns.subscribe(left);
+    let _stays_feed = mdns.subscribe(stays);
+    let stays_name = named(stays);
+    heard.learn(&named(left), vec![addr(4093)]);
+    heard.learn(&stays_name, vec![addr(4094)]);
+    assert_eq!(
+        left_feed.next().await.and_then(Result::ok),
+        Some(AddrUpdate::Hints(vec![addr(4093)]))
+    );
+
+    let current = Arc::new(Mutex::new(Some(())));
+    let rotation = tokio::spawn(rotate(
+        node(95),
+        Arc::clone(&current),
+        Arc::clone(&heard),
+        |_| Ok::<_, MdnsError>(()),
+    ));
+    time::sleep(ROTATE + Duration::from_millis(100)).await;
+    heard.learn(&stays_name, vec![addr(4094)]);
+
+    assert_eq!(
+        time::timeout(Duration::from_secs(60), left_feed.next())
+            .await
+            .ok()
+            .flatten()
+            .and_then(Result::ok),
+        Some(AddrUpdate::Removed),
+        "a peer the new browse never hears is said to be gone"
+    );
+    assert!(heard.held(left).is_empty());
+    assert_eq!(
+        heard.held(stays),
+        vec![addr(4094)],
+        "a peer the new browse hears again stays"
     );
     rotation.abort();
 }

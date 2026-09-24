@@ -83,6 +83,9 @@ const SETTLE_WINDOW: Duration = Duration::from_millis(1500);
 /// clock and never reads the wall clock.
 const ROTATE: Duration = Duration::from_secs(15 * 60);
 
+/// How often the browse queries: what `Discoverer::new_interactive` sets.
+const CADENCE: Duration = Duration::from_millis(700);
+
 /// LAN discovery over mDNS: advertises this node and learns peers heard on the local network.
 ///
 /// Construction starts the service immediately (advertising as well, where the bind gives it
@@ -133,13 +136,20 @@ impl Drop for Service {
 /// `start` builds and starts a service under the name it is given. The next service is started
 /// before the old one is dropped. A name or a service that cannot be made keeps the one running and
 /// is tried again at the next turn: the fallback is the current blinded name, never the key.
+///
+/// The old service's browse goes with it, and only that browse would have expired the names it
+/// heard. So once the new browse has had time to hear every name again, the names it has not heard
+/// are dropped from `heard`: a peer that left while the swap was under way is said to be gone.
 async fn rotate<G>(
     node: NodeId,
     current: Arc<Mutex<Option<G>>>,
+    heard: Arc<Heard>,
     mut start: impl FnMut(String) -> Result<G, MdnsError>,
 ) {
+    let mut turn = Instant::now();
     loop {
-        time::sleep(ROTATE).await;
+        time::sleep_until(turn + ROTATE).await;
+        turn = Instant::now();
         let next = match name::fresh(&node)
             .map_err(MdnsError::Entropy)
             .and_then(&mut start)
@@ -158,6 +168,8 @@ async fn rotate<G>(
             slot.replace(next)
         };
         drop(old);
+        time::sleep(heard.rehear_window()).await;
+        heard.forget_unheard_since(turn);
     }
 }
 
@@ -258,7 +270,14 @@ impl MdnsDiscovery {
 
         let first = start(name::fresh(&node).map_err(MdnsError::Entropy)?)?;
         let current = Arc::new(Mutex::new(Some(first)));
-        let rotation = announces.then(|| tokio::spawn(rotate(node, Arc::clone(&current), start)));
+        let rotation = announces.then(|| {
+            tokio::spawn(rotate(
+                node,
+                Arc::clone(&current),
+                Arc::clone(&heard),
+                start,
+            ))
+        });
 
         Ok(Started {
             discovery: Self {
@@ -445,6 +464,32 @@ impl Heard {
             node: Some(node), ..
         }) = table.peers.remove(name)
         {
+            table.wake(node);
+        }
+    }
+
+    /// How long a fresh browse gets to hear again every name held now.
+    ///
+    /// The dependency's own expiry rule at [`CADENCE`]: at most two peers answer each query, and a
+    /// peer gets three of its turns before it counts as gone.
+    fn rehear_window(&self) -> Duration {
+        let turns = self.table().peers.len().div_ceil(2).max(1);
+        CADENCE * 3 * u32::try_from(turns).unwrap_or(u32::MAX)
+    }
+
+    /// Drop every name not heard since `since`, and wake the subscribers of the nodes they belonged
+    /// to.
+    fn forget_unheard_since(&self, since: Instant) {
+        let mut table = self.table();
+        let mut gone = Vec::new();
+        table.peers.retain(|_, entry| {
+            let keep = entry.heard >= since;
+            if !keep && let Some(node) = entry.node {
+                gone.push(node);
+            }
+            keep
+        });
+        for node in gone {
             table.wake(node);
         }
     }
