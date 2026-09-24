@@ -9,7 +9,10 @@ rust-version.workspace = true
 [dependencies]
 bifrost-core.workspace = true
 
+blake3.workspace = true
+data-encoding.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 if-addrs.workspace = true
 swarm-discovery.workspace = true
 thiserror.workspace = true
@@ -23,6 +26,9 @@ tracing.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# The raw listener `no_record_carries_the_key` reads the wire with. Already in this tree underneath
+# `swarm-discovery`, which binds the same port the same way.
+socket2 = { version = "0.6", features = ["all"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
 
 [lints]

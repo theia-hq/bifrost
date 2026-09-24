@@ -225,9 +225,13 @@ name = "bifrost-mdns"
 version = "0.0.0"
 dependencies = [
  "bifrost-core",
+ "blake3",
+ "data-encoding",
  "futures-util",
+ "getrandom 0.4.3",
  "if-addrs",
  "libc",
+ "socket2",
  "swarm-discovery",
  "thiserror 2.0.20",
  "tokio",

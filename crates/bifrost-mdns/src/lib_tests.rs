@@ -13,14 +13,18 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Waker};
 use core::time::Duration;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::Wake;
 
 use bifrost_core::{AddrUpdate, CryptoKind, Discovery, HintStream, NodeId};
 use futures_util::{Stream, StreamExt as _};
 use tokio::time::{self, Instant};
 
-use super::{Heard, MAX_HINTS, MdnsDiscovery, SERVICE, SETTLE_WINDOW, shape};
+use super::name::counter::matches_run;
+use super::{
+    Heard, MAX_HINTS, MAX_NAMES_PER_NODE, MAX_PEERS, MdnsDiscovery, MdnsError, ROTATE, SERVICE,
+    SETTLE_WINDOW, name, rotate, shape,
+};
 
 /// Every node announces and browses under the protocol's own name, `_bifrost._udp.local.`.
 #[test]
@@ -115,7 +119,7 @@ async fn a_node_heard_after_subscribing_reaches_the_subscriber() {
     );
 
     let asked = Instant::now();
-    heard.learn(target, vec![addr(4040)]);
+    heard.learn(&named(target), vec![addr(4040)]);
 
     assert_eq!(
         feed.next().await.and_then(Result::ok),
@@ -137,13 +141,13 @@ async fn a_self_observation_does_not_release_the_target() {
     let target = node(41);
     let mut feed = mdns.subscribe(target);
 
-    heard.learn(node(1), vec![addr(4001)]);
+    heard.learn(&named(node(1)), vec![addr(4001)]);
     assert!(
         quiet_for(&mut feed, Duration::from_millis(100)).await,
         "another peer's record must not release the target's feed"
     );
 
-    heard.learn(target, vec![addr(4041)]);
+    heard.learn(&named(target), vec![addr(4041)]);
     assert_eq!(
         feed.next().await.and_then(Result::ok),
         Some(AddrUpdate::Hints(vec![addr(4041)]))
@@ -167,7 +171,7 @@ async fn records_for_other_nodes_never_wake_the_subscriber() {
             .is_pending()
     );
     for seed in 100..200 {
-        heard.learn(node(seed), vec![addr(u16::from(seed))]);
+        heard.learn(&named(node(seed)), vec![addr(u16::from(seed))]);
     }
     assert_eq!(
         wakes.count(),
@@ -175,7 +179,7 @@ async fn records_for_other_nodes_never_wake_the_subscriber() {
         "records for other nodes must not wake this subscriber"
     );
 
-    heard.learn(target, vec![addr(4042)]);
+    heard.learn(&named(target), vec![addr(4042)]);
     assert_eq!(wakes.count(), 1, "the target's own record wakes it");
 }
 
@@ -225,9 +229,10 @@ async fn a_slow_subscriber_gets_the_latest_state_not_a_backlog() {
     let (mdns, heard) = fresh();
     let target = node(45);
     let mut feed = mdns.subscribe(target);
+    let name = named(target);
 
     for port in 1..=1000 {
-        heard.learn(target, vec![addr(port)]);
+        heard.learn(&name, vec![addr(port)]);
     }
 
     assert_eq!(
@@ -248,14 +253,15 @@ async fn a_removal_is_said_only_after_hints() {
     let (mdns, heard) = fresh();
     let target = node(46);
     let mut told = mdns.subscribe(target);
-    heard.learn(target, vec![addr(4046)]);
+    let name = named(target);
+    heard.learn(&name, vec![addr(4046)]);
     assert_eq!(
         told.next().await.and_then(Result::ok),
         Some(AddrUpdate::Hints(vec![addr(4046)]))
     );
 
     let mut untold = mdns.subscribe(target);
-    heard.forget(target);
+    heard.expire(&name);
 
     assert_eq!(
         told.next().await.and_then(Result::ok),
@@ -289,7 +295,7 @@ async fn dropping_the_service_ends_its_feeds() {
     let target = node(71);
     let mut waiting = mdns.subscribe(node(72));
     let mut answered = mdns.subscribe(target);
-    heard.learn(target, vec![addr(7201)]);
+    heard.learn(&named(target), vec![addr(7201)]);
     assert_eq!(
         answered.next().await.and_then(Result::ok),
         Some(AddrUpdate::Hints(vec![addr(7201)]))
@@ -344,6 +350,256 @@ fn a_hint_set_is_capped_and_leads_with_a_routed_address() {
     );
 }
 
+/// A rotated-out name's goodbye takes that name only: the peer its fresh name already taught
+/// stays, and its subscriber is not told it went.
+#[tokio::test(start_paused = true)]
+async fn a_rotated_names_goodbye_keeps_the_peer() {
+    let (mdns, heard) = fresh();
+    let target = node(80);
+    let mut feed = mdns.subscribe(target);
+    let (old, new) = (named(target), named(target));
+
+    heard.learn(&old, vec![addr(4080)]);
+    assert_eq!(
+        feed.next().await.and_then(Result::ok),
+        Some(AddrUpdate::Hints(vec![addr(4080)]))
+    );
+    time::advance(Duration::from_secs(1)).await;
+    heard.learn(&new, vec![addr(4081)]);
+    assert_eq!(
+        feed.next().await.and_then(Result::ok),
+        Some(AddrUpdate::Hints(vec![addr(4081)])),
+        "the freshest name answers for the node"
+    );
+
+    heard.expire(&old);
+    assert_eq!(heard.held(target), vec![addr(4081)]);
+    assert!(
+        quiet_for(&mut feed, Duration::from_millis(100)).await,
+        "the old name's goodbye does not remove the peer"
+    );
+}
+
+/// A flood of names nobody asked for fills the table only up to its cap, and pushes out only its
+/// own kind: the matched peer stays.
+#[tokio::test(start_paused = true)]
+async fn a_flood_never_evicts_a_matched_peer() {
+    let (mdns, heard) = fresh();
+    let target = node(81);
+    let _feed = mdns.subscribe(target);
+    heard.learn(&named(target), vec![addr(4081)]);
+    // The matched peer is the oldest name held, so only a preference for unmatched names keeps it.
+    time::advance(Duration::from_secs(1)).await;
+
+    let stranger = node(82);
+    for _ in 0..5_000 {
+        heard.learn(&named(stranger), vec![addr(1)]);
+    }
+
+    assert!(heard.table().peers.len() <= MAX_PEERS);
+    assert_eq!(heard.held(target), vec![addr(4081)]);
+}
+
+/// A name replayed with its letters in other cases is not a second name for the same node, so a
+/// replay of one peer's name cannot fill the table and shut out another peer.
+#[tokio::test(start_paused = true)]
+async fn a_name_in_capitals_is_not_a_second_name() {
+    let (mdns, heard) = fresh();
+    let (n, m) = (node(85), node(86));
+    let (_n_feed, _m_feed) = (mdns.subscribe(n), mdns.subscribe(m));
+    let real = named(n);
+    heard.learn(&real, vec![addr(4085)]);
+    for copy in 0..2_000_usize {
+        let spelled: String = real
+            .chars()
+            .enumerate()
+            .map(|(at, c)| {
+                if (copy >> (at % usize::BITS as usize)) & 1 == 1 {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                }
+            })
+            .collect();
+        heard.learn(&spelled, vec![addr(1)]);
+    }
+
+    heard.learn(&named(m), vec![addr(4086)]);
+    assert_eq!(heard.held(m), vec![addr(4086)], "m is heard");
+    heard.expire(&real);
+    assert!(heard.held(n).is_empty(), "n's goodbye takes all of n");
+}
+
+/// Anyone who holds a subscribed key can mint names that match it without end. They take the place
+/// of that node's own older names, never another peer's, so the flood shuts no one else out.
+#[tokio::test(start_paused = true)]
+async fn a_key_holders_flood_never_locks_out_another_peer() {
+    let (mdns, heard) = fresh();
+    let (n, m) = (node(87), node(88));
+    let (_n_feed, _m_feed) = (mdns.subscribe(n), mdns.subscribe(m));
+    for _ in 0..5_000 {
+        heard.learn(&named(n), vec![addr(4087)]);
+    }
+
+    heard.learn(&named(m), vec![addr(4088)]);
+    assert_eq!(heard.held(m), vec![addr(4088)], "m is heard");
+    assert_eq!(heard.held(n), vec![addr(4087)], "n is still heard");
+    assert!(heard.table().peers.len() <= MAX_NAMES_PER_NODE + 1);
+}
+
+/// Once no one is subscribed to a node any more, its names are no one's, and a full table gives
+/// them up to a name someone is waiting on.
+#[tokio::test(start_paused = true)]
+async fn a_finished_subscriptions_names_give_way_at_the_cap() {
+    let (mdns, heard) = fresh();
+    for seed in 0..=MAX_PEERS / MAX_NAMES_PER_NODE {
+        let dialed = wide_node(u16::try_from(seed).expect("fits"));
+        let feed = mdns.subscribe(dialed);
+        for _ in 0..MAX_NAMES_PER_NODE {
+            heard.learn(&named(dialed), vec![addr(1)]);
+        }
+        drop(feed);
+    }
+
+    let m = node(90);
+    let _m_feed = mdns.subscribe(m);
+    heard.learn(&named(m), vec![addr(4090)]);
+    assert_eq!(heard.held(m), vec![addr(4090)], "m is heard");
+}
+
+/// A node subscribed to no one tests no name against any key, however many it hears; one whose
+/// dials have all finished is subscribed to no one.
+#[test]
+fn a_server_that_dials_no_one_tests_nothing() {
+    let (mdns, heard) = fresh();
+    drop(mdns.subscribe(node(84)));
+    let before = matches_run();
+    for seed in 0..1_000_u16 {
+        heard.learn(&named(node(seed.to_le_bytes()[0])), vec![addr(seed)]);
+    }
+    assert_eq!(matches_run() - before, 0, "no subscription, no test");
+}
+
+/// Every [`ROTATE`] the node announces under a new name, starting the new service before it
+/// drops the old one, and a peer subscribed here follows it across the change.
+#[tokio::test(start_paused = true)]
+async fn the_name_rotates() {
+    let (mdns, heard) = fresh();
+    let serving = node(83);
+    let mut feed = mdns.subscribe(serving);
+    let log = Arc::new(Mutex::new(Vec::new()));
+
+    let start = {
+        let (heard, log) = (Arc::clone(&heard), Arc::clone(&log));
+        move |name: String| {
+            heard.learn(&name, vec![addr(4083)]);
+            log.lock().expect("log").push(format!("start {name}"));
+            Ok::<_, MdnsError>(Announced {
+                name,
+                heard: Arc::clone(&heard),
+                log: Arc::clone(&log),
+            })
+        }
+    };
+    let first = start(named(serving)).expect("starts");
+    let current = Arc::new(Mutex::new(Some(first)));
+    let rotation = tokio::spawn(rotate(
+        serving,
+        Arc::clone(&current),
+        Arc::clone(&heard),
+        start,
+    ));
+
+    assert_eq!(
+        feed.next().await.and_then(Result::ok),
+        Some(AddrUpdate::Hints(vec![addr(4083)]))
+    );
+    time::sleep(ROTATE + Duration::from_secs(1)).await;
+
+    let log = log.lock().expect("log").clone();
+    assert_eq!(
+        log.len(),
+        3,
+        "a second name started and the first stopped: {log:?}"
+    );
+    let (first, second) = (&log[0]["start ".len()..], &log[1]["start ".len()..]);
+    assert_ne!(first, second, "the name changed");
+    assert_eq!(
+        log[2],
+        format!("stop {first}"),
+        "the old name stops only after the new one starts"
+    );
+    assert_eq!(heard.held(serving), vec![addr(4083)]);
+    assert!(
+        quiet_for(&mut feed, Duration::from_millis(100)).await,
+        "the subscriber still holds the node across the change"
+    );
+    rotation.abort();
+}
+
+/// Swapping in a new service drops the old browse, and with it the only thing that would have
+/// expired the names it heard. A name the new browse does not hear again is dropped once it has had
+/// time to, so a peer that left is said to be gone and its old address is not offered for good.
+#[tokio::test(start_paused = true)]
+async fn a_name_the_new_browse_never_hears_is_dropped() {
+    let (mdns, heard) = fresh();
+    let (left, stays) = (node(93), node(94));
+    let mut left_feed = mdns.subscribe(left);
+    let _stays_feed = mdns.subscribe(stays);
+    let stays_name = named(stays);
+    heard.learn(&named(left), vec![addr(4093)]);
+    heard.learn(&stays_name, vec![addr(4094)]);
+    assert_eq!(
+        left_feed.next().await.and_then(Result::ok),
+        Some(AddrUpdate::Hints(vec![addr(4093)]))
+    );
+
+    let current = Arc::new(Mutex::new(Some(())));
+    let rotation = tokio::spawn(rotate(
+        node(95),
+        Arc::clone(&current),
+        Arc::clone(&heard),
+        |_| Ok::<_, MdnsError>(()),
+    ));
+    time::sleep(ROTATE + Duration::from_millis(100)).await;
+    heard.learn(&stays_name, vec![addr(4094)]);
+
+    assert_eq!(
+        time::timeout(Duration::from_secs(60), left_feed.next())
+            .await
+            .ok()
+            .flatten()
+            .and_then(Result::ok),
+        Some(AddrUpdate::Removed),
+        "a peer the new browse never hears is said to be gone"
+    );
+    assert!(heard.held(left).is_empty());
+    assert_eq!(
+        heard.held(stays),
+        vec![addr(4094)],
+        "a peer the new browse hears again stays"
+    );
+    rotation.abort();
+}
+
+/// A stand-in for a running service under `name`: stopping it says goodbye for that name, as the
+/// real one's records expire.
+struct Announced {
+    name: String,
+    heard: Arc<Heard>,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl Drop for Announced {
+    fn drop(&mut self) {
+        self.heard.expire(&self.name);
+        self.log
+            .lock()
+            .expect("log")
+            .push(format!("stop {}", self.name));
+    }
+}
+
 /// A live-shaped instance with no service behind it, started now: the table is the handle a test
 /// writes through, exactly as the browse callback does.
 fn fresh() -> (MdnsDiscovery, Arc<Heard>) {
@@ -388,9 +644,21 @@ impl Wake for Wakes {
     }
 }
 
+/// A fresh blinded name for `node`, as it would announce.
+fn named(node: NodeId) -> String {
+    name::fresh(&node).expect("the system has randomness")
+}
+
 /// A distinct ed25519 [`NodeId`] seeded by a single byte, enough to tell two test nodes apart.
 fn node(seed: u8) -> NodeId {
     NodeId::new(CryptoKind::Ed25519, [seed; NodeId::KEY_LEN])
+}
+
+/// A distinct ed25519 [`NodeId`] for each of more seeds than one byte holds.
+fn wide_node(seed: u16) -> NodeId {
+    let mut key = [0xaa; NodeId::KEY_LEN];
+    key[..2].copy_from_slice(&seed.to_le_bytes());
+    NodeId::new(CryptoKind::Ed25519, key)
 }
 
 /// A loopback socket address on the given port.
