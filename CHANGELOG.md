@@ -2,6 +2,26 @@
 
 All notable changes to bifrost, newest first.
 
+## v0.7.0
+
+### Breaking
+- **Key text starts with `ed01`**, named for the ed25519 suite. The tag is read in any case.
+  `[1u8; 32]` prints as `ed01aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq`. Node id text is
+  ASCII: non-ASCII input is refused before decoding, and case is folded with ASCII rules only.
+- **The device-identity derivation context is `bifrost device identity v1: {label}`.** Every key derived
+  with `derive_ed25519_child_secret` / `NodeId::derive_ed25519` changes.
+- **A key file starts with `KEYSTORE`.** Files written by earlier versions do not open.
+- **mDNS uses the service `_bifrost._udp`.**
+- **Requires Rust 1.91** (iroh 1.1+ needs it), checked in CI.
+
+### Changed
+- **A serving node no longer announces its key over mDNS.** Its instance name is a random nonce and a
+  tag that only a holder of the node's key can match, renewed at every start and every fifteen minutes;
+  the SRV host carries the same name. A browser tests only the keys it is subscribed to, holds at most
+  four names per node, and drops a name the new browse does not hear after a rotation. Anyone who dials
+  the port still learns the key from the handshake. A node that only dials announces nothing.
+- **Requires iroh 1.1 or later.** iroh 1.0.3 sent the dialed node's key in cleartext TLS SNI.
+
 ## v0.6.1
 
 ### Changed
