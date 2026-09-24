@@ -138,8 +138,14 @@ impl FromStr for NodeId {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let (tag, encoded) = text.split_at_checked(4).ok_or(NodeIdParseError::TooShort)?;
         let kind = CryptoKind::from_tag(tag).ok_or(NodeIdParseError::UnknownSuite)?;
+        // Case folding is ASCII-only and any non-ASCII input is refused first: a Unicode fold maps some
+        // non-ASCII letters onto ASCII ones (`ſ` to `S`, `ı` to `I`), which would let text that is not
+        // the key's text decode to the same bytes.
+        if !encoded.is_ascii() {
+            return Err(NodeIdParseError::BadEncoding);
+        }
         let raw = BASE32_NOPAD
-            .decode(encoded.to_uppercase().as_bytes())
+            .decode(encoded.to_ascii_uppercase().as_bytes())
             .map_err(|_| NodeIdParseError::BadEncoding)?;
         let key =
             <[u8; Self::KEY_LEN]>::try_from(raw).map_err(|_| NodeIdParseError::WrongLength)?;
