@@ -2650,6 +2650,7 @@ dependencies = [
 [[package]]
 name = "quirk"
 version = "0.2.0"
+source = "git+https://github.com/theia-hq/quirk?rev=2ec62493271add1b02d32a81af259bdac7793584#2ec62493271add1b02d32a81af259bdac7793584"
 dependencies = [
  "bytes",
  "ed25519-dalek 2.2.0",
