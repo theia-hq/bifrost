@@ -400,6 +400,36 @@ async fn a_flood_never_evicts_a_matched_peer() {
     assert_eq!(heard.held(target), vec![addr(4081)]);
 }
 
+/// A name replayed with its letters in other cases is not a second name for the same node, so a
+/// replay of one peer's name cannot fill the table and shut out another peer.
+#[tokio::test(start_paused = true)]
+async fn a_name_in_capitals_is_not_a_second_name() {
+    let (mdns, heard) = fresh();
+    let (n, m) = (node(85), node(86));
+    let (_n_feed, _m_feed) = (mdns.subscribe(n), mdns.subscribe(m));
+    let real = named(n);
+    heard.learn(&real, vec![addr(4085)]);
+    for copy in 0..2_000_usize {
+        let spelled: String = real
+            .chars()
+            .enumerate()
+            .map(|(at, c)| {
+                if (copy >> (at % usize::BITS as usize)) & 1 == 1 {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                }
+            })
+            .collect();
+        heard.learn(&spelled, vec![addr(1)]);
+    }
+
+    heard.learn(&named(m), vec![addr(4086)]);
+    assert_eq!(heard.held(m), vec![addr(4086)], "m is heard");
+    heard.expire(&real);
+    assert!(heard.held(n).is_empty(), "n's goodbye takes all of n");
+}
+
 /// A node subscribed to no one tests no name against any key, however many it hears; one whose
 /// dials have all finished is subscribed to no one.
 #[test]

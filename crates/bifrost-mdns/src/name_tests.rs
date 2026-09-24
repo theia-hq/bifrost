@@ -46,12 +46,27 @@ fn a_holder_of_the_key_recognises_the_name() {
     assert!(!Resolver::of(&m).matches(&fresh(&n)));
 }
 
-/// A name spelled in capitals is the same DNS name, and one that is not a name is refused.
+/// A name has one spelling: the lowercase one it is sent in. Anything else is refused.
 #[test]
 fn only_a_name_decodes() {
     let n = node(5);
     let name = fresh(&n);
-    assert!(Resolver::of(&n).matches(&name.to_ascii_uppercase()));
+    assert!(Resolver::of(&n).matches(&name));
+    let mixed: String = name
+        .chars()
+        .enumerate()
+        .map(|(at, c)| {
+            if at % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect();
+    for other in [name.to_ascii_uppercase(), mixed] {
+        assert!(!name::decodes(&other), "{other} is not a name");
+        assert!(!Resolver::of(&n).matches(&other), "{other} is not n's name");
+    }
     assert!(!name::decodes(&n.to_string()), "a key is not a name");
     assert!(!name::decodes(&name[1..]), "a short name is not a name");
     assert!(

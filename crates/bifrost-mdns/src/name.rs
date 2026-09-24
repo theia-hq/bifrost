@@ -39,7 +39,7 @@ pub(crate) fn fresh(node: &NodeId) -> Result<String, getrandom::Error> {
     Ok(BASE32_NOPAD.encode(&raw).to_lowercase())
 }
 
-/// Whether `name` has the shape of a name at all: the right length and base32 throughout.
+/// Whether `name` has the shape of a name at all: the right length and lowercase base32 throughout.
 ///
 /// Checked before any hash, so a record that cannot be a name costs a length check and a decode.
 pub(crate) fn decodes(name: &str) -> bool {
@@ -47,8 +47,11 @@ pub(crate) fn decodes(name: &str) -> bool {
 }
 
 /// The nonce and tag inside `name`, or `None` when it is not a name.
+///
+/// A name has one spelling, the lowercase one it is sent in. Any other would be a second table
+/// entry for the same name, which a replay in mixed case could mint without end.
 fn decode(name: &str) -> Option<[u8; NONCE_LEN + TAG_LEN]> {
-    if name.len() != NAME_LEN {
+    if name.len() != NAME_LEN || !name.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7')) {
         return None;
     }
     let raw = BASE32_NOPAD
