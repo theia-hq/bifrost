@@ -235,7 +235,11 @@ pub(crate) fn parse_payload(payload: &[u8]) -> Result<(NodeId, Signature), Noise
         .map_err(|_| NoiseError::MalformedPayload)?;
     let signature = Signature::from_slice(&payload[NodeId::KEY_LEN..])
         .map_err(|_| NoiseError::SignatureInvalid)?;
-    Ok((NodeId::new(CryptoKind::Ed25519, key), signature))
+    // The claimed key is parsed before anything is attributed to it: a torsioned twin verifies under
+    // `verify_strict` for the holder of the untwisted secret, so the signature check alone would let one
+    // peer answer as a torsioned twin of its own identity.
+    let signer = NodeId::try_new(CryptoKind::Ed25519, key).map_err(NoiseError::PeerKey)?;
+    Ok((signer, signature))
 }
 
 /// Send the cleartext tag, flushed so the peer can read it before any handshake message.

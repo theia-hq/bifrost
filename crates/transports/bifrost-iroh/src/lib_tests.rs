@@ -14,13 +14,13 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use bifrost_core::{
-    Addr, AddrUpdate, CryptoKind, Discovery, Error, HintStream, Layered, NodeId, StaticDiscovery,
+    Addr, AddrUpdate, Discovery, Error, HintStream, KeyError, Layered, NodeId, StaticDiscovery,
 };
 use bifrost_transport::Transport as _;
 use futures_util::{FutureExt as _, stream};
 use tokio::sync::oneshot;
 
-use crate::{Endpoint, Finding, Reach, RelayHome, Resolver};
+use crate::{Endpoint, Finding, Reach, RelayHome, Resolver, peer_of};
 
 /// A bind that finds peers by key dials at once over a feed that never answers; a hints-only bind
 /// has nothing to dial yet, so it is still waiting.
@@ -246,11 +246,33 @@ fn the_declared_profile_is_pinned_to_sealed() {
     );
 }
 
+/// `A + T`: the public key the seed `[7; 32]` binds plus the order-8 torsion point. iroh's key parse
+/// only decompresses, so it takes these bytes as an endpoint id.
+const TWIN_OF_SEVEN: [u8; NodeId::KEY_LEN] = [
+    0x1f, 0x4f, 0x58, 0x0e, 0x73, 0xac, 0x20, 0x8f, 0x06, 0x76, 0x01, 0x90, 0xe9, 0xed, 0xc6, 0xf5,
+    0x91, 0x67, 0x75, 0xda, 0xbd, 0x9c, 0x1c, 0xdc, 0xa3, 0x93, 0x17, 0x5c, 0x2d, 0x6d, 0x10, 0x83,
+];
+
+/// iroh accepts the twin as an endpoint id and its TLS check is `verify_strict`, which the twin's holder
+/// can pass; the peer parse is what refuses it, while the untwisted id parses to the same `NodeId` the
+/// secret derives.
+#[test]
+fn a_twin_endpoint_id_is_refused_by_peer_of() {
+    let twin = iroh::EndpointId::from_bytes(&TWIN_OF_SEVEN).expect("iroh decompresses the twin");
+    assert_eq!(peer_of(twin), Err(KeyError::HasTorsion));
+
+    let untwisted = iroh::SecretKey::from_bytes(&[7; 32]).public();
+    assert_eq!(
+        peer_of(untwisted),
+        Ok(NodeId::from_ed25519_secret(&[7; NodeId::KEY_LEN]))
+    );
+}
+
 /// A reach whose halves are both the caller's own. The hosts are `.invalid`, which resolves nowhere
 /// by definition, so a bind over this one registers its services and reaches no network.
 /// The peer every feed test dials.
 fn peer() -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [0x51; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[0x51; NodeId::KEY_LEN])
 }
 
 /// The dial address a caller holds before discovery: the key and no hints.

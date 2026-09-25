@@ -12,6 +12,7 @@ bifrost-transport.workspace = true
 iroh.workspace = true
 thiserror.workspace = true
 url.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

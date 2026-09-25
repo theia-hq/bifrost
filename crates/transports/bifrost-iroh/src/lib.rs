@@ -8,12 +8,13 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, ConnInfo, CryptoKind, Error, HintStream, Path};
+use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, HintStream, KeyError, Path};
 pub use bifrost_transport::{Sealed, Session, Transport};
 use iroh::endpoint::{
     Connection, PathList, PortmapperConfig, RecvStream, RelayMode, SendStream, presets,
 };
 use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, TransportAddr};
+use zeroize::Zeroizing;
 
 mod reach;
 
@@ -25,6 +26,8 @@ pub const ALPN: &[u8] = b"bifrost/0";
 /// A bound iroh endpoint.
 pub struct Endpoint {
     inner: iroh::Endpoint,
+    /// This endpoint's own identity, derived once at bind from the secret it binds under.
+    node: NodeId,
     /// How this bind finds a peer, which decides whether a dial waits on a discovery feed.
     finding: Finding,
 }
@@ -183,12 +186,19 @@ impl Endpoint {
         secret: SecretKey,
         finding: Finding,
     ) -> Result<Self, BindError> {
+        // Derived from the secret, not parsed from iroh's id: a secret's public half is a canonical
+        // prime-order point, so the own id has nothing to refuse. The copy of the secret is wiped here.
+        let node = NodeId::from_ed25519_secret(&Zeroizing::new(secret.to_bytes()));
         let inner = builder
             .secret_key(secret)
             .alpns(vec![ALPN.to_vec()])
             .bind()
             .await?;
-        Ok(Self { inner, finding })
+        Ok(Self {
+            inner,
+            node,
+            finding,
+        })
     }
 }
 
@@ -197,7 +207,7 @@ impl Transport for Endpoint {
     type Session = IrohSession;
 
     fn node_id(&self) -> NodeId {
-        from_endpoint_id(self.inner.id())
+        self.node
     }
 
     fn local_addr(&self) -> Addr {
@@ -226,7 +236,11 @@ impl Transport for Endpoint {
             .connect(endpoint_addr, ALPN)
             .await
             .map_err(|err| Error::Connect(Box::new(err)))?;
-        Ok(IrohSession { conn })
+        // Cannot fail in practice: iroh's TLS proves the remote holds the dialled id, which is a `NodeId`
+        // that already passed the parse. Kept so `peer` is stored the same way on both sides; the accept
+        // side below is the live refusal.
+        let peer = peer_of(conn.remote_id()).map_err(|err| refuse(&conn, err, Error::Connect))?;
+        Ok(IrohSession { conn, peer })
     }
 
     /// The feed is read as the bind allows ([`Finding::seed`]): a bind that finds peers by key
@@ -242,7 +256,8 @@ impl Transport for Endpoint {
     async fn accept(&self) -> Result<IrohSession, Error> {
         let incoming = self.inner.accept().await.ok_or(Error::Closed)?;
         let conn = incoming.await.map_err(|err| Error::Accept(Box::new(err)))?;
-        Ok(IrohSession { conn })
+        let peer = peer_of(conn.remote_id()).map_err(|err| refuse(&conn, err, Error::Accept))?;
+        Ok(IrohSession { conn, peer })
     }
 
     async fn close(&self) {
@@ -253,6 +268,9 @@ impl Transport for Endpoint {
 /// An iroh session: a single authenticated, encrypted connection.
 pub struct IrohSession {
     conn: Connection,
+    /// The peer's identity, parsed once where the session is built: `peer` is synchronous and cannot
+    /// refuse, so a key that is not a usable identity never becomes a session at all.
+    peer: NodeId,
 }
 
 impl Session for IrohSession {
@@ -261,7 +279,7 @@ impl Session for IrohSession {
     type Read = RecvStream;
 
     fn peer(&self) -> NodeId {
-        from_endpoint_id(self.conn.remote_id())
+        self.peer
     }
 
     async fn open_bi(&self) -> Result<(SendStream, RecvStream), Error> {
@@ -348,8 +366,21 @@ fn loopback_for_unspecified(socket: SocketAddr) -> SocketAddr {
     }
 }
 
-fn from_endpoint_id(id: EndpointId) -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, *id.as_bytes())
+/// The [`NodeId`] an iroh endpoint id names, or why it names none.
+///
+/// iroh's key parse only decompresses, and its TLS check is `verify_strict`, which a torsioned twin
+/// passes for the holder of the untwisted secret. So the id a handshake proved is parsed again here,
+/// and a twin is refused rather than attributed.
+fn peer_of(id: EndpointId) -> Result<NodeId, KeyError> {
+    NodeId::try_new(CryptoKind::Ed25519, *id.as_bytes())
+}
+
+/// Close a connection whose peer key did not parse and classify the refusal as `class` (a dial or an
+/// accept failure), with the [`KeyError`] as its source. The close is explicit, the same one
+/// [`Session::close`] sends, so the peer learns now rather than when the last handle drops.
+fn refuse(conn: &Connection, err: KeyError, class: fn(BoxError) -> Error) -> Error {
+    conn.close(0u32.into(), b"closed");
+    class(Box::new(err))
 }
 
 fn to_endpoint_addr(addr: Addr) -> Result<EndpointAddr, iroh::KeyParsingError> {

@@ -2,6 +2,29 @@
 
 All notable changes to bifrost, newest first.
 
+## Unreleased
+
+### Breaking
+- **A key that is not a usable ed25519 identity is refused wherever it enters:** key text, a Noise
+  handshake, an iroh or quirk connection, a sealed key file. A usable key is the canonical encoding of
+  a prime-order point. A point off the curve, a non-canonical encoding, a small-order point, or a point
+  with a torsion component is refused, and `KeyError` names which. `[1u8; 32]` has a torsion component
+  and is refused; the key the seed `[7; 32]` binds prints as
+  `ed015jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwa`.
+- **`NodeId::new` is gone.** `NodeId::try_new(kind, bytes)` checks the bytes and returns
+  `Result<NodeId, KeyError>`. `NodeId::from_ed25519_secret` stays infallible.
+- **`NodeIdParseError` is `#[non_exhaustive]` and gains `Key`.** A `match` on it needs a wildcard arm.
+- **`NoiseError` gains `PeerKey`:** the peer's handshake named a key that is not a usable identity.
+  `NoiseError` is not `#[non_exhaustive]`, so a `match` on it without a wildcard arm no longer compiles.
+- **`bifrost-quirk`'s `BindError` is an enum:** `Bind` (quirk could not bind its socket) and `Key`.
+
+### New
+- **`KeyError` names the check a key failed:** `NotOnCurve`, `NotCanonical`, `SmallOrder`, or
+  `HasTorsion`. It is `#[non_exhaustive]`, and `bifrost`, `bifrost-core`, and `bifrost-transport`
+  export it.
+- **`keystore`'s `FormatError` gains `PublicKey`:** the key file's stored public key is not a usable
+  identity.
+
 ## v0.7.0
 
 ### Breaking

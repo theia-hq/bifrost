@@ -16,7 +16,7 @@ use core::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::task::Wake;
 
-use bifrost_core::{AddrUpdate, CryptoKind, Discovery, HintStream, NodeId};
+use bifrost_core::{AddrUpdate, Discovery, HintStream, NodeId};
 use futures_util::{Stream, StreamExt as _};
 use tokio::time::{self, Instant};
 
@@ -651,14 +651,14 @@ fn named(node: NodeId) -> String {
 
 /// A distinct ed25519 [`NodeId`] seeded by a single byte, enough to tell two test nodes apart.
 fn node(seed: u8) -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [seed; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[seed; NodeId::KEY_LEN])
 }
 
 /// A distinct ed25519 [`NodeId`] for each of more seeds than one byte holds.
 fn wide_node(seed: u16) -> NodeId {
-    let mut key = [0xaa; NodeId::KEY_LEN];
-    key[..2].copy_from_slice(&seed.to_le_bytes());
-    NodeId::new(CryptoKind::Ed25519, key)
+    let mut secret = [0xaa; NodeId::KEY_LEN];
+    secret[..2].copy_from_slice(&seed.to_le_bytes());
+    NodeId::from_ed25519_secret(&secret)
 }
 
 /// A loopback socket address on the given port.

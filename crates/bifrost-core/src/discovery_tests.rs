@@ -17,8 +17,7 @@ use std::task::Wake;
 use futures_core::Stream;
 
 use crate::{
-    AddrUpdate, CryptoKind, Discovery, Error, HintStream, Layered, NoDiscovery, NodeId,
-    StaticDiscovery,
+    AddrUpdate, Discovery, Error, HintStream, Layered, NoDiscovery, NodeId, StaticDiscovery,
 };
 
 /// A fixed table answers with its entry once and ends; there is never anything more to say.
@@ -424,11 +423,11 @@ fn said(update: AddrUpdate) -> Poll<Option<Result<AddrUpdate, String>>> {
 }
 
 fn peer() -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [0x11; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[0x11; NodeId::KEY_LEN])
 }
 
 fn other() -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [0x22; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[0x22; NodeId::KEY_LEN])
 }
 
 fn addr(port: u16) -> SocketAddr {

@@ -22,7 +22,7 @@ pub use conn::{ConnInfo, Path};
 pub use discovery::{Discovery, Layered, NoDiscovery, StaticDiscovery};
 pub use error::{BoxError, Error};
 pub use hints::{AddrUpdate, HintStream, Latest};
-pub use id::{CryptoKind, NodeId, NodeIdParseError, derive_ed25519_child_secret};
+pub use id::{CryptoKind, KeyError, NodeId, NodeIdParseError, derive_ed25519_child_secret};
 pub use refusal::{Refusal, RefusalDetail, RefusalDetailError};
 
 #[cfg(test)]

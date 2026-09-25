@@ -1,6 +1,6 @@
 use std::io;
 
-use bifrost_core::{Error, NodeId};
+use bifrost_core::{Error, KeyError, NodeId};
 
 /// Why a sealed wrapper operation failed.
 ///
@@ -82,6 +82,13 @@ pub enum NoiseError {
     /// A handshake or frame payload was not the fixed shape the protocol defines.
     #[error("malformed payload")]
     MalformedPayload,
+
+    /// The key the peer claimed in its payload is not a usable ed25519 identity.
+    ///
+    /// Refused before the signature is weighed, so no session is ever attributed to a small-order
+    /// point or a torsioned twin of another key.
+    #[error("peer claimed a key that is not a usable identity")]
+    PeerKey(#[source] KeyError),
 
     /// The session reached its cap on concurrently open streams.
     #[error("stream limit reached")]

@@ -5,7 +5,7 @@
 //! `connect` must reject a session whose reached key is not the dialed key. This is the interim guard
 //! until phase 1 Noise makes the identity cryptographically real.
 
-use bifrost_core::{Addr, CryptoKind, Error};
+use bifrost_core::{Addr, Error};
 use bifrost_quirk::{Endpoint, NodeId};
 use bifrost_transport::Transport;
 
@@ -17,7 +17,7 @@ async fn connect_rejects_a_mismatched_identity() {
     let hints = receiver.local_addr().hints;
 
     // A fabricated identity that is not the receiver's. Dial it at the receiver's real address.
-    let wrong = NodeId::new(CryptoKind::Ed25519, [0x11; NodeId::KEY_LEN]);
+    let wrong = NodeId::from_ed25519_secret(&[0x11; NodeId::KEY_LEN]);
     assert_ne!(wrong, receiver.node_id(), "the fabricated key must differ");
 
     let dialer = Endpoint::bind().await.expect("bind dialer");

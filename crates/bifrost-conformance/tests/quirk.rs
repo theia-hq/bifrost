@@ -1,4 +1,4 @@
-use bifrost::{CryptoKind, Node, NodeId, StaticDiscovery, Transport};
+use bifrost::{Node, NodeId, StaticDiscovery, Transport};
 use bifrost_conformance::{
     PeerNotice, bound_sockets_are_bind_truth, close_drains, close_ends_held_streams,
     direct_conn_info, identity_binding, reach_roundtrip, wildcard_bind_is_not_rewritten,
@@ -51,7 +51,7 @@ async fn quirk_identity_binding() {
 /// so a plaintext responder cannot hand up a session for a key it does not hold.
 #[tokio::test]
 async fn quirk_wrong_key_rejected() {
-    let fabricated = NodeId::new(CryptoKind::Ed25519, [0x11; NodeId::KEY_LEN]);
+    let fabricated = NodeId::from_ed25519_secret(&[0x11; NodeId::KEY_LEN]);
     wrong_key_rejected(
         Endpoint::bind().await.expect("bind sender"),
         Endpoint::bind().await.expect("bind receiver"),

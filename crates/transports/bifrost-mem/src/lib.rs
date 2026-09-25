@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, CryptoKind, Error, HintStream};
+use bifrost_core::{Addr, Error, HintStream};
 pub use bifrost_transport::{InProcess, Session, Transport};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -35,7 +35,7 @@ type Stream = (MemWrite, MemRead);
 static REGISTRY: LazyLock<Mutex<HashMap<NodeId, mpsc::UnboundedSender<MemSession>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Source of unique identities for bound endpoints.
+/// Source of unique identity seeds for bound endpoints.
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn registry() -> MutexGuard<'static, HashMap<NodeId, mpsc::UnboundedSender<MemSession>>> {
@@ -51,13 +51,18 @@ pub struct MemTransport {
 }
 
 impl MemTransport {
-    /// Bind a fresh in-process endpoint with a unique identity.
+    /// Bind a fresh in-process endpoint under a unique identity.
+    ///
+    /// The identity's secret comes from a process-wide counter, so anyone can compute it: this transport
+    /// is for tests.
     pub fn bind() -> Self {
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut key = [0u8; NodeId::KEY_LEN];
-        key[..8].copy_from_slice(&seq.to_le_bytes());
-        let node = NodeId::new(CryptoKind::Ed25519, key);
+        Self::bind_with_secret(seed_for(COUNTER.fetch_add(1, Ordering::Relaxed)))
+    }
 
+    /// Bind under the identity `secret` derives. Private: the counter is what keeps one endpoint per
+    /// identity, and a caller-chosen secret bound twice would replace the first endpoint's registration.
+    fn bind_with_secret(secret: [u8; NodeId::KEY_LEN]) -> Self {
+        let node = NodeId::from_ed25519_secret(&secret);
         let (tx, rx) = mpsc::unbounded_channel();
         registry().insert(node, tx);
         Self {
@@ -65,6 +70,13 @@ impl MemTransport {
             inbound: AsyncMutex::new(rx),
         }
     }
+}
+
+/// The ed25519 seed a counter value names.
+fn seed_for(seq: u64) -> [u8; NodeId::KEY_LEN] {
+    let mut seed = [0u8; NodeId::KEY_LEN];
+    seed[..8].copy_from_slice(&seq.to_le_bytes());
+    seed
 }
 
 impl Drop for MemTransport {
@@ -204,6 +216,8 @@ enum MemError {
     Unreachable,
 }
 
+#[cfg(test)]
+mod lib_tests;
 #[cfg(test)]
 mod tests {
     use bifrost_transport::SecurityProfile as _;

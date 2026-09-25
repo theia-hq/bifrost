@@ -12,7 +12,7 @@ use core::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use bifrost::{Addr, Announced, CryptoKind, Error, NoDiscovery, Node, NodeId, Session, Transport};
+use bifrost::{Addr, Announced, Error, NoDiscovery, Node, NodeId, Session, Transport};
 use bifrost_conformance::{
     claimed_identity_not_attributed, identity_binding, reach_roundtrip, wrong_key_rejected,
 };
@@ -21,18 +21,18 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 /// The identity the fabricated transport claims for itself.
 fn claimed() -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [0x01; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[0x01; NodeId::KEY_LEN])
 }
 
 /// The identity the fabricated session attributes to the peer, which is never the key dialed.
 fn attributed() -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [0x02; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[0x02; NodeId::KEY_LEN])
 }
 
 /// An identity held by a test double, distinct per byte so parallel tests never share a registry
 /// key.
 fn own(byte: u8) -> NodeId {
-    NodeId::new(CryptoKind::Ed25519, [byte; NodeId::KEY_LEN])
+    NodeId::from_ed25519_secret(&[byte; NodeId::KEY_LEN])
 }
 
 /// A transport that answers every dial with a session for a key nobody reached.
@@ -313,7 +313,7 @@ async fn fabricated_peer_fails_identity_binding() {
 #[tokio::test]
 #[should_panic(expected = "identity that was never reached")]
 async fn session_for_wrong_key_fails_wrong_key_rejection() {
-    let fabricated = NodeId::new(CryptoKind::Ed25519, [0x03; NodeId::KEY_LEN]);
+    let fabricated = NodeId::from_ed25519_secret(&[0x03; NodeId::KEY_LEN]);
     wrong_key_rejected(Fabricator, Fabricator, fabricated).await;
 }
 
@@ -322,7 +322,7 @@ async fn session_for_wrong_key_fails_wrong_key_rejection() {
 #[tokio::test]
 #[should_panic(expected = "identity that was never reached")]
 async fn impersonator_at_hint_fails_wrong_key_rejection() {
-    let fabricated = NodeId::new(CryptoKind::Ed25519, [0x04; NodeId::KEY_LEN]);
+    let fabricated = NodeId::from_ed25519_secret(&[0x04; NodeId::KEY_LEN]);
     wrong_key_rejected(ImpersonatorAtHint, ImpersonatorAtHint, fabricated).await;
 }
 

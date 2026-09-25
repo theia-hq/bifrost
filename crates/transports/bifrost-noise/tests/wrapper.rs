@@ -12,7 +12,8 @@ use core::time::Duration;
 use std::io;
 
 use bifrost::{
-    Addr, Announced, Discovery, Error, HintStream, Node, NodeId, StaticDiscovery, Transport,
+    Addr, Announced, Discovery, Error, HintStream, KeyError, Node, NodeId, StaticDiscovery,
+    Transport,
 };
 use bifrost_conformance::{
     PeerNotice, close_drains, close_ends_held_streams, identity_binding, reach_roundtrip,
@@ -299,6 +300,35 @@ async fn dropped_stream_resets_the_peer() {
     };
 
     tokio::join!(server, client);
+}
+
+/// `A + T`: the public key the seed `[7; 32]` binds plus the order-8 torsion point. Canonical, not
+/// small-order, and a second spelling of that key whose signatures its holder can forge.
+const TWIN_OF_SEVEN: [u8; NodeId::KEY_LEN] = [
+    0x1f, 0x4f, 0x58, 0x0e, 0x73, 0xac, 0x20, 0x8f, 0x06, 0x76, 0x01, 0x90, 0xe9, 0xed, 0xc6, 0xf5,
+    0x91, 0x67, 0x75, 0xda, 0xbd, 0x9c, 0x1c, 0xdc, 0xa3, 0x93, 0x17, 0x5c, 0x2d, 0x6d, 0x10, 0x83,
+];
+
+/// A peer that holds a real secret claims the torsion twin of its own key, under a signature that
+/// verifies for the twin. The accept side refuses the claimed key itself, before the signature is
+/// weighed, so the peer cannot answer as a second spelling of its own identity.
+#[tokio::test]
+async fn a_forged_torsion_twin_signer_yields_no_session() {
+    let receiver = sealed(44);
+    let forger = Forger::torsion_twin(seed(7), TWIN_OF_SEVEN);
+    let (accepted, _) = tokio::join!(receiver.accept(), forger.connect(dial_addr(&receiver)));
+
+    match accepted {
+        Err(Error::Accept(source)) => assert!(
+            matches!(
+                source.downcast_ref::<NoiseError>(),
+                Some(NoiseError::PeerKey(KeyError::HasTorsion))
+            ),
+            "the twin dies at the key parse, got {source}"
+        ),
+        Err(other) => panic!("expected an accept failure, got {other}"),
+        Ok(session) => panic!("a torsion twin yielded a session for {}", session.peer()),
+    }
 }
 
 /// A failed handshake is a typed failure, and the responder is not left parked.
