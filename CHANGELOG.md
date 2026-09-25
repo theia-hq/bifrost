@@ -2,7 +2,7 @@
 
 All notable changes to bifrost, newest first.
 
-## Unreleased
+## v0.8.0
 
 ### Breaking
 - **A key that is not a usable ed25519 identity is refused wherever it enters:** key text, a Noise
