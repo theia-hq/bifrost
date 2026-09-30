@@ -2,18 +2,17 @@ use std::path::PathBuf;
 
 use bifrost_core::NodeId;
 
-use crate::envelope::{Envelope, Refusal};
+use crate::envelope::{Envelope, Opened, Refusal};
 use crate::error::Error;
-use crate::method::Method;
-use crate::passphrase::Passphrase;
+use crate::method::{Method, Unlock};
 use crate::secret::Secret;
 
 /// A key file that is present and well-formed: either its key, or the locked form of it.
 ///
-/// Both answer [`node_id`](Self::node_id) and [`method`](Self::method) without a passphrase, so a
-/// caller can say which node a file is for, and how it is protected, before deciding whether to ask
-/// for anything. For a sealed file that node is the file's claim, not yet a fact; see
-/// [`Locked::node_id`].
+/// Both answer [`node_id`](Self::node_id) without unlocking, and a locked file names its locks
+/// ([`Locked::methods`]), so a caller can say which node a file is for, and how it opens, before
+/// deciding whether to ask for anything. For a sealed file that node is the file's claim, not yet a
+/// fact; see [`Locked::node_id`].
 #[derive(Debug)]
 pub enum Stored {
     /// A plain file: the key, ready to use.
@@ -29,14 +28,6 @@ impl Stored {
         match self {
             Self::Plain(secret) => secret.node_id(),
             Self::Locked(locked) => locked.node_id(),
-        }
-    }
-
-    /// How the file protects its key: the method record, read from the file's own bytes.
-    pub fn method(&self) -> Method {
-        match self {
-            Self::Plain(_) => Method::Plain,
-            Self::Locked(locked) => locked.method(),
         }
     }
 }
@@ -56,9 +47,10 @@ impl Locked {
         }
     }
 
-    /// How this file is sealed, from its header.
-    pub fn method(&self) -> Method {
-        self.envelope.method()
+    /// The methods of this file's locks, from its header, in file order. At least one, and never one
+    /// method twice. Any one of them opens the file.
+    pub fn methods(&self) -> impl Iterator<Item = Method> + '_ {
+        self.envelope.methods()
     }
 
     /// The node this file CLAIMS to seal, read from its header without unlocking.
@@ -72,30 +64,46 @@ impl Locked {
         self.envelope.node_id()
     }
 
-    /// Unlock the key with `passphrase`. Success proves the header: the key it returns is the node
-    /// [`node_id`](Self::node_id) claims.
+    /// Unlock the key through the lock `with` opens. Success proves the header: the key it returns
+    /// is the node [`node_id`](Self::node_id) claims.
     ///
-    /// A wrong passphrase and a damaged file both refuse as [`Error::Unlock`]. A failed unlock is a
-    /// refusal and nothing more: the file is left as it was, and no key stands in for the one that
-    /// did not open.
-    pub fn unlock(&self, passphrase: &Passphrase) -> Result<Secret, Error> {
-        self.envelope.open(passphrase).map_err(|refusal| {
-            let path = self.path.clone();
-            match refusal {
-                Refusal::Unlock => Error::Unlock { path },
-                Refusal::Inconsistent => Error::Inconsistent { path },
-                Refusal::Crypto(source) => Error::Crypto { path, source },
-            }
-        })
+    /// A file with no lock of `with`'s method refuses as [`Error::NoLock`]. A wrong passphrase and a
+    /// damaged file both refuse as [`Error::Unlock`]. A failed unlock is a refusal and nothing more:
+    /// the file is left as it was, and no key stands in for the one that did not open.
+    pub fn unlock(&self, with: Unlock<'_>) -> Result<Secret, Error> {
+        self.open(with).map(|opened| opened.secret)
+    }
+
+    /// [`unlock`](Self::unlock), keeping the file key a lock change re-wraps.
+    pub(crate) fn open(&self, with: Unlock<'_>) -> Result<Opened, Error> {
+        self.envelope
+            .unlock(with)
+            .map_err(|refusal| self.refused(refusal))
+    }
+
+    pub(crate) fn envelope(&self) -> &Envelope {
+        &self.envelope
+    }
+
+    /// A refusal, with this file's path attached.
+    pub(crate) fn refused(&self, refusal: Refusal) -> Error {
+        let path = self.path.clone();
+        match refusal {
+            Refusal::Unlock => Error::Unlock { path },
+            Refusal::Inconsistent => Error::Inconsistent { path },
+            Refusal::NoLock(method) => Error::NoLock { path, method },
+            Refusal::Crypto(source) => Error::Crypto { path, source },
+        }
     }
 }
 
-/// Names the file and the node, never the sealed bytes.
+/// Names the file, the node, and its locks, never the sealed bytes.
 impl core::fmt::Debug for Locked {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Locked")
             .field("path", &self.path)
             .field("node_id", &self.node_id())
+            .field("methods", &self.methods().collect::<Vec<_>>())
             .finish()
     }
 }

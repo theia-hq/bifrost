@@ -3,11 +3,10 @@ use std::path::PathBuf;
 
 use bifrost_core::{KeyError, NodeId};
 
-use crate::envelope::SEALED_LEN;
 use crate::kind::Kind;
 use crate::method::Method;
 
-/// Why a key file could not be loaded, written, adopted, migrated, or unlocked.
+/// Why a key file could not be loaded, written, adopted, unlocked, or have its locks changed.
 ///
 /// Every variant names the file. None carries key material, and none is ever answered by producing
 /// a different key: a refusal is the whole outcome.
@@ -64,8 +63,9 @@ pub enum Error {
         #[source]
         source: FormatError,
     },
-    /// A sealed file did not unlock. A wrong passphrase and damaged contents are deliberately this
-    /// one variant: the cipher cannot tell them apart, and a refusal that guessed would be an oracle.
+    /// A lock did not open, or the seed did not open under the key it gave. A wrong passphrase and
+    /// damaged contents are deliberately this one variant: the cipher cannot tell them apart, and a
+    /// refusal that guessed would be an oracle.
     #[error("could not unlock the key file {}: wrong passphrase, or the file is damaged", path.display())]
     Unlock {
         /// The key file.
@@ -113,21 +113,34 @@ pub enum Error {
         /// The key file.
         path: PathBuf,
     },
-    /// A migration found no file to migrate.
+    /// A lock removal asked to take a root key's passphrase lock. A root key always keeps it: it is
+    /// the lock that opens a copy of the file on any machine.
+    #[error("a root key always keeps its passphrase lock; {} was not changed", path.display())]
+    RootPassphrase {
+        /// The key file.
+        path: PathBuf,
+    },
+    /// A lock change found no file to change.
     #[error("there is no key file at {}", path.display())]
     Absent {
         /// The key file.
         path: PathBuf,
     },
-    /// A migration was told the file is one method, and it is another.
-    #[error("the key file {} records the {stored} method, not {given}", path.display())]
-    WrongMethod {
+    /// The file holds no lock of the method the caller named, to open or to remove. A plain file
+    /// holds no lock at all.
+    #[error("the key file {} has no {method} lock", path.display())]
+    NoLock {
         /// The key file.
         path: PathBuf,
-        /// The method the file records.
-        stored: Method,
-        /// The method the caller unlocked with.
-        given: Method,
+        /// The method the caller named.
+        method: Method,
+    },
+    /// A lock change was given nothing to open the file with, and the file is sealed: only one of its
+    /// own locks can open it to change them.
+    #[error("the key file {} is sealed; changing its locks needs one of them to open it", path.display())]
+    Sealed {
+        /// The key file.
+        path: PathBuf,
     },
     /// The rewritten file did not read back as the same key, so it was not put in place.
     #[error(
@@ -138,7 +151,7 @@ pub enum Error {
         /// The key file.
         path: PathBuf,
     },
-    /// A migration found the key file changed or replaced since it read it, and did not write over
+    /// A lock change found the key file changed or replaced since it read it, and did not write over
     /// it: the old key put back over a new one could destroy the only copy of the new one.
     #[error(
         "the key file {} changed while it was being rewritten; it was left as it now is",
@@ -174,7 +187,7 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
-    /// A cryptographic primitive could not run.
+    /// Sealing or unlocking could not run.
     #[error("could not seal or unlock the key file {}", path.display())]
     Crypto {
         /// The key file.
@@ -196,8 +209,8 @@ pub enum FormatError {
         /// The file's length.
         found: u64,
     },
-    /// A sealed-file signature, but not the length its version defines: truncated or padded.
-    #[error("a sealed key is {SEALED_LEN} bytes, and this one is {found}")]
+    /// A sealed-file signature, but the bytes end before its layout does, or run on past it.
+    #[error("a sealed key of {found} bytes is truncated or padded")]
     SealedSize {
         /// The file's length.
         found: u64,
@@ -223,11 +236,28 @@ pub enum FormatError {
         /// The kind the file records.
         found: Kind,
     },
-    /// A protection method this build does not know.
-    #[error("protection method {found} is not one this build knows")]
+    /// A lock method this build does not know.
+    #[error("lock method {found} is not one this build knows")]
     Method {
         /// The method byte.
         found: u8,
+    },
+    /// A sealed file with no locks: nothing could open it, so it is not a sealed key.
+    #[error("the sealed key has no locks")]
+    NoLocks,
+    /// Two locks of one method. A file holds at most one of each.
+    #[error("the sealed key has more than one {method} lock")]
+    DuplicateLock {
+        /// The method named twice.
+        method: Method,
+    },
+    /// A lock whose body length is not its method's, refused before its body is read.
+    #[error("a {method} lock is {} bytes, and this one says {found}", method.body_len())]
+    LockLength {
+        /// The lock's method.
+        method: Method,
+        /// The length the record declares.
+        found: u16,
     },
     /// A key derivation function this build does not know.
     #[error("key derivation function {found} is not one this build knows")]
@@ -252,9 +282,10 @@ pub enum FormatError {
     PublicKey(#[source] KeyError),
 }
 
-/// A cryptographic primitive failed to run: the random source, the key derivation, or the cipher.
+/// Sealing or unlocking a key file could not run: the random source, the key derivation, or the
+/// cipher failed.
 ///
-/// Opaque, so the primitives this crate uses stay out of its public surface; the cause rides the
+/// Opaque, so the primitives this crate uses stay out of its public surface; the cause is in the
 /// `source()` chain.
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
@@ -273,6 +304,10 @@ enum Primitive {
     // panic.
     #[error("the cipher could not seal the key")]
     Cipher,
+    // A file holds at most one lock per method, so the writer is never handed more than 255 locks.
+    // A value rather than a panic for the same reason as `Cipher`.
+    #[error("too many locks to seal: a key file holds at most 255")]
+    LockCount,
 }
 
 impl CryptoError {
@@ -290,5 +325,9 @@ impl CryptoError {
 
     pub(crate) const fn cipher() -> Self {
         Self(Primitive::Cipher)
+    }
+
+    pub(crate) const fn lock_count() -> Self {
+        Self(Primitive::LockCount)
     }
 }

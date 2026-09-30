@@ -2,18 +2,29 @@ use std::fs;
 
 use zeroize::Zeroizing;
 
-use super::{KeyFile, lacks_hard_links};
-use crate::envelope::{AT_PUBLIC, Envelope, HEADER_LEN, SEALED_LEN};
+use super::{KeyFile, Proof, lacks_hard_links};
+use crate::envelope::{AT_PUBLIC, Envelope, HEADER_LEN};
 use crate::error::{Error, FormatError};
 use crate::kind::Kind;
-use crate::method::{Method, Protection};
+use crate::method::{Method, NewLock, Protection, Unlock};
 use crate::passphrase::Passphrase;
 use crate::secret::Secret;
 use crate::stored::Stored;
 use crate::test_dir::TestDir;
 
+/// The length of a sealed file with one passphrase lock.
+const SEALED_LEN: usize = 219;
+
 fn passphrase(text: &str) -> Passphrase {
     Passphrase::new(Zeroizing::new(text.as_bytes().to_vec())).unwrap()
+}
+
+fn with(passphrase: &Passphrase) -> Unlock<'_> {
+    Unlock::Passphrase(passphrase)
+}
+
+fn lock(passphrase: &Passphrase) -> NewLock<'_> {
+    NewLock::Passphrase(passphrase)
 }
 
 fn key_file(dir: &TestDir) -> KeyFile {
@@ -76,7 +87,7 @@ fn a_plain_write_reads_back_as_the_same_key() {
     let (file, secret) = plain_file(&dir, [1; 32]);
     assert_eq!(bytes(&file), [1; 32]);
     let stored = file.load().unwrap().unwrap();
-    assert_eq!(stored.method(), Method::Plain);
+    assert!(matches!(stored, Stored::Plain(_)));
     assert_eq!(stored.node_id(), secret.node_id());
     assert_eq!(dir.names(), ["identity.key"]);
 }
@@ -88,9 +99,12 @@ fn a_sealed_write_names_its_node_locked_and_opens_to_the_same_key() {
     let (file, secret) = sealed_file(&dir, [2; 32], &under);
     assert_eq!(bytes(&file).len(), SEALED_LEN);
     let locked = locked(&file);
-    assert_eq!(locked.method(), Method::Passphrase);
+    assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::Passphrase]);
     assert_eq!(locked.node_id(), secret.node_id());
-    assert_eq!(locked.unlock(&under).unwrap().node_id(), secret.node_id());
+    assert_eq!(
+        locked.unlock(with(&under)).unwrap().node_id(),
+        secret.node_id()
+    );
     assert_eq!(dir.names(), ["identity.key"]);
 }
 
@@ -135,13 +149,15 @@ fn a_wrong_passphrase_and_a_damaged_file_read_the_same() {
     let (file, _) = sealed_file(&dir, [2; 32], &under);
     let original = bytes(&file);
 
-    let wrong = locked(&file).unlock(&passphrase("wrong")).unwrap_err();
+    let wrong = locked(&file)
+        .unlock(with(&passphrase("wrong")))
+        .unwrap_err();
     assert_eq!(bytes(&file), original);
 
     let mut damaged = original.clone();
     damaged[SEALED_LEN - 1] ^= 0x01;
     plant(&file, &damaged);
-    let corrupt = locked(&file).unlock(&under).unwrap_err();
+    let corrupt = locked(&file).unlock(with(&under)).unwrap_err();
 
     assert!(matches!(wrong, Error::Unlock { .. }));
     assert!(matches!(corrupt, Error::Unlock { .. }));
@@ -155,9 +171,9 @@ fn a_malformed_file_is_refused_by_name_and_left_alone() {
     for (content, expected) in [
         (vec![1; 31], FormatError::Size { found: 31 }),
         (vec![1; 33], FormatError::Size { found: 33 }),
-        // A version 1 sealed file cut to the plain length: refused as sealed, never read as a seed.
+        // A sealed file cut to the plain length: refused as sealed, never read as a seed.
         (
-            [&b"KEYSTORE"[..], &[1; 24]].concat(),
+            [&b"KEYSTORE"[..], &[2; 24]].concat(),
             FormatError::SealedSize { found: 32 },
         ),
     ] {
@@ -174,10 +190,11 @@ fn a_malformed_file_is_refused_by_name_and_left_alone() {
 fn a_file_past_the_read_cap_is_refused_on_its_size_without_being_read() {
     let dir = TestDir::new();
     let file = key_file(&dir);
-    // It opens with a version 1 signature, so had it been read the parser would call it a damaged
-    // sealed file; a plain size refusal is what shows it was judged on its length alone. Modest on
-    // purpose: if the cap regresses, this test must fail, not make the loader read gigabytes.
-    let content = [&b"KEYSTORE"[..], &[1], &vec![0; 64 * 1024]].concat();
+    // It opens with a sealed file's signature and version, so had it been read the parser would call
+    // it a damaged sealed file; a plain size refusal is what shows it was judged on its length alone.
+    // Modest on purpose: if the cap regresses, this test must fail, not make the loader read
+    // gigabytes.
+    let content = [&b"KEYSTORE"[..], &[2], &vec![0; 64 * 1024]].concat();
     plant(&file, &content);
     match file.load() {
         Err(Error::Format { source, .. }) => {
@@ -364,112 +381,167 @@ fn adopting_over_an_unreadable_file_refuses_rather_than_replacing_it() {
 }
 
 #[test]
-fn a_plain_key_migrates_to_a_passphrase_and_back_as_the_same_node() {
+fn a_plain_key_takes_a_passphrase_lock_and_gives_it_back_as_the_same_node() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, secret) = plain_file(&dir, [6; 32]);
 
-    file.migrate(Protection::Plain, Protection::Passphrase(&under))
-        .unwrap();
+    file.add_lock(None, lock(&under)).unwrap();
     let locked = locked(&file);
     assert_eq!(locked.node_id(), secret.node_id());
-    assert_eq!(locked.unlock(&under).unwrap().node_id(), secret.node_id());
+    assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::Passphrase]);
+    assert_eq!(
+        locked.unlock(with(&under)).unwrap().node_id(),
+        secret.node_id()
+    );
 
-    file.migrate(Protection::Passphrase(&under), Protection::Plain)
-        .unwrap();
+    file.remove_lock(with(&under), Method::Passphrase).unwrap();
     assert_eq!(bytes(&file), [6; 32]);
     assert_eq!(dir.names(), ["identity.key"]);
 }
 
 #[test]
-fn changing_the_passphrase_reseals_with_a_fresh_salt_and_nonce() {
+fn a_second_lock_of_one_method_replaces_it() {
     let dir = TestDir::new();
     let (old, new) = (passphrase("old"), passphrase("new"));
     let (file, secret) = sealed_file(&dir, [6; 32], &old);
     let before = bytes(&file);
+    let file_key = *locked(&file).open(with(&old)).unwrap().file_key.bytes();
 
-    file.migrate(Protection::Passphrase(&old), Protection::Passphrase(&new))
-        .unwrap();
+    file.add_lock(Some(with(&old)), lock(&new)).unwrap();
     let after = bytes(&file);
-    // Salt, then nonce: neither is reused by a reseal.
-    assert_ne!(before[24..40], after[24..40]);
-    assert_ne!(before[40..64], after[40..64]);
+    // Still one lock, in the same place: the list does not grow by a method it already holds.
+    assert_eq!(after.len(), before.len());
+    let locked = locked(&file);
+    assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::Passphrase]);
     assert!(matches!(
-        locked(&file).unlock(&old),
+        locked.unlock(with(&old)),
         Err(Error::Unlock { .. })
     ));
-    assert_eq!(
-        locked(&file).unlock(&new).unwrap().node_id(),
-        secret.node_id()
-    );
+    let opened = locked.open(with(&new)).unwrap();
+    assert_eq!(opened.secret.node_id(), secret.node_id());
+    // The file key is the file's for life: the new lock wraps the same one.
+    assert_eq!(opened.file_key.bytes(), &file_key);
+    // The lock's salt and nonce, and the seed's nonce, are drawn afresh: none is reused.
+    for (field, range) in [
+        ("salt", 59..75),
+        ("lock nonce", 75..99),
+        ("seed nonce", 147..171),
+    ] {
+        assert_ne!(
+            before[range.clone()],
+            after[range],
+            "the {field} was reused"
+        );
+    }
 }
 
 #[test]
-fn a_migration_that_cannot_unlock_leaves_the_file_as_it_was() {
+fn removing_a_device_keys_last_lock_writes_it_plain() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
+    let (file, secret) = sealed_file(&dir, [6; 32], &under);
+
+    file.remove_lock(with(&under), Method::Passphrase).unwrap();
+    assert_eq!(bytes(&file), [6; 32]);
+    assert_eq!(plain(&file).node_id(), secret.node_id());
+    assert_eq!(dir.names(), ["identity.key"]);
+}
+
+#[test]
+fn a_lock_change_that_cannot_unlock_leaves_the_file_as_it_was() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let new = passphrase("a new passphrase for it");
     let (file, _) = sealed_file(&dir, [6; 32], &under);
     let before = bytes(&file);
 
+    let wrong = passphrase("wrong");
     assert!(matches!(
-        file.migrate(
-            Protection::Passphrase(&passphrase("wrong")),
-            Protection::Plain
-        ),
+        file.remove_lock(with(&wrong), Method::Passphrase),
         Err(Error::Unlock { .. })
     ));
     assert!(matches!(
-        file.migrate(Protection::Plain, Protection::Passphrase(&under)),
-        Err(Error::WrongMethod {
-            stored: Method::Passphrase,
-            given: Method::Plain,
-            ..
-        })
+        file.add_lock(Some(with(&wrong)), lock(&new)),
+        Err(Error::Unlock { .. })
+    ));
+    // A sealed file opens only through one of its own locks.
+    assert!(matches!(
+        file.add_lock(None, lock(&new)),
+        Err(Error::Sealed { .. })
     ));
     assert_eq!(bytes(&file), before);
     assert_eq!(dir.names(), ["identity.key"]);
 }
 
 #[test]
-fn migrating_nothing_is_refused() {
+fn a_plain_file_has_no_lock_to_open_or_remove() {
     let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, _) = plain_file(&dir, [6; 32]);
+
     assert!(matches!(
-        key_file(&dir).migrate(Protection::Plain, Protection::Plain),
+        file.remove_lock(with(&under), Method::Passphrase),
+        Err(Error::NoLock {
+            method: Method::Passphrase,
+            ..
+        })
+    ));
+    assert!(matches!(
+        file.add_lock(Some(with(&under)), lock(&under)),
+        Err(Error::NoLock {
+            method: Method::Passphrase,
+            ..
+        })
+    ));
+    assert_eq!(bytes(&file), [6; 32]);
+    assert_eq!(dir.names(), ["identity.key"]);
+}
+
+#[test]
+fn changing_the_locks_of_nothing_is_refused() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    assert!(matches!(
+        key_file(&dir).add_lock(None, lock(&under)),
+        Err(Error::Absent { .. })
+    ));
+    assert!(matches!(
+        key_file(&dir).remove_lock(with(&under), Method::Passphrase),
         Err(Error::Absent { .. })
     ));
     assert!(dir.names().is_empty());
 }
 
 #[test]
-fn an_interrupted_migration_leaves_the_original_readable() {
+fn an_interrupted_lock_change_leaves_the_original_readable() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, secret) = plain_file(&dir, [6; 32]);
 
-    // Run the migration up to the rename and stop there, as a crash would: the new form is staged
-    // and proven, and the process dies before publishing it. `forget` stands in for the death, so no
+    // Run the change up to the rename and stop there, as a crash would: the new form is staged and
+    // proven, and the process dies before publishing it. `forget` stands in for the death, so no
     // cleanup runs either.
-    let (unlocked, _) = file.unlock(Protection::Plain).unwrap();
-    let image = file
-        .encode(&unlocked, Protection::Passphrase(&under))
-        .unwrap();
+    let (Stored::Plain(unlocked), _) = file.load_present().unwrap() else {
+        panic!("the file was not plain");
+    };
+    let image = file.seal(&unlocked, lock(&under)).unwrap();
     let staged = file.stage(&image).unwrap();
     staged
-        .verify(Protection::Passphrase(&under), secret.node_id())
+        .verify(Proof::Lock(with(&under)), secret.node_id())
         .unwrap();
     core::mem::forget(staged);
 
     assert_eq!(bytes(&file), [6; 32]);
     assert_eq!(plain(&file).node_id(), secret.node_id());
-    // The orphaned stage is a sibling, and it does not stop the migration from being run again.
+    // The orphaned stage is a sibling, and it does not stop the change from being run again.
     assert_eq!(dir.names().len(), 2);
-    file.migrate(Protection::Plain, Protection::Passphrase(&under))
-        .unwrap();
+    file.add_lock(None, lock(&under)).unwrap();
     assert_eq!(
-        locked(&file).unlock(&under).unwrap().node_id(),
+        locked(&file).unlock(with(&under)).unwrap().node_id(),
         secret.node_id()
     );
-    // And the rerun swept the orphan, which held the key in the form it had before the migration.
+    // And the rerun swept the orphan.
     assert_eq!(dir.names(), ["identity.key"]);
 }
 
@@ -511,28 +583,23 @@ fn the_sweep_leaves_a_link_under_a_stage_name_and_what_it_points_at() {
 }
 
 #[test]
-fn a_migration_never_writes_over_a_file_replaced_since_it_read_it() {
+fn a_lock_change_never_writes_over_a_file_replaced_since_it_read_it() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, secret) = plain_file(&dir, [6; 32]);
 
-    // Steps 1 and 2 of a migration, then a restore lands a different key in the window before the
+    // Steps 1 and 2 of a lock change, then a restore lands a different key in the window before the
     // rename, the way a second process would.
-    let (unlocked, seen) = file.unlock(Protection::Plain).unwrap();
-    let image = file
-        .encode(&unlocked, Protection::Passphrase(&under))
-        .unwrap();
+    let (Stored::Plain(unlocked), seen) = file.load_present().unwrap() else {
+        panic!("the file was not plain");
+    };
+    let image = file.seal(&unlocked, lock(&under)).unwrap();
     let restored = dir.join("restored");
     fs::write(&restored, [7; 32]).unwrap();
     fs::rename(&restored, file.path()).unwrap();
 
     assert!(matches!(
-        file.replace(
-            &image,
-            Protection::Passphrase(&under),
-            secret.node_id(),
-            &seen
-        ),
+        file.replace(&image, Proof::Lock(with(&under)), secret.node_id(), &seen),
         Err(Error::Changed { .. })
     ));
     assert_eq!(bytes(&file), [7; 32]);
@@ -540,24 +607,19 @@ fn a_migration_never_writes_over_a_file_replaced_since_it_read_it() {
 }
 
 #[test]
-fn a_migration_never_writes_over_a_file_changed_in_place_since_it_read_it() {
+fn a_lock_change_never_writes_over_a_file_changed_in_place_since_it_read_it() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, secret) = plain_file(&dir, [6; 32]);
-    let (unlocked, seen) = file.unlock(Protection::Plain).unwrap();
-    let image = file
-        .encode(&unlocked, Protection::Passphrase(&under))
-        .unwrap();
+    let (Stored::Plain(unlocked), seen) = file.load_present().unwrap() else {
+        panic!("the file was not plain");
+    };
+    let image = file.seal(&unlocked, lock(&under)).unwrap();
     // Same file, same length, new contents.
     fs::write(file.path(), [7; 32]).unwrap();
 
     assert!(matches!(
-        file.replace(
-            &image,
-            Protection::Passphrase(&under),
-            secret.node_id(),
-            &seen
-        ),
+        file.replace(&image, Proof::Lock(with(&under)), secret.node_id(), &seen),
         Err(Error::Changed { .. })
     ));
     assert_eq!(bytes(&file), [7; 32]);
@@ -568,27 +630,23 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, secret) = plain_file(&dir, [6; 32]);
-    let (_, seen) = file.unlock(Protection::Plain).unwrap();
+    let (_, seen) = file.load_present().unwrap();
 
-    // A well-formed sealed file, but sealed under a passphrase other than the one the migration is
-    // moving to: the stage is written, the test-unlock fails, and the rename must not happen.
-    let wrong = Envelope::seal(&secret, Kind::Device, &passphrase("something else")).unwrap();
+    // A well-formed sealed file, but locked under a passphrase other than the one the change is
+    // adding: the stage is written, the test-unlock fails, and the rename must not happen.
+    let other_passphrase = passphrase("something else");
+    let wrong = Envelope::seal(&secret, Kind::Device, lock(&other_passphrase)).unwrap();
     assert!(matches!(
-        file.replace(
-            wrong.image(),
-            Protection::Passphrase(&under),
-            secret.node_id(),
-            &seen
-        ),
+        file.replace(&wrong, Proof::Lock(with(&under)), secret.node_id(), &seen),
         Err(Error::Unverified { .. })
     ));
     // And a form that opens, but to another node.
     let other = Secret::copy_of(&[8; 32]);
-    let elsewhere = Envelope::seal(&other, Kind::Device, &under).unwrap();
+    let elsewhere = Envelope::seal(&other, Kind::Device, lock(&under)).unwrap();
     assert!(matches!(
         file.replace(
-            elsewhere.image(),
-            Protection::Passphrase(&under),
+            &elsewhere,
+            Proof::Lock(with(&under)),
             secret.node_id(),
             &seen
         ),
@@ -601,7 +659,7 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
 
 #[cfg(unix)]
 #[test]
-fn a_migration_that_cannot_stage_leaves_the_original_readable() {
+fn a_lock_change_that_cannot_stage_leaves_the_original_readable() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = TestDir::new();
@@ -609,7 +667,7 @@ fn a_migration_that_cannot_stage_leaves_the_original_readable() {
     let (file, secret) = plain_file(&dir, [6; 32]);
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
 
-    let outcome = file.migrate(Protection::Plain, Protection::Passphrase(&under));
+    let outcome = file.add_lock(None, lock(&under));
 
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     assert!(matches!(outcome, Err(Error::Io { .. })));
@@ -619,7 +677,7 @@ fn a_migration_that_cannot_stage_leaves_the_original_readable() {
 
 #[cfg(unix)]
 #[test]
-fn a_migration_through_a_link_rewrites_the_file_the_link_names() {
+fn a_lock_change_through_a_link_rewrites_the_file_the_link_names() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     // The key is kept in a managed directory and linked into place, as a dotfile manager lays it out.
@@ -631,8 +689,7 @@ fn a_migration_through_a_link_rewrites_the_file_the_link_names() {
     let file = key_file(&dir);
     std::os::unix::fs::symlink(kept.path(), file.path()).unwrap();
 
-    file.migrate(Protection::Plain, Protection::Passphrase(&under))
-        .unwrap();
+    file.add_lock(None, lock(&under)).unwrap();
 
     // The link is still a link, and the file it names is the sealed one: no plain seed is left
     // anywhere, in either directory.
@@ -645,7 +702,7 @@ fn a_migration_through_a_link_rewrites_the_file_the_link_names() {
     );
     assert_eq!(bytes(&kept).len(), SEALED_LEN);
     assert_eq!(
-        locked(&file).unlock(&under).unwrap().node_id(),
+        locked(&file).unlock(with(&under)).unwrap().node_id(),
         secret.node_id()
     );
     assert_eq!(dir.names(), ["dotfiles", "identity.key"]);
@@ -674,13 +731,10 @@ fn a_new_key_that_does_not_read_back_is_never_published() {
     let secret = Secret::copy_of(&[6; 32]);
     // Sealed under another passphrase than the one the write is for: the stage is written, its
     // test-unlock fails, and nothing may appear at the path.
-    let wrong = Envelope::seal(&secret, Kind::Device, &passphrase("something else")).unwrap();
+    let other_passphrase = passphrase("something else");
+    let wrong = Envelope::seal(&secret, Kind::Device, lock(&other_passphrase)).unwrap();
     assert!(matches!(
-        file.create(
-            wrong.image(),
-            Protection::Passphrase(&under),
-            secret.node_id()
-        ),
+        file.create(&wrong, Proof::Lock(with(&under)), secret.node_id()),
         Err(Error::Unverified { .. })
     ));
     assert!(dir.names().is_empty());
@@ -716,7 +770,7 @@ fn a_root_key_is_written_sealed_as_the_root_kind() {
     assert_eq!(file.kind(), Kind::Root);
     assert_eq!(bytes(&file).len(), SEALED_LEN);
     assert_eq!(
-        locked(&file).unlock(&under).unwrap().node_id(),
+        locked(&file).unlock(with(&under)).unwrap().node_id(),
         secret.node_id()
     );
     assert_eq!(
@@ -744,7 +798,7 @@ fn a_device_key_file_in_the_root_slot_is_refused_by_kind() {
     ));
     let new = passphrase("a new passphrase for it");
     assert!(matches!(
-        root.migrate(Protection::Passphrase(&under), Protection::Passphrase(&new)),
+        root.add_lock(Some(with(&under)), lock(&new)),
         Err(Error::Format {
             source: FormatError::WrongKind { .. },
             ..
@@ -778,35 +832,45 @@ fn a_root_key_is_never_written_plain() {
         Err(Error::PlainRoot { .. })
     ));
     assert!(dir.names().is_empty());
+}
 
+#[test]
+fn a_roots_passphrase_lock_cannot_be_removed() {
+    let dir = TestDir::new();
+    let file = root_file(&dir);
     let under = passphrase("correct horse battery staple");
+    let secret = Secret::copy_of(&[4; 32]);
     file.write(&secret, Protection::Passphrase(&under)).unwrap();
     let sealed = bytes(&file);
+
     assert!(matches!(
-        file.migrate(Protection::Passphrase(&under), Protection::Plain),
-        Err(Error::PlainRoot { .. })
+        file.remove_lock(with(&under), Method::Passphrase),
+        Err(Error::RootPassphrase { .. })
+    ));
+    // Refused before anything is read: not even a wrong passphrase gets as far as an unlock.
+    assert!(matches!(
+        file.remove_lock(with(&passphrase("wrong")), Method::Passphrase),
+        Err(Error::RootPassphrase { .. })
     ));
     assert_eq!(bytes(&file), sealed);
     assert_eq!(dir.names(), ["root.key"]);
 }
 
 #[test]
-fn a_root_key_stays_a_root_key_through_every_migration() {
+fn a_root_key_stays_a_root_key_through_every_lock_change() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let new = passphrase("a new passphrase for it");
-    // A plain file found in the root slot, sealed: it becomes a root key, not a device key.
+    // A plain file found in the root slot, locked: it becomes a root key, not a device key.
     let (device, secret) = plain_file(&dir, [4; 32]);
     let file = KeyFile::root(device.path());
-    file.migrate(Protection::Plain, Protection::Passphrase(&under))
-        .unwrap();
+    file.add_lock(None, lock(&under)).unwrap();
     assert_eq!(wrong_kind(device.load()), (Kind::Device, Kind::Root));
 
     // And a new passphrase keeps it one.
-    file.migrate(Protection::Passphrase(&under), Protection::Passphrase(&new))
-        .unwrap();
+    file.add_lock(Some(with(&under)), lock(&new)).unwrap();
     assert_eq!(
-        locked(&file).unlock(&new).unwrap().node_id(),
+        locked(&file).unlock(with(&new)).unwrap().node_id(),
         secret.node_id()
     );
     assert_eq!(wrong_kind(device.load()), (Kind::Device, Kind::Root));

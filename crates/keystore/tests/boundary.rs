@@ -34,27 +34,41 @@ fn manifest_keys(manifest: &Path, section: &str) -> Vec<String> {
     keys
 }
 
-/// The shipped source files: everything under `src/` except the tests and their helpers.
+/// The shipped source files: everything under `src/`, at any depth, except the tests and their
+/// helpers. Each is named by its path under `src/`.
 #[allow(clippy::expect_used)]
 fn shipped_sources() -> Vec<(String, String)> {
+    let src = crate_dir().join("src");
     let mut sources = Vec::new();
-    for entry in fs::read_dir(crate_dir().join("src")).expect("src/ is readable") {
-        let path = entry.expect("src/ lists").path();
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-        let Some(name) = name else { continue };
-        if name.ends_with("_tests.rs") || name == "test_dir.rs" {
-            continue;
+    let mut dirs = vec![src.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).expect("a source directory is readable") {
+            let path = entry.expect("a source directory lists").path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let name = path
+                .strip_prefix(&src)
+                .expect("a source is under src/")
+                .to_string_lossy()
+                .into_owned();
+            if name.ends_with("_tests.rs") || name == "test_dir.rs" {
+                continue;
+            }
+            sources.push((
+                name,
+                fs::read_to_string(&path).expect("a source is readable"),
+            ));
         }
-        sources.push((
-            name,
-            fs::read_to_string(&path).expect("a source is readable"),
-        ));
     }
     assert!(
-        sources.len() >= 7,
+        sources.len() >= 10,
         "the scan found too few sources to mean anything"
+    );
+    assert!(
+        sources.iter().any(|(name, _)| name == "lock/passphrase.rs"),
+        "the scan did not reach the lock sources"
     );
     sources
 }
@@ -232,10 +246,16 @@ fn no_public_function_hands_out_a_bare_seed() {
 /// call this crate makes is the one that takes memory it owns and wipes.
 #[test]
 fn the_key_derivation_runs_in_memory_this_crate_wipes() {
-    let envelope = code_only(&fs::read_to_string(crate_dir().join("src/envelope.rs")).unwrap());
-    assert!(envelope.contains(".hash_password_into_with_memory("));
-    assert!(!envelope.contains(".hash_password_into("));
-    assert!(envelope.contains("let mut blocks = Zeroizing::new(Vec::new());"));
+    let lock = code_only(&fs::read_to_string(crate_dir().join("src/lock/passphrase.rs")).unwrap());
+    assert!(lock.contains(".hash_password_into_with_memory("));
+    assert!(lock.contains("let mut blocks = Zeroizing::new(Vec::new());"));
+    // And no source anywhere calls the form that frees its memory unwiped.
+    for (name, source) in shipped_sources() {
+        assert!(
+            !code_only(&source).contains(".hash_password_into("),
+            "{name} derives a key in memory argon2 frees unwiped"
+        );
+    }
 }
 
 /// Wiping on drop cannot be watched from a test: reading freed memory is undefined behaviour, so
