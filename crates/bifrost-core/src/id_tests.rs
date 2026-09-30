@@ -1,3 +1,6 @@
+use std::path::{Path, PathBuf};
+use std::{fs, io};
+
 use crate::{CryptoKind, KeyError, NodeId, NodeIdParseError};
 
 // The key vectors. nauthy's `key_tests.rs` holds the same bytes, in the same order, under the same
@@ -171,19 +174,26 @@ fn an_uppercase_key_text_parses() {
     assert_eq!(SHARED_VECTOR.to_ascii_uppercase().parse::<NodeId>(), Ok(id));
 }
 
+/// `A`'s text under a suite tag no library knows: only the tag is wrong.
+const UNKNOWN_SUITE: &str = "ed025jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwa";
+
+/// `A`'s text cut to its first 30 bytes, a whole number of base32 groups: only the length is wrong.
+const WRONG_LENGTH: &str = "ed015jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg";
+
 #[test]
-fn rejects_unknown_suite() {
-    let err = "zz99aaaaaaaa".parse::<NodeId>().unwrap_err();
-    assert_eq!(err, NodeIdParseError::UnknownSuite);
+fn an_unknown_suite_tag_is_refused() {
+    assert_eq!(
+        UNKNOWN_SUITE.parse::<NodeId>(),
+        Err(NodeIdParseError::UnknownSuite)
+    );
 }
 
 #[test]
-fn rejects_wrong_length() {
-    let err = "ed01aa".parse::<NodeId>().unwrap_err();
-    assert!(matches!(
-        err,
-        NodeIdParseError::WrongLength | NodeIdParseError::BadEncoding
-    ));
+fn a_key_of_the_wrong_length_is_refused() {
+    assert_eq!(
+        WRONG_LENGTH.parse::<NodeId>(),
+        Err(NodeIdParseError::WrongLength)
+    );
 }
 
 /// `text` with the first `ascii` after the tag swapped for `lookalike`.
@@ -204,4 +214,45 @@ fn a_dotless_i_in_place_of_i_is_refused() {
     // U+0131 uppercases to ASCII `I` under Unicode rules.
     let text = swap_first(SHARED_VECTOR, 'i', '\u{131}');
     assert_eq!(text.parse::<NodeId>(), Err(NodeIdParseError::BadEncoding));
+}
+
+/// No Montgomery coordinate leaves this crate. A public `u` is the one value that lets a caller key a set
+/// on a key's equivalence class instead of its exact bytes, which is the one configuration in which a
+/// sign twin is a break, and bifrost-core performs no Diffie-Hellman that would need one. The scan is
+/// stricter than the rule: neither name may appear in any non-test source file.
+#[test]
+fn no_public_item_returns_a_montgomery_coordinate() {
+    // Assembled from halves because this file is under `src/` too.
+    let needles = [
+        ["to_mont", "gomery"].concat(),
+        ["Montgomery", "Point"].concat(),
+    ];
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for source in rust_sources(&src).expect("read the crate's sources") {
+        if source.to_string_lossy().ends_with("_tests.rs") {
+            continue;
+        }
+        let text = fs::read_to_string(&source).expect("read a source file");
+        for needle in &needles {
+            assert!(
+                !text.contains(needle.as_str()),
+                "{}: `{needle}` must not appear in bifrost-core",
+                source.display()
+            );
+        }
+    }
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn rust_sources(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            found.extend(rust_sources(&path)?);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            found.push(path);
+        }
+    }
+    Ok(found)
 }

@@ -91,6 +91,9 @@ impl NodeId {
     }
 }
 
+// This check, `KeyError` and the `ed01` text have a twin in nauthy's `key.rs`, and both crates pin the
+// same refusal vectors under the same test names. The next change to any of the three moves the check
+// into one crate both depend on, made as that move, never as another pair of PRs.
 /// Why 32 bytes are not a usable ed25519 identity: the first check they fail, in the order below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
