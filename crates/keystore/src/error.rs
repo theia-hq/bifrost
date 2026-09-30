@@ -283,7 +283,7 @@ pub enum FormatError {
 }
 
 /// Sealing or unlocking a key file could not run: the random source, the key derivation, or the
-/// cipher failed, or the file was given more than 255 locks.
+/// cipher failed.
 ///
 /// Opaque, so the primitives this crate uses stay out of its public surface; the cause is in the
 /// `source()` chain.
@@ -304,8 +304,8 @@ enum Primitive {
     // panic.
     #[error("the cipher could not seal the key")]
     Cipher,
-    // A file holds at most one lock per method, so the writer is never handed more locks than one
-    // byte counts. A value rather than a panic for the same reason as `Cipher`.
+    // A file holds at most one lock per method, so the writer is never handed more than 255 locks.
+    // A value rather than a panic for the same reason as `Cipher`.
     #[error("too many locks to seal: a key file holds at most 255")]
     LockCount,
 }

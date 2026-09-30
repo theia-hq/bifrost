@@ -333,7 +333,7 @@ pub(crate) enum Refusal {
     Inconsistent,
     /// The file holds no lock of this method.
     NoLock(Method),
-    /// A primitive could not run.
+    /// Unlocking could not run.
     Crypto(CryptoError),
 }
 
