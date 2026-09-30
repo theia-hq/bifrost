@@ -220,7 +220,7 @@ impl Envelope {
         let file_key = FileKey::generate()?;
         let header = header(kind, secret.node_id());
         let lock = Lock::wrap(lock, &file_key, &header)?;
-        assemble(&header, &[lock], &file_key, secret, &fresh_nonce()?)
+        assemble(&header, &[&lock], &file_key, secret, &fresh_nonce()?)
     }
 
     /// Open the file with `with`: its lock unwraps the file key, and the file key opens the seed. The
@@ -272,7 +272,7 @@ impl Envelope {
         }
         assemble(
             &self.header,
-            locks,
+            &locks,
             &opened.file_key,
             &opened.secret,
             &fresh_nonce()?,
@@ -296,7 +296,7 @@ impl Envelope {
         }
         assemble(
             &self.header,
-            locks,
+            &locks,
             &opened.file_key,
             &opened.secret,
             &fresh_nonce()?,
@@ -348,22 +348,19 @@ pub(crate) fn header(kind: Kind, public: NodeId) -> [u8; HEADER_LEN] {
 }
 
 /// A sealed file's bytes: `header`, the lock list, and `secret` sealed under `file_key` over both.
-pub(crate) fn assemble<'a>(
+pub(crate) fn assemble(
     header: &[u8; HEADER_LEN],
-    locks: impl IntoIterator<Item = &'a Lock>,
+    locks: &[&Lock],
     file_key: &FileKey,
     secret: &Secret,
     seed_nonce: &[u8; NONCE_LEN],
 ) -> Result<Vec<u8>, CryptoError> {
+    let count = u8::try_from(locks.len()).map_err(|_| CryptoError::lock_count())?;
     let mut image = header.to_vec();
-    image.push(0);
-    let mut count: u8 = 0;
+    image.push(count);
     for lock in locks {
         lock.write(&mut image);
-        // At most one lock per method, and a method is one byte, so the count fits in one.
-        count = count.saturating_add(1);
     }
-    image[AT_COUNT] = count;
     let sealed =
         secret.with_bytes(|seed| cipher::seal(file_key.bytes(), seed_nonce, &image, seed))?;
     image.extend_from_slice(seed_nonce);

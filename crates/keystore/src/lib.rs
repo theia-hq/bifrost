@@ -4,9 +4,9 @@
 //! A key file holds one ed25519 seed of one [`Kind`]. The kind says what the key is for, a device's
 //! own key or a root key, and is chosen by naming the file ([`KeyFile::device`], [`KeyFile::root`]);
 //! a sealed file of the other kind is refused, and a root key is never written plain. A file is plain,
-//! the raw 32-byte seed, or sealed: a random file key seals the seed, and one or more locks each wrap
-//! that file key, at most one per [`Method`]. Any one lock opens the file. The only method is
-//! `passphrase`, and a root key always keeps its passphrase lock.
+//! the raw 32-byte seed, or sealed: a random file key seals the seed, and a lock wraps that file key.
+//! The format holds a list of locks, at most one per [`Method`], and any one opens the file; the only
+//! method is `passphrase`, so a sealed file has one lock, and a root key always keeps it.
 //!
 //! The locks are a property of the FILE. They are read from the file's own bytes, never from
 //! configuration, and they change only when [`KeyFile::add_lock`] or [`KeyFile::remove_lock`]

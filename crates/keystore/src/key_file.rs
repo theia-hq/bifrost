@@ -142,7 +142,7 @@ impl KeyFile {
     /// Install `secret` as this file's key, the way a machine takes on an identity it was given.
     ///
     /// Writes into absence as [`write`](Self::write) does. A file already holding this same key is
-    /// left exactly as it is, method included, so adopting twice is a no-op. A file holding a
+    /// left exactly as it is, locks included, so adopting twice is a no-op. A file holding a
     /// different key refuses as [`Error::Different`] and is never replaced: that key may be the only
     /// copy there is. A file that cannot be read refuses for its own reason rather than counting as
     /// absent.
@@ -177,10 +177,10 @@ impl KeyFile {
     }
 
     /// Put `new` on the key file, opened first with `with`: one of its own locks, or `None` for a
-    /// plain file, which has none. A lock of `new`'s method already there is replaced, which is how a
-    /// passphrase is changed; otherwise `new` joins the others, and any one of them opens the file. The
-    /// key, and so the node, never changes, and neither does the file key the locks wrap, so no other
-    /// lock needs opening.
+    /// plain file, which has none. A new lock of a method the file already holds replaces it, which is
+    /// how a passphrase is changed; the only method is `passphrase`, so a sealed file keeps one lock,
+    /// and the list form is for methods added later. The key, and so the node, never changes, and
+    /// neither does the file key the locks wrap, so no other lock needs opening.
     ///
     /// In this order, and nothing reaches the next step until the last one held:
     ///

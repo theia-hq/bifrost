@@ -123,7 +123,7 @@ impl PassphraseLock {
             .derive(passphrase, &self.salt)
             .map_err(Refusal::Crypto)?;
         match cipher::open(&key, &self.nonce, &self.aad(header), &self.wrapped) {
-            Ok(file_key) => Ok(FileKey(file_key)),
+            Ok(file_key) => Ok(FileKey::copy_of(&file_key)),
             Err(Failed::Tag) => Err(Refusal::Unlock),
             Err(Failed::Crypto(source)) => Err(Refusal::Crypto(source)),
         }

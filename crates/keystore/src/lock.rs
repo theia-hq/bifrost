@@ -56,20 +56,29 @@ const _: () = assert!(passphrase::BODY_LEN <= u16::MAX as usize);
 /// Drawn once, when a file is first sealed, and kept for the file's life: adding or removing a lock
 /// re-wraps this same key, so it needs one unlock by any lock the file already holds. Rotating it
 /// would guard nothing, because whoever opened any copy of the file already holds the seed.
-pub(crate) struct FileKey(Zeroizing<[u8; KEY_LEN]>);
+///
+/// Boxed like [`Secret`](crate::Secret), because it opens the seed from any copy of the file: a move
+/// copies the pointer, never the key, so no unwiped copy is left in a dead stack slot.
+pub(crate) struct FileKey(Box<Zeroizing<[u8; KEY_LEN]>>);
 
 impl FileKey {
-    /// A fresh file key from the operating system's random source.
+    /// A fresh file key from the operating system's random source, written straight into its heap
+    /// home.
     pub(crate) fn generate() -> Result<Self, CryptoError> {
-        let mut key = Zeroizing::new([0; KEY_LEN]);
-        getrandom::fill(&mut key[..]).map_err(CryptoError::entropy)?;
-        Ok(Self(key))
+        let mut key = Self::zeroed();
+        getrandom::fill(&mut key.0[..]).map_err(CryptoError::entropy)?;
+        Ok(key)
     }
 
-    /// A file key of the caller's choosing, for the golden vectors.
-    #[cfg(test)]
-    pub(crate) fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
-        Self(Zeroizing::new(bytes))
+    /// A file key holding a copy of `bytes`, for an unwrap, whose source buffer wipes itself.
+    pub(crate) fn copy_of(bytes: &[u8; KEY_LEN]) -> Self {
+        let mut key = Self::zeroed();
+        key.0.copy_from_slice(bytes);
+        key
+    }
+
+    fn zeroed() -> Self {
+        Self(Box::new(Zeroizing::new([0; KEY_LEN])))
     }
 
     pub(crate) fn bytes(&self) -> &[u8; KEY_LEN] {
@@ -87,13 +96,18 @@ impl Lock {
     /// Parse a lock's body. The caller has already read the method and checked the body's length
     /// against it.
     pub(crate) fn parse(method: Method, body: &[u8]) -> Result<Self, FormatError> {
-        let length = || FormatError::LockLength {
-            method,
-            found: u16::try_from(body.len()).unwrap_or(u16::MAX),
-        };
         match method {
             Method::Passphrase => {
-                PassphraseLock::parse(body.try_into().map_err(|_| length())?).map(Self::Passphrase)
+                let Ok(body) = body.try_into() else {
+                    // Unreachable: the caller judged the declared length before reading the body.
+                    // A refusal rather than a panic because this crate does not panic, and the body
+                    // was read under a two-byte length, so its length fits in one.
+                    return Err(FormatError::LockLength {
+                        method,
+                        found: u16::try_from(body.len()).unwrap_or(u16::MAX),
+                    });
+                };
+                PassphraseLock::parse(body).map(Self::Passphrase)
             }
         }
     }

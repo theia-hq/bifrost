@@ -168,7 +168,7 @@ fn refusal_as(bytes: &[u8], expected: Kind) -> FormatError {
     }
 }
 
-/// Open with the golden passphrase, or say why not.
+/// Open with the passphrase `under`, or say why not.
 fn open(envelope: &Envelope, under: &Passphrase) -> Result<Opened, Refusal> {
     envelope.unlock(Unlock::Passphrase(under))
 }
@@ -183,14 +183,14 @@ fn build(
     cost: Cost,
     salt: [u8; 16],
 ) -> Vec<u8> {
-    let file_key = FileKey::from_bytes(golden_file_key());
+    let file_key = FileKey::copy_of(&golden_file_key());
     let header = header(kind, public);
     let lock =
         PassphraseLock::wrap_with(under, &file_key, &header, cost, salt, golden_lock_nonce())
             .unwrap();
     assemble(
         &header,
-        [&Lock::Passphrase(lock)],
+        &[&Lock::Passphrase(lock)],
         &file_key,
         secret,
         &golden_seed_nonce(),
@@ -433,7 +433,7 @@ fn any_edit_to_a_lock_fails_the_whole_file() {
     // Swapped: a lock that opens on its own, wrapping this file's own key under this file's header,
     // put in place of the one the seed was sealed beside. The lock is good, and the file still does
     // not open, because the seed's seal covers every lock as it was.
-    let file_key = FileKey::from_bytes(golden_file_key());
+    let file_key = FileKey::copy_of(&golden_file_key());
     let mut golden_header = [0; HEADER_LEN];
     golden_header.copy_from_slice(&image[..HEADER_LEN]);
     let other_salt = core::array::from_fn(|at| 0x10 + at as u8);

@@ -6,7 +6,7 @@ use bifrost_core::{KeyError, NodeId};
 use crate::kind::Kind;
 use crate::method::Method;
 
-/// Why a key file could not be loaded, written, adopted, unlocked, or given or relieved of a lock.
+/// Why a key file could not be loaded, written, adopted, unlocked, or have its locks changed.
 ///
 /// Every variant names the file. None carries key material, and none is ever answered by producing
 /// a different key: a refusal is the whole outcome.
@@ -210,7 +210,7 @@ pub enum FormatError {
         found: u64,
     },
     /// A sealed-file signature, but the bytes end before its layout does, or run on past it.
-    #[error("a sealed key of {found} bytes is cut short or runs past its end")]
+    #[error("a sealed key of {found} bytes is truncated or padded")]
     SealedSize {
         /// The file's length.
         found: u64,
@@ -303,6 +303,10 @@ enum Primitive {
     // panic.
     #[error("the cipher could not seal the key")]
     Cipher,
+    // A file holds at most one lock per method, so the writer is never handed more locks than one
+    // byte counts. A value rather than a panic for the same reason as `Cipher`.
+    #[error("a sealed key file holds more locks than one byte counts")]
+    LockCount,
 }
 
 impl CryptoError {
@@ -320,5 +324,9 @@ impl CryptoError {
 
     pub(crate) const fn cipher() -> Self {
         Self(Primitive::Cipher)
+    }
+
+    pub(crate) const fn lock_count() -> Self {
+        Self(Primitive::LockCount)
     }
 }
