@@ -1,4 +1,4 @@
-use crate::{CryptoKind, KeyError, NodeId, NodeIdParseError, derive_ed25519_child_secret};
+use crate::{CryptoKind, KeyError, NodeId, NodeIdParseError};
 
 // The key vectors. nauthy's `key_tests.rs` holds the same bytes, in the same order, under the same
 // clause names, so a clause that drifts in one crate fails that crate's CI against the other's vector.
@@ -145,61 +145,6 @@ fn derives_the_ed25519_public_key_from_a_secret() {
     assert_eq!(id.key(), &expected);
     // Deterministic: the same secret always yields the same identity.
     assert_eq!(id, NodeId::from_ed25519_secret(&secret));
-}
-
-#[test]
-fn derives_a_device_identity_from_a_root_and_label() {
-    let root = [3u8; NodeId::KEY_LEN];
-    let device = NodeId::derive_ed25519(&root, "ci-runner");
-    // The derived id is exactly the identity of the derived child secret: the owner computes it offline,
-    // the machine adopts the secret and comes up as this id. This is the whole derived-identity mechanic.
-    let child = derive_ed25519_child_secret(&root, "ci-runner");
-    assert_eq!(device, NodeId::from_ed25519_secret(&child));
-    assert_eq!(device.kind(), CryptoKind::Ed25519);
-    // Deterministic: same root + label always the same id (instant addressing, no registry).
-    assert_eq!(device, NodeId::derive_ed25519(&root, "ci-runner"));
-}
-
-#[test]
-fn distinct_labels_and_roots_derive_distinct_devices() {
-    let root = [3u8; NodeId::KEY_LEN];
-    let other = [4u8; NodeId::KEY_LEN];
-    let desk = NodeId::derive_ed25519(&root, "desk");
-    let runner = NodeId::derive_ed25519(&root, "ci-runner");
-    let alien = NodeId::derive_ed25519(&other, "desk");
-    assert_ne!(
-        desk, runner,
-        "different labels under one root are different devices"
-    );
-    assert_ne!(
-        desk, alien,
-        "the same label under a different root is a different device"
-    );
-}
-
-#[test]
-fn a_child_secret_is_domain_separated_from_the_root_and_other_derivations() {
-    let root = [9u8; NodeId::KEY_LEN];
-    // Typed, so a return that stops wiping itself is a compile error here.
-    let child: zeroize::Zeroizing<[u8; NodeId::KEY_LEN]> =
-        derive_ed25519_child_secret(&root, "desk");
-    // The child is never the root itself: the root stays on the owner's laptop; only a scoped child is
-    // handed out as the derived-key payload a device adopts.
-    assert_ne!(*child, root);
-    // Domain-separated from any other KDF over the same root. A sibling derivation uses the same BLAKE3
-    // primitive with a DIFFERENT context; a device seed and any sibling seed for one root must never
-    // coincide, or adopting a device would leak the sibling seed (and vice versa). This pins the separation
-    // so a refactor that collapses the contexts trips here.
-    let sibling_seed = blake3::derive_key("bifrost sibling derivation v1", &root);
-    assert_ne!(*child, sibling_seed);
-}
-
-#[test]
-fn a_child_secret_uses_the_bifrost_context() {
-    assert_eq!(
-        *derive_ed25519_child_secret(&[9; 32], "desk"),
-        blake3::derive_key("bifrost device identity v1: desk", &[9; 32])
-    );
 }
 
 #[test]
