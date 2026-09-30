@@ -187,7 +187,7 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
-    /// A cryptographic primitive could not run.
+    /// Sealing or unlocking could not run.
     #[error("could not seal or unlock the key file {}", path.display())]
     Crypto {
         /// The key file.
@@ -282,9 +282,10 @@ pub enum FormatError {
     PublicKey(#[source] KeyError),
 }
 
-/// A cryptographic primitive failed to run: the random source, the key derivation, or the cipher.
+/// Sealing or unlocking a key file could not run: the random source, the key derivation, or the
+/// cipher failed, or the file was given more than 255 locks.
 ///
-/// Opaque, so the primitives this crate uses stay out of its public surface; the cause rides the
+/// Opaque, so the primitives this crate uses stay out of its public surface; the cause is in the
 /// `source()` chain.
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
@@ -305,7 +306,7 @@ enum Primitive {
     Cipher,
     // A file holds at most one lock per method, so the writer is never handed more locks than one
     // byte counts. A value rather than a panic for the same reason as `Cipher`.
-    #[error("a sealed key file holds more locks than one byte counts")]
+    #[error("too many locks to seal: a key file holds at most 255")]
     LockCount,
 }
 

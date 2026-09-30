@@ -177,10 +177,10 @@ impl KeyFile {
     }
 
     /// Put `new` on the key file, opened first with `with`: one of its own locks, or `None` for a
-    /// plain file, which has none. A new lock of a method the file already holds replaces it, which is
-    /// how a passphrase is changed; the only method is `passphrase`, so a sealed file keeps one lock,
-    /// and the list form is for methods added later. The key, and so the node, never changes, and
-    /// neither does the file key the locks wrap, so no other lock needs opening.
+    /// plain file, which has none. A new lock of a method the file already holds replaces that lock,
+    /// which is how a passphrase is changed. Since `passphrase` is the only method, on a sealed file
+    /// this always replaces its one lock. The key, and so the node, never changes, and neither does the
+    /// file key the locks wrap, so no other lock needs opening.
     ///
     /// In this order, and nothing reaches the next step until the last one held:
     ///
