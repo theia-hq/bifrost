@@ -9,7 +9,8 @@ use zeroize::Zeroizing;
 use crate::envelope::{self, Envelope, Parsed};
 use crate::error::{CryptoError, Error, FormatError};
 use crate::kind::Kind;
-use crate::method::Protection;
+use crate::lock::FileKey;
+use crate::method::{Method, NewLock, Protection, Unlock};
 use crate::secret::Secret;
 use crate::stored::{Locked, Stored};
 
@@ -70,9 +71,9 @@ impl KeyFile {
     }
 
     /// The root key file at `path`. Every write seals it: a [`Protection::Plain`] write refuses as
-    /// [`Error::PlainRoot`]. A sealed device key at the path is refused by its kind. A plain 32-byte
-    /// file there still loads, as [`Stored::Plain`], because a plain file carries no kind to refuse
-    /// it by; whether to use it is the caller's decision.
+    /// [`Error::PlainRoot`], and its passphrase lock is never removed. A sealed device key at the path
+    /// is refused by its kind. A plain 32-byte file there still loads, as [`Stored::Plain`], because a
+    /// plain file carries no kind to refuse it by; whether to use it is the caller's decision.
     pub fn root(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -128,14 +129,13 @@ impl KeyFile {
         self.writable(protection)?;
         self.sweep();
         let image = self.encode(secret, protection)?;
-        self.create(&image, protection, secret.node_id())
+        self.create(&image, Proof::of(protection), secret.node_id())
     }
 
-    /// Stage `image`, prove it opens under `protection` as `node`, and only then publish it into
-    /// absence.
-    fn create(&self, image: &[u8], protection: Protection<'_>, node: NodeId) -> Result<(), Error> {
+    /// Stage `image`, prove it opens by `proof` as `node`, and only then publish it into absence.
+    fn create(&self, image: &[u8], proof: Proof<'_>, node: NodeId) -> Result<(), Error> {
         let staged = self.stage(image)?;
-        staged.verify(protection, node)?;
+        staged.verify(proof, node)?;
         staged.publish_new()
     }
 
@@ -165,7 +165,9 @@ impl KeyFile {
             Some(Stored::Plain(_)) => Ok(()),
             // The unlock proves the claim: it succeeds only when the sealed key IS the header's node.
             Some(Stored::Locked(locked)) => match protection {
-                Protection::Passphrase(passphrase) => locked.unlock(passphrase).map(drop),
+                Protection::Passphrase(passphrase) => {
+                    locked.unlock(Unlock::Passphrase(passphrase)).map(drop)
+                }
                 Protection::Plain => Err(Error::Unconfirmed {
                     path: self.path.clone(),
                     claimed: incoming,
@@ -174,29 +176,33 @@ impl KeyFile {
         }
     }
 
-    /// Rewrite the key file from one protection to another: plain to passphrase, passphrase to plain,
-    /// or one passphrase to a new one. The key, and so the node, never changes.
+    /// Put `new` on the key file, opened first with `with`: one of its own locks, or `None` for a
+    /// plain file, which has none. A lock of `new`'s method already there is replaced, which is how a
+    /// passphrase is changed; otherwise `new` joins the others, and any one of them opens the file. The
+    /// key, and so the node, never changes, and neither does the file key the locks wrap, so no other
+    /// lock needs opening.
     ///
     /// In this order, and nothing reaches the next step until the last one held:
     ///
-    /// 1. **unlock** the file as it stands with `from`, which must name the method the file records;
-    /// 2. **re-wrap** the key under `to`, a passphrase seal drawing a fresh salt and nonce;
-    /// 3. **test-unlock** the new form, staged beside the file, through the same loader every load
-    ///    uses, and require the same node back;
+    /// 1. **unlock** the file as it stands with `with`, which must name a lock the file holds;
+    /// 2. **re-wrap** the file key under `new`, drawing a fresh salt and nonce, and seal the seed again
+    ///    over the new list;
+    /// 3. **test-unlock** the new form through `new`, staged beside the file, through the same loader
+    ///    every load uses, and require the same node back;
     /// 4. **atomically rename** it over the file, then sync the directory.
     ///
     /// Until step 4 the original is untouched, so a wrong passphrase, a crash, or a new form that does
     /// not read back leaves the file readable exactly as before.
     ///
     /// Just before the rename, the file at the path must still be the one step 1 read. If something
-    /// replaced or changed it meanwhile (a restore, an adopt, another migration), the migration
-    /// refuses as [`Error::Changed`] rather than write the old key over the new one, which may be the
-    /// only copy of it. What remains is the instant between that check and the rename; closing it
-    /// entirely takes a lock the caller holds across every change to its key files.
+    /// replaced or changed it meanwhile (a restore, an adopt, another lock change), this refuses as
+    /// [`Error::Changed`] rather than write the old key over the new one, which may be the only copy
+    /// of it. What remains is the instant between that check and the rename; closing it entirely takes
+    /// a lock the caller holds across every change to its key files.
     ///
-    /// Sealing a key that was stored plain protects the file from here on. It does not reach copies
+    /// Locking a key that was stored plain protects the file from here on. It does not reach copies
     /// made while it was plain (backups, snapshots, the disk blocks the old file occupied), so a key
-    /// that may have leaked is replaced with a new key, not sealed.
+    /// that may have leaked is replaced with a new key, not locked.
     ///
     /// A path that is a symbolic link is resolved first, and the file it names is the one rewritten,
     /// staged beside it: a key file kept elsewhere and linked into place (a dotfile manager's layout)
@@ -204,15 +210,72 @@ impl KeyFile {
     /// itself would leave the link's target, the file actually kept, holding the old form, while the
     /// path reported the new one. Refusals after that point name the file the link resolved to.
     ///
-    /// A root key file refuses a migration to [`Protection::Plain`] as [`Error::PlainRoot`], before
-    /// anything is read.
-    pub fn migrate(&self, from: Protection<'_>, to: Protection<'_>) -> Result<(), Error> {
-        self.writable(to)?;
+    /// Given `None` for a sealed file, this refuses as [`Error::Sealed`]; given a lock the file does
+    /// not hold, a plain file included, as [`Error::NoLock`].
+    pub fn add_lock(&self, with: Option<Unlock<'_>>, new: NewLock<'_>) -> Result<(), Error> {
         let real = self.resolved()?;
         real.sweep();
-        let (secret, seen) = real.unlock(from)?;
-        let image = real.encode(&secret, to)?;
-        real.replace(&image, to, secret.node_id(), &seen)
+        let (stored, seen) = real.load_present()?;
+        let (image, node) = match (stored, with) {
+            (Stored::Plain(secret), None) => (real.seal(&secret, new)?, secret.node_id()),
+            (Stored::Plain(_), Some(with)) => return Err(real.no_lock(with.method())),
+            (Stored::Locked(_), None) => {
+                return Err(Error::Sealed {
+                    path: real.path.clone(),
+                });
+            }
+            (Stored::Locked(locked), Some(with)) => {
+                let opened = locked.open(with)?;
+                let image = locked
+                    .envelope()
+                    .with_lock(&opened, new)
+                    .map(Zeroizing::new)
+                    .map_err(|source| real.crypto(source))?;
+                (image, opened.secret.node_id())
+            }
+        };
+        real.replace(&image, Proof::Lock(new.opener()), node, &seen)
+    }
+
+    /// Take the lock of `method` off the key file, opened first with `with`, which may be that same
+    /// lock. The key, the node, and the other locks stay as they are. Removing a device key's last
+    /// lock writes it plain; a root key's passphrase lock is never removed, and asking refuses as
+    /// [`Error::RootPassphrase`] before anything is read.
+    ///
+    /// The same four steps, the same check that the file is unchanged before the rename, and the same
+    /// handling of a symbolic link as [`add_lock`](Self::add_lock). A file with no lock of `method`,
+    /// a plain file included, refuses as [`Error::NoLock`] before anything is unlocked.
+    ///
+    /// Removing a lock stops it opening this file from here on. A copy made while the lock was on it
+    /// (a backup) still opens with it.
+    pub fn remove_lock(&self, with: Unlock<'_>, method: Method) -> Result<(), Error> {
+        self.removable(method)?;
+        let real = self.resolved()?;
+        real.sweep();
+        let (stored, seen) = real.load_present()?;
+        let Stored::Locked(locked) = stored else {
+            return Err(real.no_lock(method));
+        };
+        if !locked.envelope().holds(method) {
+            return Err(real.no_lock(method));
+        }
+        let opened = locked.open(with)?;
+        let node = opened.secret.node_id();
+        let rewritten = locked
+            .envelope()
+            .without_lock(&opened, method)
+            .map_err(|source| real.crypto(source))?;
+        match rewritten {
+            Some(image) => real.replace(&image, Proof::FileKey(&opened.file_key), node, &seen),
+            // The last lock is gone, so the file is written plain. A root never gets here, since its
+            // passphrase lock cannot be removed; the plain write still goes through the one check
+            // that refuses a plain root.
+            None => {
+                real.writable(Protection::Plain)?;
+                let image = real.encode(&opened.secret, Protection::Plain)?;
+                real.replace(&image, Proof::Plain, node, &seen)
+            }
+        }
     }
 
     /// Whether this file may be written under `protection`: anything but a plain root key.
@@ -222,6 +285,16 @@ impl KeyFile {
                 path: self.path.clone(),
             }),
             (Kind::Root | Kind::Device, _) => Ok(()),
+        }
+    }
+
+    /// Whether this file's lock of `method` may be removed: anything but a root key's passphrase.
+    fn removable(&self, method: Method) -> Result<(), Error> {
+        match (self.kind, method) {
+            (Kind::Root, Method::Passphrase) => Err(Error::RootPassphrase {
+                path: self.path.clone(),
+            }),
+            (Kind::Device, Method::Passphrase) => Ok(()),
         }
     }
 
@@ -239,41 +312,25 @@ impl KeyFile {
         }
     }
 
-    /// Step 1 of a migration: the key as the file stands, opened with what the caller says it is, and
-    /// the fingerprint of the file it came from.
-    fn unlock(&self, from: Protection<'_>) -> Result<(Secret, Fingerprint), Error> {
-        let Some((stored, seen)) = self.load_seen()? else {
-            return Err(Error::Absent {
-                path: self.path.clone(),
-            });
-        };
-        let secret = match (stored, from) {
-            (Stored::Plain(secret), Protection::Plain) => secret,
-            (Stored::Locked(locked), Protection::Passphrase(passphrase)) => {
-                locked.unlock(passphrase)?
-            }
-            (stored, from) => {
-                return Err(Error::WrongMethod {
-                    path: self.path.clone(),
-                    stored: stored.method(),
-                    given: from.method(),
-                });
-            }
-        };
-        Ok((secret, seen))
+    /// The file as it stands, and the fingerprint of the file it came from: step 1 of a lock change,
+    /// which has nothing to change when nothing is there.
+    fn load_present(&self) -> Result<(Stored, Fingerprint), Error> {
+        self.load_seen()?.ok_or_else(|| Error::Absent {
+            path: self.path.clone(),
+        })
     }
 
-    /// Steps 3 and 4 of a migration: stage `image`, prove it opens under `to` as `node`, confirm the
-    /// file is still the one `seen` describes, and only then rename it over the file.
+    /// Steps 3 and 4 of a lock change: stage `image`, prove it opens by `proof` as `node`, confirm
+    /// the file is still the one `seen` describes, and only then rename it over the file.
     fn replace(
         &self,
         image: &[u8],
-        to: Protection<'_>,
+        proof: Proof<'_>,
         node: NodeId,
         seen: &Fingerprint,
     ) -> Result<(), Error> {
         let staged = self.stage(image)?;
-        staged.verify(to, node)?;
+        staged.verify(proof, node)?;
         // Checked last, after the slow unlock of the stage, so the window it leaves is as short as it
         // can be without a lock.
         match fs::metadata(&self.path) {
@@ -293,13 +350,17 @@ impl KeyFile {
     ) -> Result<Zeroizing<Vec<u8>>, Error> {
         match protection {
             Protection::Plain => Ok(secret.with_bytes(|seed| Zeroizing::new(seed.to_vec()))),
-            Protection::Passphrase(passphrase) => Envelope::seal(secret, self.kind, passphrase)
-                .map(|envelope| Zeroizing::new(envelope.image().to_vec()))
-                .map_err(|source| Error::Crypto {
-                    path: self.path.clone(),
-                    source,
-                }),
+            Protection::Passphrase(passphrase) => {
+                self.seal(secret, NewLock::Passphrase(passphrase))
+            }
         }
+    }
+
+    /// The bytes of a sealed file holding `secret` under the one lock `lock`.
+    fn seal(&self, secret: &Secret, lock: NewLock<'_>) -> Result<Zeroizing<Vec<u8>>, Error> {
+        Envelope::seal(secret, self.kind, lock)
+            .map(Zeroizing::new)
+            .map_err(|source| self.crypto(source))
     }
 
     /// Read the file's bytes and fingerprint, or `None` when nothing is at the path.
@@ -365,7 +426,7 @@ impl KeyFile {
         Ok(())
     }
 
-    /// Remove staging files a crashed write or migration left beside the key file.
+    /// Remove staging files a crashed write or lock change left beside the key file.
     ///
     /// A stage is removed on every path a running process takes, but not when the process is killed
     /// or the power fails, and a stage left by an earlier plain write still holds that plain seed after
@@ -426,10 +487,7 @@ impl KeyFile {
         let Some(name) = self.path.file_name() else {
             return Err(self.not_a_file());
         };
-        let nonce = getrandom::u64().map_err(|source| Error::Crypto {
-            path: self.path.clone(),
-            source: CryptoError::entropy(source),
-        })?;
+        let nonce = getrandom::u64().map_err(|source| self.crypto(CryptoError::entropy(source)))?;
         let mut temp = name.to_owned();
         temp.push(format!(".tmp.{}.{nonce:016x}", std::process::id()));
         Ok(self.path.with_file_name(temp))
@@ -468,6 +526,20 @@ impl KeyFile {
         }
     }
 
+    fn crypto(&self, source: CryptoError) -> Error {
+        Error::Crypto {
+            path: self.path.clone(),
+            source,
+        }
+    }
+
+    fn no_lock(&self, method: Method) -> Error {
+        Error::NoLock {
+            path: self.path.clone(),
+            method,
+        }
+    }
+
     fn changed(&self) -> Error {
         Error::Changed {
             path: self.path.clone(),
@@ -491,17 +563,18 @@ struct Staged<'a> {
 }
 
 impl Staged<'_> {
-    /// Read the staged file back through the loader and unlock it with `protection`: it must hold
-    /// `node`. What is about to become the key file is proven to open before it does.
-    fn verify(&self, protection: Protection<'_>, node: NodeId) -> Result<(), Error> {
+    /// Read the staged file back through the loader and open it by `proof`: it must hold `node`.
+    /// What is about to become the key file is proven to open before it does.
+    fn verify(&self, proof: Proof<'_>, node: NodeId) -> Result<(), Error> {
         let staged = KeyFile {
             path: self.temp.clone(),
             kind: self.target.kind,
         };
-        let opened = match (staged.load(), protection) {
-            (Ok(Some(Stored::Plain(secret))), Protection::Plain) => Some(secret),
-            (Ok(Some(Stored::Locked(locked))), Protection::Passphrase(passphrase)) => {
-                locked.unlock(passphrase).ok()
+        let opened = match (staged.load(), proof) {
+            (Ok(Some(Stored::Plain(secret))), Proof::Plain) => Some(secret),
+            (Ok(Some(Stored::Locked(locked))), Proof::Lock(with)) => locked.unlock(with).ok(),
+            (Ok(Some(Stored::Locked(locked))), Proof::FileKey(file_key)) => {
+                locked.envelope().open_with(file_key).ok()
             }
             _ => None,
         };
@@ -561,13 +634,35 @@ impl Drop for Staged<'_> {
     }
 }
 
+/// How a staged file is proven to open before it is published.
+#[derive(Clone, Copy)]
+enum Proof<'a> {
+    /// It is plain.
+    Plain,
+    /// This lock opens it: the one just added, or the one a new file is written under.
+    Lock(Unlock<'a>),
+    /// The file key opens its seed. A lock removal proves the new form this way, because the lock
+    /// that opened the old form may be the one it removed.
+    FileKey(&'a FileKey),
+}
+
+impl<'a> Proof<'a> {
+    /// What opens a file written under `protection`.
+    const fn of(protection: Protection<'a>) -> Self {
+        match protection {
+            Protection::Plain => Self::Plain,
+            Protection::Passphrase(passphrase) => Self::Lock(Unlock::Passphrase(passphrase)),
+        }
+    }
+}
+
 /// A key file's bytes, and which file they came from.
 struct Contents {
     bytes: Zeroizing<Vec<u8>>,
     seen: Fingerprint,
 }
 
-/// Which file a load read: enough to tell, just before a migration renames over it, whether the path
+/// Which file a load read: enough to tell, just before a lock change renames over it, whether the path
 /// still names that file unchanged. The inode and device say it is the same file; the size and the
 /// change time say nothing was written to it, and the change time is one a writer cannot set back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

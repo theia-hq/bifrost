@@ -2,6 +2,24 @@
 
 All notable changes to bifrost, newest first.
 
+## Unreleased
+
+### Breaking
+- **A sealed key file is format version 2: a file key and a list of locks.** A random file key seals
+  the seed, and each lock wraps the file key. Any one lock opens the file, and a file holds at most one
+  lock per method. The passphrase is the only method. Files written by earlier versions do not open:
+  they are refused as version 1.
+- **`KeyFile::add_lock` and `KeyFile::remove_lock` replace `KeyFile::migrate`.**
+  `add_lock(with, new)` opens the file with `with` (`None` for a plain file) and adds `new`, in place of
+  a lock of the same method: that is how a passphrase is changed. `remove_lock(with, method)` takes one
+  lock off. Removing a device key's last lock writes it plain; a root key's passphrase lock cannot be
+  removed.
+- **`Locked::unlock` takes an `Unlock`, and `Locked::methods()` replaces `Locked::method()`.** `Method`
+  names lock methods only, so `Method::Plain`, `Stored::method()` and `Protection::method()` are gone. A
+  plain file is `Stored::Plain`.
+- **`Error` drops `WrongMethod` and gains `NoLock`, `Sealed` and `RootPassphrase`.** `FormatError`
+  gains `NoLocks`, `DuplicateLock` and `LockLength`.
+
 ## v0.8.0
 
 ### Breaking
