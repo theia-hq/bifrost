@@ -5,23 +5,8 @@ All notable changes to bifrost, newest first.
 ## Unreleased
 
 ### Breaking
-- **The `keystore` crate moves out of bifrost** to its own repository,
-  [theia-hq/keystore](https://github.com/theia-hq/keystore). bifrost no longer ships it.
-- **A sealed key file is format version 2: a file key and a list of locks.** A random file key seals
-  the seed, and a lock wraps the file key. The format holds a list of locks, at most one per method; the
-  passphrase is the only method, so a sealed file has one lock. A sealed file from an earlier version is
-  refused as format version 1 (`FormatError::Version`); start from a new key. Plain key files are
-  unchanged.
-- **`KeyFile::add_lock` and `KeyFile::remove_lock` replace `KeyFile::migrate`.**
-  `add_lock(with, new)` opens the file with `with` (`None` for a plain file) and adds `new`, in place of
-  a lock of the same method: that is how a passphrase is changed. `remove_lock(with, method)` takes one
-  lock off. Removing a device key's last lock writes it plain; a root key's passphrase lock cannot be
-  removed. `NewLock`, a new type, is the lock `add_lock` adds.
-- **`Locked::unlock` takes an `Unlock`, and `Locked::methods()` replaces `Locked::method()`.** `Method`
-  names lock methods only, so `Method::Plain`, `Stored::method()` and `Protection::method()` are gone. A
-  plain file is `Stored::Plain`.
-- **`Error` drops `WrongMethod` and gains `NoLock`, `Sealed` and `RootPassphrase`.** `FormatError`
-  gains `NoLocks`, `DuplicateLock` and `LockLength`.
+- **The `keystore` crate is no longer part of bifrost.** It is its own repository,
+  [theia-hq/keystore](https://github.com/theia-hq/keystore), from v0.1.0.
 - **`NodeId::derive_ed25519` and `derive_ed25519_child_secret` are gone:** bifrost no longer derives child keys.
 
 ## v0.8.0
