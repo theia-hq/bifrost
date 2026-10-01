@@ -20,6 +20,7 @@ All notable changes to bifrost, newest first.
   plain file is `Stored::Plain`.
 - **`Error` drops `WrongMethod` and gains `NoLock`, `Sealed` and `RootPassphrase`.** `FormatError`
   gains `NoLocks`, `DuplicateLock` and `LockLength`.
+- **`NodeId::derive_ed25519` and `derive_ed25519_child_secret` are gone:** bifrost no longer derives child keys.
 
 ## v0.8.0
 
