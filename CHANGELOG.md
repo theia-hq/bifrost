@@ -5,6 +5,8 @@ All notable changes to bifrost, newest first.
 ## Unreleased
 
 ### Breaking
+- **The `keystore` crate moves out of bifrost** to its own repository,
+  [theia-hq/keystore](https://github.com/theia-hq/keystore). bifrost no longer ships it.
 - **A sealed key file is format version 2: a file key and a list of locks.** A random file key seals
   the seed, and a lock wraps the file key. The format holds a list of locks, at most one per method; the
   passphrase is the only method, so a sealed file has one lock. A sealed file from an earlier version is
