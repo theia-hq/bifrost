@@ -6,30 +6,53 @@
 //! leaking past this boundary.
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, HintStream, KeyError, Path};
 pub use bifrost_transport::{Sealed, Session, Transport};
+use iroh::address_lookup::AddressLookupBuilderError;
 use iroh::endpoint::{
     Connection, PathList, PortmapperConfig, RecvStream, RelayMode, SendStream, presets,
 };
-use iroh::{EndpointAddr, EndpointId, PublicKey, SecretKey, TransportAddr};
+use iroh::{EndpointAddr, EndpointId, PublicKey, RelayMap, SecretKey, TransportAddr};
+use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 mod reach;
 
+use reach::{Lookups, Role};
 pub use reach::{Reach, ReachUrlError, RelayHome, RelayUrl, Resolver, ResolverUrl};
 
 /// The ALPN that identifies the Bifrost substrate protocol during the handshake.
 pub const ALPN: &[u8] = b"bifrost/0";
 
 /// A bound iroh endpoint.
+///
+/// A clone is a second handle on the same endpoint, not a second endpoint: it shares the socket, the
+/// identity and the reach, so a [`set_reach`](Self::set_reach) through one is what every clone reads
+/// back, and a close through one closes them all.
+#[derive(Clone)]
 pub struct Endpoint {
     inner: iroh::Endpoint,
     /// This endpoint's own identity, derived once at bind from the secret it binds under.
     node: NodeId,
     /// How this bind finds a peer, which decides whether a dial waits on a discovery feed.
     finding: Finding,
+    /// The reach this endpoint runs on, or `None` for a local or offline bind, which has no relay
+    /// and no resolver to change. Behind an async lock held across a whole swap: two swaps that
+    /// interleaved their relay inserts and removes would leave a map that is neither one.
+    reach: Option<Arc<Mutex<Applied>>>,
+}
+
+/// The reach a bind or the last swap put on an endpoint.
+struct Applied {
+    reach: Reach,
+    /// Fixed at bind: a dialing endpoint never starts publishing because its reach changed.
+    role: Role,
+    /// The URLs of the relay map as applied, which the next swap diffs against. Kept here because
+    /// iroh does not read its relay map back.
+    relays: Vec<iroh::RelayUrl>,
 }
 
 /// How an endpoint finds a peer, fixed by the bind that made it.
@@ -71,12 +94,7 @@ impl Endpoint {
     /// across NATs. The fresh-identity reachable shape: it publishes a record under a key generated per
     /// call that no dialer holds, like [`bind_reachable_with_secret`](Self::bind_reachable_with_secret).
     pub async fn bind() -> Result<Self, BindError> {
-        Self::finish(
-            Reach::default().serving(),
-            SecretKey::generate(),
-            Finding::ByKey,
-        )
-        .await
+        Self::finish_via(Reach::default(), Role::Serving, SecretKey::generate()).await
     }
 
     /// Bind with a persisted identity as a SERVING node: n0 discovery and relays, and publish this
@@ -110,11 +128,7 @@ impl Endpoint {
         secret: &[u8; 32],
         reach: Reach,
     ) -> impl Future<Output = Result<Self, BindError>> + use<> {
-        Self::finish(
-            reach.serving(),
-            SecretKey::from_bytes(secret),
-            Finding::ByKey,
-        )
+        Self::finish_via(reach, Role::Serving, SecretKey::from_bytes(secret))
     }
 
     /// Bind for DIALING ONLY over a caller-named [`Reach`]: the same no-record bind as
@@ -125,11 +139,7 @@ impl Endpoint {
         secret: &[u8; 32],
         reach: Reach,
     ) -> impl Future<Output = Result<Self, BindError>> + use<> {
-        Self::finish(
-            reach.dialing(),
-            SecretKey::from_bytes(secret),
-            Finding::ByKey,
-        )
+        Self::finish_via(reach, Role::Dialing, SecretKey::from_bytes(secret))
     }
 
     /// Bind a local-only endpoint with a FRESH identity, for same-process tests (the conformance
@@ -140,6 +150,7 @@ impl Endpoint {
             iroh::Endpoint::builder(presets::Minimal),
             SecretKey::generate(),
             Finding::ByHints,
+            None,
         )
         .await
     }
@@ -159,6 +170,7 @@ impl Endpoint {
                 .portmapper_config(PortmapperConfig::Disabled),
             SecretKey::from_bytes(secret),
             Finding::ByHints,
+            None,
         )
     }
 
@@ -176,15 +188,118 @@ impl Endpoint {
                 iroh::Endpoint::builder(presets::Minimal).bind_addr(bind_addr)?,
                 secret,
                 Finding::ByHints,
+                None,
             )
             .await
         }
+    }
+
+    /// Point this bound endpoint at `reach`: the relay it offers as its home, and the resolver it
+    /// publishes its record to and resolves peers through. Takes effect without a rebind, and open
+    /// connections stay open.
+    ///
+    /// Applied is not yet in effect. iroh picks the home relay from its next network report over the
+    /// new map, and when that report reaches no relay in it, iroh keeps the old home in use even
+    /// though it has left the map. A resolver change stops the old lookups and starts the new ones,
+    /// so a resolve in the instant between finds no service, and a record already published to the
+    /// old resolver stays there until its TTL runs out. A swap that keeps the resolver keeps the
+    /// lookups running.
+    ///
+    /// # Errors
+    ///
+    /// [`SetReachError::Local`] on an endpoint from a local or offline bind, and
+    /// [`SetReachError::Closed`] or [`SetReachError::Lookup`] once the endpoint is closed. The
+    /// reach read back by [`reach`](Self::reach) changes only when the swap succeeds.
+    pub async fn set_reach(&self, reach: Reach) -> Result<(), SetReachError> {
+        let Some(applied) = &self.reach else {
+            return Err(SetReachError::Local);
+        };
+        let mut applied = applied.lock().await;
+        let lookups = (applied.reach.resolver != reach.resolver)
+            .then(|| reach.resolver.lookups(applied.role));
+        self.swap(&mut applied.relays, &reach.relay.relays(), lookups)
+            .await?;
+        applied.reach = reach;
+        Ok(())
+    }
+
+    /// The reach this endpoint was last pointed at, by its bind or by
+    /// [`set_reach`](Self::set_reach), or `None` for a local or offline bind. What was applied, not
+    /// which relay is in use: see [`set_reach`](Self::set_reach).
+    pub async fn reach(&self) -> Option<Reach> {
+        Some(self.reach.as_ref()?.lock().await.reach.clone())
+    }
+
+    /// Replace the relays in `applied` with `relays`, and the lookups with `lookups` when given.
+    async fn swap(
+        &self,
+        applied: &mut Vec<iroh::RelayUrl>,
+        relays: &RelayMap,
+        lookups: Option<Lookups>,
+    ) -> Result<(), SetReachError> {
+        if self.inner.is_closed() {
+            return Err(SetReachError::Closed);
+        }
+        // Started before anything changes, so a failure leaves the endpoint as it was.
+        let started = lookups
+            .map(|lookups| lookups.start(&self.inner))
+            .transpose()
+            .map_err(SetReachError::Lookup)?;
+
+        // Insert before removing, so the map is never empty in between: an empty map gives the
+        // network report no relay to pick a home from.
+        let next: Vec<iroh::RelayUrl> = relays.urls();
+        for config in relays.relays::<Vec<_>>() {
+            if !applied.contains(&config.url) {
+                self.inner.insert_relay(config.url.clone(), config).await;
+            }
+        }
+        for gone in applied.iter().filter(|url| !next.contains(url)) {
+            self.inner.remove_relay(gone).await;
+        }
+        *applied = next;
+
+        if let Some(started) = started {
+            let services = self
+                .inner
+                .address_lookup()
+                .map_err(|_closed| SetReachError::Closed)?;
+            // iroh offers no swap of one service for another, so this clears and adds. `add`
+            // republishes the last published record at once, so the new resolver holds it without
+            // waiting for the next change of address.
+            services.clear();
+            for service in started {
+                services.add_boxed(service);
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind over `reach` as `role`, remembering both so the reach can be changed later.
+    fn finish_via(
+        reach: Reach,
+        role: Role,
+        secret: SecretKey,
+    ) -> impl Future<Output = Result<Self, BindError>> + use<> {
+        let builder = reach.builder(role);
+        let applied = Applied {
+            relays: reach.relay.relays().urls(),
+            reach,
+            role,
+        };
+        Self::finish(
+            builder,
+            secret,
+            Finding::ByKey,
+            Some(Arc::new(Mutex::new(applied))),
+        )
     }
 
     async fn finish(
         builder: iroh::endpoint::Builder,
         secret: SecretKey,
         finding: Finding,
+        reach: Option<Arc<Mutex<Applied>>>,
     ) -> Result<Self, BindError> {
         // Derived from the secret, not parsed from iroh's id: a secret's public half is a canonical
         // prime-order point, so the own id has nothing to refuse. The copy of the secret is wiped here.
@@ -198,6 +313,7 @@ impl Endpoint {
             inner,
             node,
             finding,
+            reach,
         })
     }
 }
@@ -401,6 +517,20 @@ pub enum BindError {
     /// The requested fixed bind address was not a valid socket address.
     #[error("invalid bind address")]
     Addr(#[from] iroh::endpoint::InvalidSocketAddr),
+}
+
+/// A reach change on a bound endpoint was refused. The endpoint is left as it was.
+#[derive(Debug, thiserror::Error)]
+pub enum SetReachError {
+    /// The endpoint was bound local or offline, with no relay and no resolver to change.
+    #[error("a local or offline endpoint has no relay or resolver to change")]
+    Local,
+    /// The endpoint is closed.
+    #[error("the endpoint is closed")]
+    Closed,
+    /// The new resolver's lookup services could not start on the endpoint.
+    #[error("start the lookups for the new resolver")]
+    Lookup(#[source] AddressLookupBuilderError),
 }
 
 #[cfg(test)]

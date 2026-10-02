@@ -1,26 +1,36 @@
-//! What each bind registers, how each bind reads a discovery feed, and the two pins the type
-//! system cannot make.
+//! What each bind registers, how each bind reads a discovery feed, the two pins the type system
+//! cannot make, and a reach changed on a bound endpoint.
 //!
 //! iroh exposes the lookup services it was built with but no relay or certificate introspection, so
 //! the lookup counts are asserted on a real bind and the rest is read off this crate's own source. A
 //! removed pin fails here, not at the next upgrade. The feed read is [`Finding::seed`] driven with
 //! fake feeds, since the choice between waiting and not never touches the network.
+//!
+//! A reach change is driven against relays and a pkarr server run on loopback. They speak plaintext,
+//! which the public [`Reach`] refuses, so those tests hand the swap its relays and lookups directly
+//! through [`Endpoint::swap`], the step [`Endpoint::set_reach`] takes after resolving a [`Reach`].
 
 use core::future::Future as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::pin::pin;
 use core::task::{Context, Waker};
+use core::time::Duration;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use bifrost_core::{
     Addr, AddrUpdate, Discovery, Error, HintStream, KeyError, Layered, NodeId, StaticDiscovery,
 };
-use bifrost_transport::Transport as _;
+use bifrost_transport::{Session as _, Transport as _};
 use futures_util::{FutureExt as _, stream};
+use iroh::test_utils::DnsPkarrServer;
+use iroh::{EndpointAddr, RelayConfig, RelayMap, Watcher as _};
+use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
 use tokio::sync::oneshot;
+use tokio::time;
 
-use crate::{Endpoint, Finding, Reach, RelayHome, Resolver, peer_of};
+use crate::reach::Role;
+use crate::{ALPN, Endpoint, Finding, Reach, RelayHome, Resolver, SetReachError, peer_of, reach};
 
 /// A bind that finds peers by key dials at once over a feed that never answers; a hints-only bind
 /// has nothing to dial yet, so it is still waiting.
@@ -266,6 +276,223 @@ fn a_twin_endpoint_id_is_refused_by_peer_of() {
         peer_of(untwisted),
         Ok(NodeId::from_ed25519_secret(&[7; NodeId::KEY_LEN]))
     );
+}
+
+/// A swap moves the home relay of an endpoint that is already serving: the connection opened over
+/// the old relay stays open, and once the old relay is gone a peer still reaches the endpoint, and is
+/// answered, through the new one.
+#[tokio::test]
+async fn a_reach_change_moves_the_home_relay_on_a_bound_endpoint() {
+    let (old_relay, old) = local_relay().await;
+    let (_new_relay, new) = local_relay().await;
+    let moved = serving(21).await;
+    swap(&moved, &old, None).await;
+    home_is(&moved, &old).await;
+    let peer = serving(22).await;
+    swap(&peer, &new, None).await;
+    home_is(&peer, &new).await;
+    let before = dial(&peer, &moved, &old).await;
+
+    swap(&moved, &new, None).await;
+    home_is(&moved, &new).await;
+    echo(before).await;
+
+    // With the old relay gone, a session can only have crossed the new one.
+    old_relay.shutdown().await.expect("stop the old relay");
+    echo(dial(&peer, &moved, &new).await).await;
+    moved.close().await;
+    peer.close().await;
+}
+
+/// A swap of resolver publishes this endpoint's record through the new one at once, and resolves
+/// through the new one only.
+#[tokio::test]
+async fn a_resolver_change_publishes_through_the_new_resolver() {
+    let (_relay, relay) = local_relay().await;
+    let first = DnsPkarrServer::run().await.expect("run the first resolver");
+    let second = DnsPkarrServer::run()
+        .await
+        .expect("run the second resolver");
+    let moved = serving(23).await;
+    swap(&moved, &relay, Some(lookups_at(&first))).await;
+    first
+        .on_endpoint(&moved.inner.id(), BOUND)
+        .await
+        .expect("the record goes to the first resolver");
+
+    swap(&moved, &relay, Some(lookups_at(&second))).await;
+    second
+        .on_endpoint(&moved.inner.id(), BOUND)
+        .await
+        .expect("the record goes to the new resolver");
+
+    // The test resolver takes records and serves none back, so the resolving half is read off the
+    // running services: the new resolver's, and nothing left of the old one's.
+    let services = moved
+        .inner
+        .address_lookup()
+        .expect("a live endpoint reports its lookups");
+    let rendered = format!("{services:?}");
+    assert_eq!(services.len(), 2, "PkarrPublisher + PkarrResolver");
+    assert!(
+        rendered.contains(&format!("{:?}", second.pkarr_url())),
+        "the new resolver is in use: {rendered}"
+    );
+    assert!(
+        !rendered.contains(&format!("{:?}", first.pkarr_url())),
+        "the old resolver is gone: {rendered}"
+    );
+    moved.close().await;
+}
+
+/// A relay the endpoint cannot reach is applied, and the old home stays in use: iroh keeps its home
+/// relay when no relay in the new map answers. The swap is real (the old relay leaves the map, so
+/// the next network report no longer measures it); the home is what does not move.
+#[tokio::test]
+async fn an_unreachable_relay_keeps_the_old_home() {
+    let (_relay, old) = local_relay().await;
+    let moved = serving(25).await;
+    swap(&moved, &old, None).await;
+    home_is(&moved, &old).await;
+
+    let unreachable = Reach {
+        relay: RelayHome::Custom("https://elsewhere.invalid".parse().expect("a relay origin")),
+        ..named_reach()
+    };
+    moved
+        .set_reach(unreachable.clone())
+        .await
+        .expect("a bound endpoint takes a reach");
+    assert_eq!(moved.reach().await, Some(unreachable));
+
+    let mut reports = moved.inner.net_report();
+    time::timeout(BOUND, async {
+        loop {
+            let measured_old = reports.get().is_some_and(|report| {
+                report
+                    .relay_latency
+                    .iter()
+                    .any(|(_probe, url, _latency)| *url == old)
+            });
+            if !measured_old {
+                return;
+            }
+            reports.updated().await.expect("the endpoint is alive");
+        }
+    })
+    .await
+    .expect("a network report without the old relay, which left the map");
+
+    let home = moved.inner.home_relay_status().get();
+    assert!(
+        home.iter()
+            .any(|status| *status.url() == old && status.is_connected()),
+        "the old home stays in use: {home:?}"
+    );
+    moved.close().await;
+}
+
+/// A local or offline bind has no relay or resolver, so it refuses a reach and reports none.
+#[tokio::test]
+async fn a_local_bind_refuses_a_reach_change() {
+    let local = Endpoint::bind_local().await.expect("local bind");
+    assert!(matches!(
+        local.set_reach(Reach::default()).await,
+        Err(SetReachError::Local)
+    ));
+    assert_eq!(local.reach().await, None);
+    local.close().await;
+}
+
+/// How long a test waits on a relay, a resolver or a network report before calling it a failure.
+const BOUND: Duration = Duration::from_secs(20);
+
+/// A relay on loopback, in plaintext, with no QUIC address discovery: the network report measures it
+/// over HTTP alone, which is enough for it to become a home.
+async fn local_relay() -> (Server, iroh::RelayUrl) {
+    let mut config = ServerConfig::default();
+    config.relay = Some(RelayServerConfig::new((Ipv4Addr::LOCALHOST, 0)));
+    let server = Server::spawn(config).await.expect("run a relay");
+    let addr = server.http_addr().expect("the relay serves http");
+    let url = format!("http://{addr}").parse().expect("a relay url");
+    (server, url)
+}
+
+/// A serving bind over the named reach, whose hosts resolve nowhere, so it reaches no network until
+/// a test swaps a loopback relay or resolver onto it.
+async fn serving(seed: u8) -> Endpoint {
+    Endpoint::bind_reachable_with_secret_via(&[seed; 32], named_reach())
+        .await
+        .expect("serving bind")
+}
+
+/// The lookups a serving endpoint registers against a loopback pkarr server.
+fn lookups_at(resolver: &DnsPkarrServer) -> reach::Lookups {
+    reach::Lookups::at(resolver.pkarr_url().clone(), Role::Serving)
+}
+
+/// Swap `relay` and, when given, `lookups` onto a bound endpoint, through the same step
+/// [`Endpoint::set_reach`] takes.
+async fn swap(endpoint: &Endpoint, relay: &iroh::RelayUrl, lookups: Option<reach::Lookups>) {
+    let applied = endpoint.reach.as_ref().expect("a reachable bind");
+    let mut applied = applied.lock().await;
+    let relays = RelayMap::from(RelayConfig::new(relay.clone(), None));
+    endpoint
+        .swap(&mut applied.relays, &relays, lookups)
+        .await
+        .expect("a live endpoint takes a swap");
+}
+
+/// Wait until `relay` is the endpoint's connected home.
+async fn home_is(endpoint: &Endpoint, relay: &iroh::RelayUrl) {
+    let mut home = endpoint.inner.home_relay_status();
+    time::timeout(BOUND, async {
+        loop {
+            if home
+                .get()
+                .iter()
+                .any(|status| status.url() == relay && status.is_connected())
+            {
+                return;
+            }
+            home.updated().await.expect("the endpoint is alive");
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{relay} becomes the home: {:?}", home.get()));
+}
+
+/// `from` dials `to` naming only `relay`, and `to` accepts. The address carries no socket, so the
+/// session is set up through the relay or not at all.
+async fn dial(
+    from: &Endpoint,
+    to: &Endpoint,
+    relay: &iroh::RelayUrl,
+) -> (iroh::endpoint::Connection, crate::IrohSession) {
+    let addr = EndpointAddr::new(to.inner.id()).with_relay_url(relay.clone());
+    let (dialed, accepted) = tokio::join!(
+        time::timeout(BOUND, from.inner.connect(addr, ALPN)),
+        time::timeout(BOUND, to.accept()),
+    );
+    let dialed = dialed
+        .expect("the dial completes in time")
+        .expect("the dial through the relay");
+    let accepted = accepted
+        .expect("the accept completes in time")
+        .expect("the accept");
+    (dialed, accepted)
+}
+
+/// One byte each way over a fresh stream of a session `dial` opened.
+async fn echo((dialed, accepted): (iroh::endpoint::Connection, crate::IrohSession)) {
+    let (mut send, mut recv) = dialed.open_bi().await.expect("open a stream");
+    send.write_all(&[1]).await.expect("send");
+    let (mut back, mut heard) = accepted.accept_bi().await.expect("accept the stream");
+    let mut byte = [0u8; 1];
+    heard.read_exact(&mut byte).await.expect("hear the byte");
+    back.write_all(&byte).await.expect("answer");
+    recv.read_exact(&mut byte).await.expect("hear the answer");
+    assert_eq!(byte, [1]);
 }
 
 /// A reach whose halves are both the caller's own. The hosts are `.invalid`, which resolves nowhere
