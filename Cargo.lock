@@ -342,6 +342,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "futures-core",
  "thiserror 2.0.20",
+ "url",
 ]
 
 [[package]]
@@ -350,6 +351,7 @@ version = "0.0.0"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
+ "futures-core",
  "futures-util",
  "iroh",
  "iroh-relay",

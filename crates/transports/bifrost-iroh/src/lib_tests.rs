@@ -19,18 +19,21 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use bifrost_core::{
-    Addr, AddrUpdate, Discovery, Error, HintStream, KeyError, Layered, NodeId, StaticDiscovery,
+    Addr, AddrUpdate, ConnInfo, Discovery, Error, HintStream, KeyError, Layered, NodeId, Relay,
+    StaticDiscovery,
 };
 use bifrost_transport::{Session as _, Transport as _};
-use futures_util::{FutureExt as _, stream};
+use futures_util::{FutureExt as _, StreamExt as _, stream};
 use iroh::test_utils::DnsPkarrServer;
-use iroh::{EndpointAddr, RelayConfig, RelayMap, Watcher as _};
+use iroh::{EndpointAddr, RelayConfig, RelayMap, TransportAddr, Watcher as _};
 use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
 use tokio::sync::oneshot;
 use tokio::time;
 
 use crate::reach::Role;
-use crate::{ALPN, Endpoint, Finding, Reach, RelayHome, Resolver, SetReachError, peer_of, reach};
+use crate::{
+    ALPN, Endpoint, Finding, OpenPath, Reach, RelayHome, Resolver, SetReachError, peer_of, reach,
+};
 
 /// A bind that finds peers by key dials at once over a feed that never answers; a hints-only bind
 /// has nothing to dial yet, so it is still waiting.
@@ -276,6 +279,93 @@ fn a_twin_endpoint_id_is_refused_by_peer_of() {
         peer_of(untwisted),
         Ok(NodeId::from_ed25519_secret(&[7; NodeId::KEY_LEN]))
     );
+}
+
+/// A hole-punched session keeps its relay path open as a standby beside the direct one. The bytes
+/// take the direct path iroh selected, so the session is direct, with that path's rtt and address.
+#[test]
+fn a_direct_path_with_a_standby_relay_is_direct() {
+    let paths = [
+        Open::standby(relay_addr(), RELAY_RTT),
+        Open::carrying(TransportAddr::Ip(hint()), DIRECT_RTT),
+    ];
+    assert_eq!(
+        crate::conn_info(&paths),
+        ConnInfo {
+            path: bifrost_core::Path::Direct,
+            rtt: Some(DIRECT_RTT),
+            remote: Some(hint()),
+        }
+    );
+}
+
+/// The inversion: the same two paths with the relay selected is relayed, naming that relay, with no
+/// direct address, since none carries the bytes.
+#[test]
+fn a_relayed_path_with_a_standby_direct_is_relayed() {
+    let paths = [
+        Open::carrying(relay_addr(), RELAY_RTT),
+        Open::standby(TransportAddr::Ip(hint()), DIRECT_RTT),
+    ];
+    let relay = Relay::from(url::Url::from(relay_url()));
+    assert_eq!(
+        crate::conn_info(&paths),
+        ConnInfo {
+            path: bifrost_core::Path::Relayed(relay),
+            rtt: Some(RELAY_RTT),
+            remote: None,
+        }
+    );
+}
+
+/// Open paths with none selected (before the first selection, or just after the selected one closed)
+/// carry no bytes, so the path is unknown rather than read off whichever happens to be open.
+#[test]
+fn open_paths_with_none_selected_are_unknown() {
+    let paths = [
+        Open::standby(relay_addr(), RELAY_RTT),
+        Open::standby(TransportAddr::Ip(hint()), DIRECT_RTT),
+    ];
+    assert_eq!(crate::conn_info(&paths), ConnInfo::default());
+}
+
+/// A session set up through a relay opens its path stream naming that relay, then says when iroh
+/// moves its bytes to the direct path it punched, at the moment of the selection. The relay path
+/// stays open as a standby and the session reads direct: the live form of the selection tests above.
+/// Once the session is closed and dropped, the stream ends.
+#[tokio::test]
+async fn a_relayed_session_says_when_its_bytes_move_direct() {
+    let (_relay, relay) = local_relay().await;
+    let served = serving(31).await;
+    swap(&served, &relay, None).await;
+    home_is(&served, &relay).await;
+    let dialer = serving(32).await;
+    swap(&dialer, &relay, None).await;
+    home_is(&dialer, &relay).await;
+
+    // The handshake itself crosses the relay, and punching needs a round trip after it, so the
+    // session is still relayed when it is handed over.
+    let (dialed, accepted) = dial(&dialer, &served, &relay).await;
+    let mut changes = accepted.path_changes();
+    let through = bifrost_core::Path::Relayed(Relay::from(url::Url::from(relay)));
+    assert_eq!(changes.next().await, Some(through));
+
+    let moved = time::timeout(BOUND, changes.next())
+        .await
+        .expect("the path changes in time");
+    assert_eq!(moved, Some(bifrost_core::Path::Direct));
+    assert!(
+        accepted.conn.paths().iter().any(|path| path.is_relay()),
+        "the relay path stays open as a standby"
+    );
+    assert_eq!(accepted.conn_info().path, bifrost_core::Path::Direct);
+
+    accepted.close();
+    drop((accepted, dialed));
+    let ended = time::timeout(BOUND, async { while changes.next().await.is_some() {} }).await;
+    assert!(ended.is_ok(), "the stream ends after the session closes");
+    served.close().await;
+    dialer.close().await;
 }
 
 /// A swap moves the home relay of an endpoint that is already serving: the connection opened over
@@ -699,3 +789,61 @@ fn a_bind_future_holds_no_borrow_of_the_secret() {
     drop(seed);
     drop(binds);
 }
+
+/// One open path as [`crate::conn_info`] reads it, standing in for the path iroh builds only on a live
+/// connection.
+struct Open {
+    selected: bool,
+    remote: TransportAddr,
+    rtt: Duration,
+}
+
+impl Open {
+    /// The path iroh selected to carry bytes.
+    fn carrying(remote: TransportAddr, rtt: Duration) -> Self {
+        Self {
+            selected: true,
+            remote,
+            rtt,
+        }
+    }
+
+    /// A path held open but not selected.
+    fn standby(remote: TransportAddr, rtt: Duration) -> Self {
+        Self {
+            selected: false,
+            remote,
+            rtt,
+        }
+    }
+}
+
+impl OpenPath for &Open {
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+
+    fn remote_addr(&self) -> &TransportAddr {
+        &self.remote
+    }
+
+    fn rtt(&self) -> Duration {
+        self.rtt
+    }
+}
+
+/// The relay a relayed path in the selection tests goes through.
+fn relay_url() -> iroh::RelayUrl {
+    "https://relay.example".parse().expect("a relay url")
+}
+
+/// [`relay_url`] as a path's remote address.
+fn relay_addr() -> TransportAddr {
+    TransportAddr::Relay(relay_url())
+}
+
+/// A direct path's rtt in the selection tests, far below [`RELAY_RTT`] so a swap of the two shows.
+const DIRECT_RTT: Duration = Duration::from_micros(400);
+
+/// A relayed path's rtt in the selection tests.
+const RELAY_RTT: Duration = Duration::from_millis(38);

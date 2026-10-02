@@ -19,7 +19,8 @@
 //!
 //! This crate is the byte-moving interface and nothing else: implement [`Transport`] + [`Session`] to
 //! add a transport. The transport-neutral vocabulary it speaks ([`Addr`], [`Error`], [`ConnInfo`],
-//! [`Path`], and the [`Discovery`](bifrost_core::Discovery) contract) lives in `bifrost-core`.
+//! [`Path`], [`PathChanges`], and the [`Discovery`](bifrost_core::Discovery) contract) lives in
+//! `bifrost-core`.
 //!
 //! Streams are exposed as associated types bounded by [`AsyncRead`]/[`AsyncWrite`], so the boundary
 //! is a plain byte-stream interface with no boxing: a transport differs only in how a session is
@@ -55,6 +56,7 @@ use core::net::SocketAddr;
 
 pub use bifrost_core::{
     Addr, AddrUpdate, ConnInfo, Error, HintStream, KeyError, NodeId, NodeIdParseError, Path,
+    PathChanges, Relay,
 };
 use tokio::io;
 
@@ -196,6 +198,13 @@ pub trait Session {
     fn conn_info(&self) -> ConnInfo {
         ConnInfo::default()
     }
+
+    /// The path carrying this session's bytes: the one in force now, then each change. The live
+    /// counterpart of [`conn_info`](Self::conn_info); [`PathChanges`] states the rules.
+    ///
+    /// A transport whose path never moves, or that cannot tell, returns [`PathChanges::fixed`]. A
+    /// session that wraps another returns the inner session's.
+    fn path_changes(&self) -> PathChanges;
 }
 
 #[cfg(test)]

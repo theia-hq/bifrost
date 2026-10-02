@@ -8,7 +8,7 @@
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, KeyError, Path};
+use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, KeyError, Path, PathChanges};
 pub use bifrost_transport::{Announced, Session, Transport};
 
 /// A quirk-backed endpoint.
@@ -192,6 +192,12 @@ impl Session for QuirkSession {
             rtt: None,
             remote: Some(self.conn.peer_addr()),
         }
+    }
+
+    /// Direct for the session's whole life, as [`conn_info`](Session::conn_info) says: there is no
+    /// other path for quirk to move to.
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Direct)
     }
 }
 

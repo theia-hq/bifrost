@@ -11,6 +11,7 @@ data-encoding.workspace = true
 ed25519-dalek.workspace = true
 futures-core.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

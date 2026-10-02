@@ -12,7 +12,7 @@ use core::time::Duration;
 use std::io;
 
 use bifrost::{
-    Addr, Announced, Discovery, Error, HintStream, KeyError, Node, NodeId, StaticDiscovery,
+    Addr, Announced, Discovery, Error, HintStream, KeyError, Node, NodeId, Path, StaticDiscovery,
     Transport,
 };
 use bifrost_conformance::{
@@ -21,7 +21,7 @@ use bifrost_conformance::{
 };
 use bifrost_noise::{Noise, NoiseError, wire};
 use bifrost_transport::Session;
-use futures_util::stream;
+use futures_util::{StreamExt as _, stream};
 use support::{BarePeer, Forger, Replayer, Sabotage, Saboteur, Splicer, Wire, WireSession};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -100,6 +100,23 @@ async fn wrapper_unknown_conn_info() {
     discovery.insert(receiver.node_id(), receiver.local_addr().hints);
     let sender = Node::new(sealed(12), discovery);
     unknown_conn_info(sender, receiver).await;
+}
+
+/// The wrapper forwards its inner session's path stream: the Wire inner says `Direct`, a path no
+/// default gives, and both ends of a sealed session say it after the handshake.
+#[tokio::test]
+async fn wrapper_forwards_the_inner_path_stream() {
+    let receiver = sealed(94);
+    let sender = sealed(95);
+    let target = dial_addr(&receiver);
+    let (accepted, dialed) = tokio::join!(receiver.accept(), sender.connect(target));
+    let accepted = accepted.expect("accept the sealed session");
+    let dialed = dialed.expect("dial the sealed session");
+    for session in [&accepted, &dialed] {
+        let mut changes = session.path_changes();
+        assert_eq!(changes.next().await, Some(Path::Direct));
+        assert_eq!(changes.next().await, None);
+    }
 }
 
 /// The W1 gate. The inner session announces a member's identity; the wrapper must attribute the

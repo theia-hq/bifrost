@@ -8,6 +8,15 @@ All notable changes to bifrost, newest first.
 - **The `keystore` crate is no longer part of bifrost.** It is its own repository,
   [theia-hq/keystore](https://github.com/theia-hq/keystore), from v0.1.0.
 - **`NodeId::derive_ed25519` and `derive_ed25519_child_secret` are gone:** bifrost no longer derives child keys.
+- **`Path` reports the one path carrying bytes, and `Mixed` is gone.** A direct path with a relay
+  kept open as a standby is `Direct`. `Relayed` now carries its relay, `Relayed(Relay)`, so a `match`
+  on it changes. A `Relay` displays as its URL, and `Relay::url` returns it as a `url::Url`, which
+  makes `url` a public dependency of `bifrost-core`. With no path selected, `Path` is `Unknown`.
+  `Path` and `ConnInfo` are no longer `Copy`.
+- **`Session` gains a required `path_changes`,** a `PathChanges` stream: the path carrying the
+  session's bytes when called, then an item each time the transport selects a different `Path`.
+  `bifrost-iroh` reports each change, `bifrost-noise` returns its inner session's, `bifrost-mem`
+  returns `PathChanges::fixed(Unknown)` and `bifrost-quirk` returns `PathChanges::fixed(Direct)`.
 
 ### New
 - **`bifrost-iroh`'s `Endpoint::set_reach` changes the relay and the resolver of a bound endpoint,**

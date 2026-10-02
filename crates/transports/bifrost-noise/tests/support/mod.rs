@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
-use bifrost_core::{Addr, BoxError, Error, NodeId};
+use bifrost_core::{Addr, BoxError, Error, NodeId, Path, PathChanges};
 use bifrost_transport::{Announced, Session, Transport};
 use ed25519_dalek::hazmat::{ExpandedSecretKey, raw_sign};
 use ed25519_dalek::{Sha512, Signature, Signer as _, SigningKey, VerifyingKey};
@@ -227,6 +227,12 @@ impl Session for WireSession {
         self.ended.closed.store(true, Ordering::Release);
         self.ended.notify.notify_one();
     }
+
+    /// A path no default and no uninstrumented transport would give, so a wrapper that answers on its
+    /// own instead of forwarding this stream is caught.
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Direct)
+    }
 }
 
 /// The close signal shared by the two ends of one connection.
@@ -318,6 +324,10 @@ impl Session for Forged {
 
     /// A double whose streams carry nothing has nothing to end.
     fn close(&self) {}
+
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Unknown)
+    }
 }
 
 /// A wire-speaking impostor: it runs the real protocol with its own key but claims another.
