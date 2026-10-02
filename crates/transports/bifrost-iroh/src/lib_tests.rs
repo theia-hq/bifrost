@@ -297,11 +297,16 @@ async fn a_reach_change_moves_the_home_relay_on_a_bound_endpoint() {
     home_is(&moved, &new).await;
     echo(before).await;
 
-    // With the old relay gone, a session can only have crossed the new one.
+    // With the old relay gone, a dialer that has never met this endpoint, and so knows no direct
+    // path to it, can only make first contact through the new relay.
     old_relay.shutdown().await.expect("stop the old relay");
-    echo(dial(&peer, &moved, &new).await).await;
+    let stranger = serving(27).await;
+    swap(&stranger, &new, None).await;
+    home_is(&stranger, &new).await;
+    echo(dial(&stranger, &moved, &new).await).await;
     moved.close().await;
     peer.close().await;
+    stranger.close().await;
 }
 
 /// A swap of resolver publishes this endpoint's record through the new one at once, and resolves
@@ -364,6 +369,11 @@ async fn an_unreachable_relay_keeps_the_old_home() {
         .await
         .expect("a bound endpoint takes a reach");
     assert_eq!(moved.reach().await, Some(unreachable));
+    let live = live_relays(&moved).await;
+    assert!(
+        !live.contains(&old) && live.len() == 1,
+        "the old relay left iroh's map for the new one: {live:?}"
+    );
 
     let mut reports = moved.inner.net_report();
     time::timeout(BOUND, async {
@@ -383,13 +393,62 @@ async fn an_unreachable_relay_keeps_the_old_home() {
     .await
     .expect("a network report without the old relay, which left the map");
 
-    let home = moved.inner.home_relay_status().get();
+    // The home moves after the report is published, so a read right after it could still see the old
+    // home on an iroh that clears it. Hold the claim over a window long enough for that to land.
+    let mut home = moved.inner.home_relay_status();
+    let moved_off = time::timeout(SETTLE, async {
+        loop {
+            if !home
+                .get()
+                .iter()
+                .any(|status| *status.url() == old && status.is_connected())
+            {
+                return;
+            }
+            home.updated().await.expect("the endpoint is alive");
+        }
+    })
+    .await;
+    assert!(
+        moved_off.is_err(),
+        "the home left the old relay: {:?}",
+        home.get()
+    );
+    let home = home.get();
     assert!(
         home.iter()
             .any(|status| *status.url() == old && status.is_connected()),
         "the old home stays in use: {home:?}"
     );
     moved.close().await;
+}
+
+/// A dialing endpoint resolves through the new resolver after a swap and still publishes nothing:
+/// a swap keeps the role it was bound with. The hosts are `.invalid`, so this touches no network.
+#[tokio::test]
+async fn a_dialing_endpoint_stays_resolver_only_after_a_reach_change() {
+    let dialing = Endpoint::bind_dialing_with_secret_via(&[26u8; 32], named_reach())
+        .await
+        .expect("dialing bind over a named reach");
+    let base = "https://other.invalid/pkarr";
+    dialing
+        .set_reach(Reach {
+            resolver: Resolver::Custom(base.parse().expect("a pkarr base")),
+            ..named_reach()
+        })
+        .await
+        .expect("a bound endpoint takes a reach");
+
+    let lookups = lookups(dialing).await;
+    assert_eq!(lookups.count, 1, "PkarrResolver only: {}", lookups.rendered);
+    assert!(lookups.names("PkarrResolver"), "{}", lookups.rendered);
+    assert!(!lookups.names("PkarrPublisher"), "{}", lookups.rendered);
+    let new_base = format!("{:?}", url::Url::parse(base).expect("a url"));
+    assert!(
+        lookups.rendered.contains(&new_base),
+        "the new resolver is in use: {}",
+        lookups.rendered
+    );
 }
 
 /// A local or offline bind has no relay or resolver, so it refuses a reach and reports none.
@@ -406,6 +465,15 @@ async fn a_local_bind_refuses_a_reach_change() {
 
 /// How long a test waits on a relay, a resolver or a network report before calling it a failure.
 const BOUND: Duration = Duration::from_secs(20);
+
+/// How long a claim that something does NOT change is held before it is believed.
+const SETTLE: Duration = Duration::from_secs(2);
+
+/// The URLs in iroh's live relay map, read through the map the bind handed it.
+async fn live_relays(endpoint: &Endpoint) -> Vec<iroh::RelayUrl> {
+    let applied = endpoint.reach.as_ref().expect("a reachable bind");
+    applied.lock().await.live.urls()
+}
 
 /// A relay on loopback, in plaintext, with no QUIC address discovery: the network report measures it
 /// over HTTP alone, which is enough for it to become a home.

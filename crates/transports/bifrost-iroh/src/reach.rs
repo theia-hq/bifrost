@@ -37,9 +37,12 @@ impl Reach {
     /// preset gains later. The relay half is always a custom map, n0's included: iroh configures the
     /// relay transport the same from its default mode as from that mode's map, and a map is what a
     /// later swap on the bound endpoint diffs against.
-    pub(crate) fn builder(&self, role: Role) -> Builder {
-        let builder = iroh::Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Custom(self.relay.relays()));
+    ///
+    /// `relays` is this reach's [`RelayHome::relays`], taken from the caller so it can keep the very
+    /// map it hands iroh.
+    pub(crate) fn builder(&self, role: Role, relays: RelayMap) -> Builder {
+        let builder =
+            iroh::Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Custom(relays));
         self.resolver.lookups(role).onto(builder)
     }
 }

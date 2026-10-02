@@ -51,8 +51,14 @@ struct Applied {
     /// Fixed at bind: a dialing endpoint never starts publishing because its reach changed.
     role: Role,
     /// The URLs of the relay map as applied, which the next swap diffs against. Kept here because
-    /// iroh does not read its relay map back.
+    /// iroh does not read its relay map back. Never fewer than iroh's map holds: a swap records each
+    /// URL before it inserts it and forgets it only as it removes it, so a swap cancelled at any
+    /// await leaves nothing in the map that the next swap would not see and remove.
     relays: Vec<iroh::RelayUrl>,
+    /// The map handed to iroh at bind, which iroh keeps and edits in place. Read only by tests, to
+    /// check what a swap did to the live map rather than infer it from timing.
+    #[cfg(test)]
+    live: RelayMap,
 }
 
 /// How an endpoint finds a peer, fixed by the bind that made it.
@@ -195,21 +201,22 @@ impl Endpoint {
     }
 
     /// Point this bound endpoint at `reach`: the relay it offers as its home, and the resolver it
-    /// publishes its record to and resolves peers through. Takes effect without a rebind, and open
-    /// connections stay open.
+    /// resolves peers through and, if it was bound to serve, publishes its record to. Needs no rebind,
+    /// and open connections stay open.
     ///
-    /// Applied is not yet in effect. iroh picks the home relay from its next network report over the
-    /// new map, and when that report reaches no relay in it, iroh keeps the old home in use even
-    /// though it has left the map. A resolver change stops the old lookups and starts the new ones,
-    /// so a resolve in the instant between finds no service, and a record already published to the
-    /// old resolver stays there until its TTL runs out. A swap that keeps the resolver keeps the
-    /// lookups running.
+    /// A return means the reach is applied, not yet in effect. iroh picks the home relay from its next
+    /// network report over the new relays, and when that report reaches none of them, iroh keeps the
+    /// old home in use though it is no longer in the map. A resolver change replaces the old lookups
+    /// with the new ones, so a resolve in the instant between finds nothing, and a record already
+    /// published to the old resolver stays there until its TTL runs out. A swap that keeps the
+    /// resolver keeps the lookups running.
     ///
     /// # Errors
     ///
-    /// [`SetReachError::Local`] on an endpoint from a local or offline bind, and
-    /// [`SetReachError::Closed`] or [`SetReachError::Lookup`] once the endpoint is closed. The
-    /// reach read back by [`reach`](Self::reach) changes only when the swap succeeds.
+    /// [`SetReachError::Local`] on an endpoint from a local or offline bind,
+    /// [`SetReachError::Closed`] once the endpoint is closed, and [`SetReachError::Lookup`] when the
+    /// new resolver's lookups cannot start, which a closed endpoint can also cause. The reach read
+    /// back by [`reach`](Self::reach) changes only when the swap succeeds.
     pub async fn set_reach(&self, reach: Reach) -> Result<(), SetReachError> {
         let Some(applied) = &self.reach else {
             return Err(SetReachError::Local);
@@ -237,33 +244,42 @@ impl Endpoint {
         relays: &RelayMap,
         lookups: Option<Lookups>,
     ) -> Result<(), SetReachError> {
-        if self.inner.is_closed() {
-            return Err(SetReachError::Closed);
-        }
-        // Started before anything changes, so a failure leaves the endpoint as it was.
+        // Both fallible steps come before any change, so an error leaves the endpoint as it was.
+        let services = self
+            .inner
+            .address_lookup()
+            .map_err(|_closed| SetReachError::Closed)?;
         let started = lookups
             .map(|lookups| lookups.start(&self.inner))
             .transpose()
             .map_err(SetReachError::Lookup)?;
 
         // Insert before removing, so the map is never empty in between: an empty map gives the
-        // network report no relay to pick a home from.
+        // network report no relay to pick a home from. Each edit lands in iroh's map on its first
+        // poll, before its await can yield, so `applied` is updated just ahead of it: a swap
+        // cancelled at any await leaves `applied` holding every URL the map holds, and the next swap
+        // removes whatever this one left behind.
         let next: Vec<iroh::RelayUrl> = relays.urls();
         for config in relays.relays::<Vec<_>>() {
             if !applied.contains(&config.url) {
+                applied.push(config.url.clone());
                 self.inner.insert_relay(config.url.clone(), config).await;
             }
         }
-        for gone in applied.iter().filter(|url| !next.contains(url)) {
-            self.inner.remove_relay(gone).await;
+        let gone: Vec<iroh::RelayUrl> = applied
+            .iter()
+            .filter(|url| !next.contains(url))
+            .cloned()
+            .collect();
+        for url in gone {
+            applied.retain(|kept| *kept != url);
+            self.inner.remove_relay(&url).await;
         }
-        *applied = next;
 
+        // No await from here on, so the lookups change whole or not at all. A swap cancelled before
+        // this point leaves the reach unrecorded, so the next swap compares against the old resolver
+        // and replaces the lookups then.
         if let Some(started) = started {
-            let services = self
-                .inner
-                .address_lookup()
-                .map_err(|_closed| SetReachError::Closed)?;
             // iroh offers no swap of one service for another, so this clears and adds. `add`
             // republishes the last published record at once, so the new resolver holds it without
             // waiting for the next change of address.
@@ -281,9 +297,15 @@ impl Endpoint {
         role: Role,
         secret: SecretKey,
     ) -> impl Future<Output = Result<Self, BindError>> + use<> {
-        let builder = reach.builder(role);
+        let relays = reach.relay.relays();
+        let urls = relays.urls();
+        #[cfg(test)]
+        let live = relays.clone();
+        let builder = reach.builder(role, relays);
         let applied = Applied {
-            relays: reach.relay.relays().urls(),
+            relays: urls,
+            #[cfg(test)]
+            live,
             reach,
             role,
         };
@@ -519,7 +541,7 @@ pub enum BindError {
     Addr(#[from] iroh::endpoint::InvalidSocketAddr),
 }
 
-/// A reach change on a bound endpoint was refused. The endpoint is left as it was.
+/// A reach change on a bound endpoint failed. The reach read back by [`Endpoint::reach`] is unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum SetReachError {
     /// The endpoint was bound local or offline, with no relay and no resolver to change.

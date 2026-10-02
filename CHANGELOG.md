@@ -9,6 +9,14 @@ All notable changes to bifrost, newest first.
   [theia-hq/keystore](https://github.com/theia-hq/keystore), from v0.1.0.
 - **`NodeId::derive_ed25519` and `derive_ed25519_child_secret` are gone:** bifrost no longer derives child keys.
 
+### New
+- **`bifrost-iroh`'s `Endpoint::set_reach` changes the relay and the resolver of a bound endpoint,**
+  with no rebind; open connections stay open. The new home relay takes effect on iroh's next network
+  report, and if no relay in the new map answers, the old home stays in use. `Endpoint::reach` reads
+  back the reach last set, and `SetReachError` says why a change failed: `Local`, `Closed`, or `Lookup`.
+- **`bifrost-iroh`'s `Endpoint` is `Clone`:** a clone is a second handle on the same endpoint, sharing
+  its socket, identity and reach.
+
 ## v0.8.0
 
 ### Breaking
