@@ -199,14 +199,11 @@ pub trait Session {
         ConnInfo::default()
     }
 
-    /// The path carrying this session's bytes: the one in force now, then each change.
+    /// The path carrying this session's bytes: the one in force now, then each change. The live
+    /// counterpart of [`conn_info`](Self::conn_info); [`PathChanges`] states the rules.
     ///
-    /// The live counterpart of [`conn_info`](Self::conn_info), shaped as [`PathChanges`] describes: the
-    /// first item is the current path, then an item at the moment the transport selects a path whose
-    /// [`Path`] differs, so a reader never misses a flip between two snapshots. Required, with no
-    /// default: a wrapper that forgot to forward it would otherwise compile and go silent. A transport
-    /// whose path never moves, or that cannot tell, answers [`PathChanges::fixed`]; a wrapper forwards
-    /// its inner session's.
+    /// A transport whose path never moves, or that cannot tell, returns [`PathChanges::fixed`]. A
+    /// session that wraps another returns the inner session's.
     fn path_changes(&self) -> PathChanges;
 }
 

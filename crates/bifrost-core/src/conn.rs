@@ -9,33 +9,29 @@ use url::Url;
 
 /// The path carrying a session's bytes: straight to the peer, or through a relay.
 ///
-/// This answers the single most reassuring question a p2p tool can: "am I actually direct, or bouncing
-/// off a relay?" It names the ONE path the transport has selected for application data, never the set
-/// of paths it holds open: a transport that keeps a relay path open as a standby beside a direct one is
-/// [`Direct`](Self::Direct), because that is where the bytes go. The selection can change over a
-/// session's life: a connection often starts [`Relayed`](Self::Relayed) and moves to
-/// [`Direct`](Self::Direct) as hole-punching completes, so a reader treats it as the CURRENT path, not
-/// a fixed property, and [`PathChanges`] reports each move. A transport that cannot tell reports
-/// [`Unknown`](Self::Unknown).
+/// It names the one path the transport has selected for application data, not every path it holds
+/// open: a direct path with a relay kept open as a standby is [`Direct`](Self::Direct). The selection
+/// can change during a session, often from [`Relayed`](Self::Relayed) to [`Direct`](Self::Direct)
+/// once hole-punching succeeds, and [`PathChanges`] reports each change. A transport that cannot tell
+/// reports [`Unknown`](Self::Unknown).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Path {
     /// Peer to peer: bytes flow straight to the remote address, no relay in the middle.
     Direct,
-    /// Through the relay named here: the transport has selected the relay path to carry bytes.
+    /// Through the relay named here.
     Relayed(Relay),
-    /// The transport does not expose its path (in-process, or not yet instrumented), or has no path
-    /// selected at this instant.
+    /// The transport does not report its path (an in-process transport has none), has no path selected
+    /// right now, or has selected a kind of path this crate does not name.
     #[default]
     Unknown,
 }
 
 /// The relay a [`Relayed`](Path::Relayed) path goes through, named by its URL.
 ///
-/// Whatever the transport reports is held as given: it is the address the transport is using, and
-/// a reader that shows it to a person renders it as text from elsewhere. Render it with
-/// [`Display`](fmt::Display), or read its parts through [`url`](Self::url). Boxed so a [`Path`] stays
-/// two words (the box and the variant's tag): a parsed `Url` is large by value, and a path travels
-/// inside every [`ConnInfo`] and through every [`PathChanges`] item.
+/// The URL is as the transport reports it, not vetted by this crate, and it can come from the peer.
+/// Render it with [`Display`](fmt::Display), or read its parts through [`url`](Self::url).
+// Boxed so a `Path` stays two words (the box and the variant's tag): a parsed `Url` is large by
+// value, and a path travels inside every `ConnInfo` and through every `PathChanges` item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay(Box<Url>);
 
@@ -64,8 +60,8 @@ impl fmt::Display for Relay {
 ///
 /// Best-effort by design: every field a transport cannot determine is absent (the [`Path`] is
 /// [`Unknown`](Path::Unknown), the rest are `None`), so this never fabricates a reassuring answer it
-/// cannot back. It is a cheap, synchronous accessor snapshotting current state, deliberately OFF the
-/// async hot path. Every field describes the same path, the one carrying bytes.
+/// cannot back. It is a cheap, synchronous accessor snapshotting current state, off the async hot
+/// path. Every field describes the same path, the one carrying bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConnInfo {
     /// The path carrying bytes: direct, through a named relay, or unknown.
@@ -79,31 +75,31 @@ pub struct ConnInfo {
 
 /// The path carrying a session's bytes: the one in force when the stream is made, then each change.
 ///
-/// Returned by `Session::path_changes`. The first item is the path at that moment, so a reader needs
-/// no snapshot first and has no order of calls to get wrong. After it, an item arrives at the moment
-/// the transport selects a path whose [`Path`] differs from the last item, so a reader that prints it
-/// never misses a flip-and-back between two reads of a snapshot. [`Path`] names who carries the bytes
-/// (the peer directly, or which relay), not which socket: a move to another relay is an item, a move
-/// between two direct addresses is not (the address is [`ConnInfo::remote`]).
+/// Returned by `Session::path_changes`. After the first item, an item arrives when the transport
+/// selects a path whose [`Path`] differs from the last item, so a change and its reversal between two
+/// reads of `Session::conn_info` both show. [`Path`] names who carries the bytes (the peer directly, or
+/// which relay), not which socket: a move to another relay is an item, a move between two direct
+/// addresses is not (the address is [`ConnInfo::remote`]).
 ///
 /// It reports selections, not the gaps between them: after the selected path closes and before the
-/// next is selected, `Session::conn_info` reads [`Unknown`](Path::Unknown) and the stream waits for
-/// the next selection. A reader that falls behind gets the path selected now, not a replay of the
-/// ones it missed. The stream ends after the session closes; a transport whose path never moves, or
-/// that cannot tell, says its one path and ends ([`fixed`](Self::fixed)).
+/// next is selected, `Session::conn_info` reads [`Unknown`](Path::Unknown) and the stream waits. A
+/// reader that falls behind gets the path selected now, not the ones it missed. The stream ends after
+/// the session closes; a transport whose path never moves, or that cannot tell, yields its one path
+/// and ends ([`fixed`](Self::fixed)).
 ///
-/// Boxed, `Send + 'static`, and runtime-free like [`HintStream`](crate::HintStream), so a reader can
-/// move it to its own task and the caller's executor drives it. It holds no session open.
+/// `Send + 'static` and runtime-free like [`HintStream`](crate::HintStream): move it to its own task,
+/// and the caller's executor drives it. It does not keep the session open.
 pub struct PathChanges(Pin<Box<dyn Stream<Item = Path> + Send + 'static>>);
 
 impl PathChanges {
-    /// Wrap a transport's own stream of selected paths.
+    /// Wrap a transport's stream of selected paths. [`PathChanges`] states the rules the stream must
+    /// keep; nothing here checks them.
     pub fn new(stream: impl Stream<Item = Path> + Send + 'static) -> Self {
         Self(Box::pin(stream))
     }
 
-    /// A stream that says `path` and ends: the construction for "this path never moves, or no one can
-    /// say when it does".
+    /// A stream that yields `path` once and ends, for a session whose path never moves or that cannot
+    /// tell.
     pub fn fixed(path: Path) -> Self {
         Self::new(Fixed(Some(path)))
     }
