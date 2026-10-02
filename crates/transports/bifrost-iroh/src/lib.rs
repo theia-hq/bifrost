@@ -204,12 +204,15 @@ impl Endpoint {
     /// resolves peers through and, if it was bound to serve, publishes its record to. Needs no rebind,
     /// and open connections stay open.
     ///
-    /// A return means the reach is applied, not yet in effect. iroh picks the home relay from its next
-    /// network report over the new relays, and when that report reaches none of them, iroh keeps the
-    /// old home in use though it is no longer in the map. A resolver change replaces the old lookups
+    /// A return means the reach is applied, but the home relay may not have moved yet. iroh picks the
+    /// home relay from its next network report over the new relays, and when that report reaches none
+    /// of them, iroh keeps the old home in use though it is no longer in the map. A resolver change replaces the old lookups
     /// with the new ones, so a resolve in the instant between finds nothing, and a record already
     /// published to the old resolver stays there until its TTL runs out. A swap that keeps the
     /// resolver keeps the lookups running.
+    ///
+    /// Cancel-safe: a call dropped before it returns leaves [`reach`](Self::reach) and the resolver as
+    /// they were, though some relays may already be swapped; the next call sets the relays to its own.
     ///
     /// # Errors
     ///
