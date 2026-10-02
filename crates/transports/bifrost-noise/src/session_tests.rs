@@ -6,7 +6,7 @@ use core::time::Duration;
 use std::io;
 use std::sync::Arc;
 
-use bifrost_core::{Addr, Error, NodeId};
+use bifrost_core::{Addr, Error, NodeId, Path, PathChanges};
 use bifrost_transport::{Announced, Sealed, Secure, SecurityProfile, Session, Transport};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _, ReadBuf};
 use tokio::sync::mpsc;
@@ -77,6 +77,10 @@ impl Session for FakeSession {
 
     /// A double whose streams carry nothing has nothing to end.
     fn close(&self) {}
+
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Unknown)
+    }
 }
 
 /// The wrapper declares `Sealed` for an `Announced` inner and satisfies `Secure`.
@@ -356,6 +360,10 @@ impl Session for StalledSession {
 
     /// A double whose streams carry nothing has nothing to end.
     fn close(&self) {}
+
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Unknown)
+    }
 }
 
 /// A reader that never produces a byte.

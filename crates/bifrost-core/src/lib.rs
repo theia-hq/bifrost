@@ -26,6 +26,8 @@ pub use id::{CryptoKind, KeyError, NodeId, NodeIdParseError};
 pub use refusal::{Refusal, RefusalDetail, RefusalDetailError};
 
 #[cfg(test)]
+mod conn_tests;
+#[cfg(test)]
 mod discovery_tests;
 #[cfg(test)]
 mod id_tests;

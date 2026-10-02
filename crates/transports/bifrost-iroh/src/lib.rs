@@ -19,8 +19,8 @@ pub use bifrost_transport::{Sealed, Session, Transport};
 use futures_core::Stream;
 use iroh::address_lookup::AddressLookupBuilderError;
 use iroh::endpoint::{
-    Connection, PathEvent, PathEventStream, PathList, PortmapperConfig, RecvStream, RelayMode,
-    SendStream, WeakConnectionHandle, presets,
+    Connection, PathEvent, PathEventStream, PortmapperConfig, RecvStream, RelayMode, SendStream,
+    WeakConnectionHandle, presets,
 };
 use iroh::{EndpointAddr, EndpointId, PublicKey, RelayMap, SecretKey, TransportAddr};
 use tokio::sync::Mutex;
@@ -462,31 +462,29 @@ impl Session for IrohSession {
         conn_info(&self.conn.paths())
     }
 
-    /// iroh's path events, read down to the [`Path`] each newly selected path names.
+    /// The path in force now, then iroh's path events, read down to the [`Path`] each newly
+    /// selected path names.
     ///
     /// Subscribed before the current path is read, as iroh's path watcher asks, so a change between
-    /// the read and the first poll is still seen.
+    /// the read and the first poll is an event and is not lost.
     fn path_changes(&self) -> PathChanges {
         let events = self.conn.path_events();
+        let now = conn_info(&self.conn.paths()).path;
         PathChanges::new(Selections {
             events,
-            said: conn_info(&self.conn.paths()).path,
+            opening: Some(now.clone()),
+            said: now,
             conn: self.conn.weak_handle(),
         })
     }
 }
 
-/// Reduce iroh's open-path snapshot to a [`ConnInfo`] for the selected path, the one carrying bytes.
+/// Reduce an open-path snapshot to a [`ConnInfo`] for the selected path, the one carrying bytes.
 /// The other open paths are standbys and say nothing about where bytes go. No path selected yet (or
 /// the selected one just closed) is [`Path::Unknown`] with no rtt or remote, never a guess from
-/// whichever path happens to be open.
-fn conn_info(paths: &PathList<'_>) -> ConnInfo {
-    selected(paths.iter())
-}
-
-/// The [`ConnInfo`] of the one selected path among `paths`, over [`OpenPath`] so a test can hand it
-/// a path set iroh would only build on a live connection.
-fn selected<P: OpenPath>(paths: impl IntoIterator<Item = P>) -> ConnInfo {
+/// whichever path happens to be open. Over [`OpenPath`] so a test can hand it a path set iroh would
+/// only build on a live connection.
+fn conn_info<P: OpenPath>(paths: impl IntoIterator<Item = P>) -> ConnInfo {
     let Some(carrying) = paths.into_iter().find(OpenPath::is_selected) else {
         return ConnInfo::default();
     };
@@ -544,15 +542,21 @@ fn direct_addr(addr: &TransportAddr) -> Option<SocketAddr> {
     }
 }
 
-/// The stream behind [`IrohSession::path_changes`]: iroh's path events, kept to the selections that
-/// move the bytes to a different [`Path`].
+/// The stream behind [`IrohSession::path_changes`]: the path in force when it was made, then iroh's
+/// path events, kept to the selections that move the bytes to a different [`Path`].
 ///
 /// iroh selects a new path id when, say, the direct path moves from IPv4 to IPv6; both are
 /// [`Path::Direct`], so the change is not said twice. The connection is held weakly: a reader holding
-/// this stream must not keep a closed session's connection alive.
+/// this stream must not keep a dropped session's connection alive.
+///
+/// The `Lagged` re-read and the equal-path skip are not driven by a test: iroh's `PathEvent` variants
+/// are `non_exhaustive`, so no crate outside iroh can build one, and the live test cannot force either
+/// case. They are read correct against iroh 1.2.0's path watcher instead.
 struct Selections {
     events: PathEventStream,
-    /// The path last said, or read when the stream was made, so only a different one is said next.
+    /// The path in force when the stream was made, said once as its first item.
+    opening: Option<Path>,
+    /// The path last said, so only a different one is said next.
     said: Path,
     conn: WeakConnectionHandle,
 }
@@ -562,17 +566,25 @@ impl Stream for Selections {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Path>> {
         let this = self.get_mut();
+        if let Some(opening) = this.opening.take() {
+            return Poll::Ready(Some(opening));
+        }
         loop {
             let selected = match ready!(Pin::new(&mut this.events).poll_next(cx)) {
                 None => return Poll::Ready(None),
                 Some(PathEvent::Selected { remote_addr, .. }) => path_of(&remote_addr),
                 // A selection may be among the dropped events, so answer with the path in force now.
-                // A connection that will not upgrade has closed, and so has this stream.
+                // Nothing selected is a gap between selections, not one: wait for the next. A
+                // connection that will not upgrade has been dropped, so the stream ends.
                 Some(PathEvent::Lagged { .. }) => {
                     let Some(conn) = this.conn.upgrade() else {
                         return Poll::Ready(None);
                     };
-                    conn_info(&conn.paths()).path
+                    let paths = conn.paths();
+                    let Some(carrying) = paths.iter().find(OpenPath::is_selected) else {
+                        continue;
+                    };
+                    path_of(carrying.remote_addr())
                 }
                 // Opening and closing a path moves no bytes; only a selection does.
                 Some(_) => continue,

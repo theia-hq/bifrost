@@ -9,8 +9,13 @@ All notable changes to bifrost, newest first.
   [theia-hq/keystore](https://github.com/theia-hq/keystore), from v0.1.0.
 - **`NodeId::derive_ed25519` and `derive_ed25519_child_secret` are gone:** bifrost no longer derives child keys.
 - **`Path` names the path carrying bytes, and `Mixed` is gone.** A direct path with a relay held open
-  as a standby is `Direct`. `Relayed` names its relay, a `Relay` that prints as the relay's URL. With no
-  path selected, the path is `Unknown`. `Path` and `ConnInfo` are no longer `Copy`.
+  as a standby is `Direct`. `Relayed` names its relay, a `Relay` that prints as the relay's URL and
+  gives it back with `Relay::url`. With no path selected, the path is `Unknown`. `Path` and `ConnInfo`
+  are no longer `Copy`.
+- **`Session` gains a required `path_changes`,** a `PathChanges` stream: the path carrying the session's
+  bytes when it is called, then an item each time a path with a different `Path` is selected. A session
+  whose path never moves answers `PathChanges::fixed(path)`, and a wrapper forwards its inner session's.
+  `bifrost-iroh` reports iroh's path selections, and the Noise wrapper forwards.
 
 ### New
 - **`bifrost-iroh`'s `Endpoint::set_reach` changes the relay and the resolver of a bound endpoint,**
@@ -19,9 +24,6 @@ All notable changes to bifrost, newest first.
   back the reach last set, and `SetReachError` says why a change failed: `Local`, `Closed`, or `Lookup`.
 - **`bifrost-iroh`'s `Endpoint` is `Clone`:** a clone is a second handle on the same endpoint, sharing
   its socket, identity and reach.
-- **`Session::path_changes` streams the path a session's bytes move to,** an item at each change, as a
-  `PathChanges`. The default stream has already ended. `bifrost-iroh` reports iroh's path selections,
-  and the Noise wrapper forwards its inner session's.
 
 ## v0.8.0
 

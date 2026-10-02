@@ -290,7 +290,7 @@ fn a_direct_path_with_a_standby_relay_is_direct() {
         Open::carrying(TransportAddr::Ip(hint()), DIRECT_RTT),
     ];
     assert_eq!(
-        crate::selected(&paths),
+        crate::conn_info(&paths),
         ConnInfo {
             path: bifrost_core::Path::Direct,
             rtt: Some(DIRECT_RTT),
@@ -309,7 +309,7 @@ fn a_relayed_path_with_a_standby_direct_is_relayed() {
     ];
     let relay = Relay::from(url::Url::from(relay_url()));
     assert_eq!(
-        crate::selected(&paths),
+        crate::conn_info(&paths),
         ConnInfo {
             path: bifrost_core::Path::Relayed(relay),
             rtt: Some(RELAY_RTT),
@@ -326,12 +326,13 @@ fn open_paths_with_none_selected_are_unknown() {
         Open::standby(relay_addr(), RELAY_RTT),
         Open::standby(TransportAddr::Ip(hint()), DIRECT_RTT),
     ];
-    assert_eq!(crate::selected(&paths), ConnInfo::default());
+    assert_eq!(crate::conn_info(&paths), ConnInfo::default());
 }
 
-/// A session set up through a relay names that relay, then says when iroh moves its bytes to the
-/// direct path it punched, at the moment of the selection. The relay path stays open as a standby,
-/// and the session reads direct: the live form of the selection tests above.
+/// A session set up through a relay opens its path stream naming that relay, then says when iroh
+/// moves its bytes to the direct path it punched, at the moment of the selection. The relay path
+/// stays open as a standby and the session reads direct: the live form of the selection tests above.
+/// Once the session is closed and dropped, the stream ends.
 #[tokio::test]
 async fn a_relayed_session_says_when_its_bytes_move_direct() {
     let (_relay, relay) = local_relay().await;
@@ -344,10 +345,10 @@ async fn a_relayed_session_says_when_its_bytes_move_direct() {
 
     // The handshake itself crosses the relay, and punching needs a round trip after it, so the
     // session is still relayed when it is handed over.
-    let (_dialed, accepted) = dial(&dialer, &served, &relay).await;
+    let (dialed, accepted) = dial(&dialer, &served, &relay).await;
     let mut changes = accepted.path_changes();
     let through = bifrost_core::Path::Relayed(Relay::from(url::Url::from(relay)));
-    assert_eq!(accepted.conn_info().path, through);
+    assert_eq!(changes.next().await, Some(through));
 
     let moved = time::timeout(BOUND, changes.next())
         .await
@@ -358,6 +359,11 @@ async fn a_relayed_session_says_when_its_bytes_move_direct() {
         "the relay path stays open as a standby"
     );
     assert_eq!(accepted.conn_info().path, bifrost_core::Path::Direct);
+
+    accepted.close();
+    drop((accepted, dialed));
+    let ended = time::timeout(BOUND, async { while changes.next().await.is_some() {} }).await;
+    assert!(ended.is_ok(), "the stream ends after the session closes");
     served.close().await;
     dialer.close().await;
 }
@@ -784,7 +790,7 @@ fn a_bind_future_holds_no_borrow_of_the_secret() {
     drop(binds);
 }
 
-/// One open path as [`crate::selected`] reads it, standing in for the path iroh builds only on a live
+/// One open path as [`crate::conn_info`] reads it, standing in for the path iroh builds only on a live
 /// connection.
 struct Open {
     selected: bool,

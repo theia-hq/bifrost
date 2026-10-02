@@ -33,10 +33,19 @@ pub enum Path {
 ///
 /// Whatever the transport reports is held as given: it is the address the transport is using, and
 /// a reader that shows it to a person renders it as text from elsewhere. Render it with
-/// [`Display`](fmt::Display). Boxed so a [`Path`] stays pointer-sized: a parsed `Url` is large by
-/// value, and a path travels inside every [`ConnInfo`] and through every [`PathChanges`] item.
+/// [`Display`](fmt::Display), or read its parts through [`url`](Self::url). Boxed so a [`Path`] stays
+/// two words (the box and the variant's tag): a parsed `Url` is large by value, and a path travels
+/// inside every [`ConnInfo`] and through every [`PathChanges`] item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay(Box<Url>);
+
+impl Relay {
+    /// The relay's URL, for a reader that needs a part of it, such as the host alone.
+    pub fn url(&self) -> &Url {
+        let Self(url) = self;
+        url
+    }
+}
 
 impl From<Url> for Relay {
     fn from(url: Url) -> Self {
@@ -68,14 +77,20 @@ pub struct ConnInfo {
     pub remote: Option<SocketAddr>,
 }
 
-/// The path a session's bytes move to, each time the transport selects a new one.
+/// The path carrying a session's bytes: the one in force when the stream is made, then each change.
 ///
-/// Returned by `Session::path_changes`. An event, not a poll: an item arrives at the moment of the
-/// change, so a reader that prints it never misses a flip-and-back between two reads of a snapshot.
-/// It does not open with the current path; the snapshot is `Session::conn_info`, and a reader that
-/// wants both reads the snapshot first. A transport that falls behind its own events yields the path
-/// selected now rather than replaying the ones it dropped. The stream ends when the session closes,
-/// or at once for a transport that never changes path or cannot tell.
+/// Returned by `Session::path_changes`. The first item is the path at that moment, so a reader needs
+/// no snapshot first and has no order of calls to get wrong. After it, an item arrives at the moment
+/// the transport selects a path whose [`Path`] differs from the last item, so a reader that prints it
+/// never misses a flip-and-back between two reads of a snapshot. [`Path`] names who carries the bytes
+/// (the peer directly, or which relay), not which socket: a move to another relay is an item, a move
+/// between two direct addresses is not (the address is [`ConnInfo::remote`]).
+///
+/// It reports selections, not the gaps between them: after the selected path closes and before the
+/// next is selected, `Session::conn_info` reads [`Unknown`](Path::Unknown) and the stream waits for
+/// the next selection. A reader that falls behind gets the path selected now, not a replay of the
+/// ones it missed. The stream ends after the session closes; a transport whose path never moves, or
+/// that cannot tell, says its one path and ends ([`fixed`](Self::fixed)).
 ///
 /// Boxed, `Send + 'static`, and runtime-free like [`HintStream`](crate::HintStream), so a reader can
 /// move it to its own task and the caller's executor drives it. It holds no session open.
@@ -87,10 +102,10 @@ impl PathChanges {
         Self(Box::pin(stream))
     }
 
-    /// A stream that has already ended: the construction for "this path never changes, or no one can
+    /// A stream that says `path` and ends: the construction for "this path never moves, or no one can
     /// say when it does".
-    pub fn ended() -> Self {
-        Self::new(Ended)
+    pub fn fixed(path: Path) -> Self {
+        Self::new(Fixed(Some(path)))
     }
 }
 
@@ -108,13 +123,13 @@ impl fmt::Debug for PathChanges {
     }
 }
 
-/// The stream behind [`PathChanges::ended`].
-struct Ended;
+/// The stream behind [`PathChanges::fixed`].
+struct Fixed(Option<Path>);
 
-impl Stream for Ended {
+impl Stream for Fixed {
     type Item = Path;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(None)
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.0.take())
     }
 }

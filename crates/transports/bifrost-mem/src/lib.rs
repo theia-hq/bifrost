@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, Error, HintStream};
+use bifrost_core::{Addr, Error, HintStream, Path, PathChanges};
 pub use bifrost_transport::{InProcess, Session, Transport};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -205,6 +205,11 @@ impl Session for MemSession {
     /// both sides' `wait_closed` resolve. There is no wire, so the peer learns at once.
     fn close(&self) {
         self.severance.sever();
+    }
+
+    /// An in-process session has no network path to name: the same `Unknown` its `conn_info` reports.
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Unknown)
     }
 }
 

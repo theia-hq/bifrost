@@ -12,7 +12,9 @@ use core::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use bifrost::{Addr, Announced, Error, NoDiscovery, Node, NodeId, Session, Transport};
+use bifrost::{
+    Addr, Announced, Error, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport,
+};
 use bifrost_conformance::{
     claimed_identity_not_attributed, identity_binding, reach_roundtrip, wrong_key_rejected,
 };
@@ -89,6 +91,10 @@ impl Session for FabricatedSession {
 
     /// A double that carries no streams has nothing to end.
     fn close(&self) {}
+
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Unknown)
+    }
 }
 
 /// A responder that answers every dial by claiming the key it was dialed under, without holding it.
@@ -150,6 +156,10 @@ impl Session for ImpersonatedSession {
 
     /// A double that carries no streams has nothing to end.
     fn close(&self) {}
+
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Unknown)
+    }
 }
 
 /// A process-global directory of live echo endpoints: the true node id to its inbound session.
@@ -299,6 +309,10 @@ impl Session for EchoSession {
     /// Does nothing: this double exists for the identity cases and is never run through
     /// `close_ends_held_streams`, which it would fail.
     fn close(&self) {}
+
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Unknown)
+    }
 }
 
 /// A session that speaks for a key the dialer never asked for fails [`identity_binding`].

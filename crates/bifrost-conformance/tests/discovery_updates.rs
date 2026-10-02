@@ -16,8 +16,8 @@ use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use bifrost::{
-    Addr, AddrUpdate, Announced, Discovery, Error, HintStream, Latest, Layered, Node, NodeId,
-    Session, StaticDiscovery, Transport,
+    Addr, AddrUpdate, Announced, Discovery, Error, HintStream, Latest, Layered, Node, NodeId, Path,
+    PathChanges, Session, StaticDiscovery, Transport,
 };
 use bifrost_mem::MemTransport;
 use futures_util::stream;
@@ -395,6 +395,10 @@ impl Session for Recorded {
 
     /// A double that carries no streams has nothing to end.
     fn close(&self) {}
+
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::fixed(Path::Unknown)
+    }
 }
 
 /// A distinct ed25519 [`NodeId`] seeded by one byte, enough to tell test identities apart.
