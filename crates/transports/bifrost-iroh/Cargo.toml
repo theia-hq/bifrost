@@ -11,12 +11,15 @@ bifrost-core.workspace = true
 bifrost-transport.workspace = true
 iroh.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
-tokio.workspace = true
+iroh = { workspace = true, features = ["test-utils", "unstable-net-report"] }
+iroh-relay = { workspace = true, features = ["server"] }
+tokio = { workspace = true, features = ["time"] }
 
 [lints]
 workspace = true

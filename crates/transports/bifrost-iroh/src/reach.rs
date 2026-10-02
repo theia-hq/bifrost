@@ -11,7 +11,10 @@ use core::fmt;
 use core::str::FromStr;
 
 use iroh::RelayMap;
-use iroh::address_lookup::{PkarrPublisher, PkarrResolver};
+use iroh::address_lookup::{
+    AddressLookup, AddressLookupBuilder as _, AddressLookupBuilderError, PkarrPublisher,
+    PkarrPublisherBuilder, PkarrResolver, PkarrResolverBuilder,
+};
 use iroh::endpoint::{Builder, RelayMode, default_relay_mode, presets};
 use url::{Host, Url};
 
@@ -27,50 +30,20 @@ pub struct Reach {
 }
 
 impl Reach {
-    /// The builder for a bind that PUBLISHES this node's address record, so peers find it by key.
-    pub(crate) fn serving(self) -> Builder {
-        self.apply(Role::Serving)
-    }
-
-    /// The builder for a bind that only RESOLVES other nodes' records and writes none of its own.
-    pub(crate) fn dialing(self) -> Builder {
-        self.apply(Role::Dialing)
-    }
-
+    /// The builder for a bind that takes on `role` over this reach.
+    ///
     /// Every bind starts from `presets::Minimal`, which registers no lookup service and settles only
     /// the crypto provider, and adds each half explicitly, so no half silently inherits a service the
-    /// preset gains later. The n0 arms are `presets::N0` minus its DNS lookup, on purpose: that lookup
-    /// asks the host's resolver, often plaintext on a shared network, for `_iroh.<key>`, which names
-    /// every peer this node dials. The pkarr resolver asks the same n0 server over https, and wherever
-    /// n0's relay is reachable so is that server, so dropping DNS costs no reach the relay keeps.
-    fn apply(self, role: Role) -> Builder {
-        let Self { relay, resolver } = self;
-        let relay_mode = match relay {
-            RelayHome::N0 => default_relay_mode(),
-            // One URL is the whole map: a node offers exactly one home relay, and the relay a DIALER
-            // uses comes from the peer's own record, never from this map.
-            RelayHome::Custom(RelayUrl(url)) => {
-                RelayMode::Custom(RelayMap::from(iroh::RelayUrl::from(*url)))
-            }
-        };
-        let builder = iroh::Endpoint::builder(presets::Minimal).relay_mode(relay_mode);
-
-        match (resolver, role) {
-            (Resolver::N0, Role::Serving) => builder
-                .address_lookup(PkarrPublisher::n0_dns())
-                .address_lookup(PkarrResolver::n0_dns()),
-            // A dialing bind drops the publisher and keeps the resolver: publishing under a key
-            // another process is serving overwrites that node's record and sends peers to a dead path.
-            (Resolver::N0, Role::Dialing) => builder.address_lookup(PkarrResolver::n0_dns()),
-            // A named resolver gets no DNS lookup: a pkarr base is an HTTP path on one server, not a
-            // delegated DNS origin, so a DNS query against it would resolve nothing.
-            (Resolver::Custom(ResolverUrl(base)), Role::Serving) => builder
-                .address_lookup(PkarrPublisher::builder(Url::clone(&base)))
-                .address_lookup(PkarrResolver::builder(*base)),
-            (Resolver::Custom(ResolverUrl(base)), Role::Dialing) => {
-                builder.address_lookup(PkarrResolver::builder(*base))
-            }
-        }
+    /// preset gains later. The relay half is always a custom map, n0's included: iroh configures the
+    /// relay transport the same from its default mode as from that mode's map, and a map is what a
+    /// later swap on the bound endpoint diffs against.
+    ///
+    /// `relays` is this reach's [`RelayHome::relays`], taken from the caller so it can keep the very
+    /// map it hands iroh.
+    pub(crate) fn builder(&self, role: Role, relays: RelayMap) -> Builder {
+        let builder =
+            iroh::Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Custom(relays));
+        self.resolver.lookups(role).onto(builder)
     }
 }
 
@@ -84,6 +57,18 @@ pub enum RelayHome {
     Custom(RelayUrl),
 }
 
+impl RelayHome {
+    /// This home as the relay map iroh takes.
+    pub(crate) fn relays(&self) -> RelayMap {
+        match self {
+            Self::N0 => default_relay_mode().relay_map(),
+            // One URL is the whole map: a node offers exactly one home relay, and the relay a DIALER
+            // uses comes from the peer's own record, never from this map.
+            Self::Custom(RelayUrl(url)) => RelayMap::from(iroh::RelayUrl::from(Url::clone(url))),
+        }
+    }
+}
+
 /// The service a node publishes its address record to and resolves peers from: n0's, or one the
 /// caller runs. Two nodes find each other only if they resolve through the same one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,6 +78,86 @@ pub enum Resolver {
     N0,
     /// A resolver the caller runs, named by its pkarr base.
     Custom(ResolverUrl),
+}
+
+impl Resolver {
+    /// The lookup services an endpoint taking on `role` registers against this resolver.
+    ///
+    /// The n0 arm is `presets::N0` minus its DNS lookup, on purpose: that lookup asks the host's
+    /// resolver, often plaintext on a shared network, for `_iroh.<key>`, which names every peer this
+    /// node dials. The pkarr resolver asks the same n0 server over https, and wherever n0's relay is
+    /// reachable so is that server, so dropping DNS costs no reach the relay keeps. A named resolver
+    /// gets no DNS lookup either: a pkarr base is an HTTP path on one server, not a delegated DNS
+    /// origin, so a DNS query against it would resolve nothing.
+    pub(crate) fn lookups(&self, role: Role) -> Lookups {
+        match self {
+            Self::N0 => Lookups::of(PkarrPublisher::n0_dns(), PkarrResolver::n0_dns(), role),
+            Self::Custom(ResolverUrl(base)) => Lookups::at(Url::clone(base), role),
+        }
+    }
+}
+
+/// The address lookup services an endpoint registers: a pkarr resolver, and a publisher beside it
+/// when the endpoint serves under its key. Built here once so a bind and a swap on a bound endpoint
+/// register the same services for the same resolver.
+pub(crate) struct Lookups {
+    publisher: Option<PkarrPublisherBuilder>,
+    resolver: PkarrResolverBuilder,
+}
+
+impl Lookups {
+    /// Publish to and resolve from the pkarr server at `base`.
+    pub(crate) fn at(base: Url, role: Role) -> Self {
+        Self::of(
+            PkarrPublisher::builder(base.clone()),
+            PkarrResolver::builder(base),
+            role,
+        )
+    }
+
+    fn of(publisher: PkarrPublisherBuilder, resolver: PkarrResolverBuilder, role: Role) -> Self {
+        let publisher = match role {
+            Role::Serving => Some(publisher),
+            // A dialing endpoint drops the publisher and keeps the resolver: publishing under a key
+            // another process is serving overwrites that node's record and sends peers to a dead path.
+            Role::Dialing => None,
+        };
+        Self {
+            publisher,
+            resolver,
+        }
+    }
+
+    /// Register these services on a bind.
+    fn onto(self, builder: Builder) -> Builder {
+        let Self {
+            publisher,
+            resolver,
+        } = self;
+        let builder = match publisher {
+            Some(publisher) => builder.address_lookup(publisher),
+            None => builder,
+        };
+        builder.address_lookup(resolver)
+    }
+
+    /// Start these services against a bound endpoint, ready to replace the ones it runs. Each is
+    /// boxed because the publisher and the resolver are different types behind one trait.
+    pub(crate) fn start(
+        self,
+        endpoint: &iroh::Endpoint,
+    ) -> Result<Vec<Box<dyn AddressLookup>>, AddressLookupBuilderError> {
+        let Self {
+            publisher,
+            resolver,
+        } = self;
+        let mut started: Vec<Box<dyn AddressLookup>> = Vec::with_capacity(2);
+        if let Some(publisher) = publisher {
+            started.push(Box::new(publisher.into_address_lookup(endpoint)?));
+        }
+        started.push(Box::new(resolver.into_address_lookup(endpoint)?));
+        Ok(started)
+    }
 }
 
 /// The origin of a relay, such as `https://relay.example`.
@@ -220,8 +285,8 @@ pub enum ReachUrlError {
 
 /// Which half of the record contract a bind takes on. It is the one difference between the two
 /// builders, and an enum rather than a flag so a third kind of bind has to be decided here.
-#[derive(Debug)]
-enum Role {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Role {
     Serving,
     Dialing,
 }
