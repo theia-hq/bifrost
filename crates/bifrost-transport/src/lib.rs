@@ -19,7 +19,8 @@
 //!
 //! This crate is the byte-moving interface and nothing else: implement [`Transport`] + [`Session`] to
 //! add a transport. The transport-neutral vocabulary it speaks ([`Addr`], [`Error`], [`ConnInfo`],
-//! [`Path`], and the [`Discovery`](bifrost_core::Discovery) contract) lives in `bifrost-core`.
+//! [`Path`], [`PathChanges`], and the [`Discovery`](bifrost_core::Discovery) contract) lives in
+//! `bifrost-core`.
 //!
 //! Streams are exposed as associated types bounded by [`AsyncRead`]/[`AsyncWrite`], so the boundary
 //! is a plain byte-stream interface with no boxing: a transport differs only in how a session is
@@ -55,6 +56,7 @@ use core::net::SocketAddr;
 
 pub use bifrost_core::{
     Addr, AddrUpdate, ConnInfo, Error, HintStream, KeyError, NodeId, NodeIdParseError, Path,
+    PathChanges, Relay,
 };
 use tokio::io;
 
@@ -195,6 +197,16 @@ pub trait Session {
     /// byte-moving hot path.
     fn conn_info(&self) -> ConnInfo {
         ConnInfo::default()
+    }
+
+    /// The path this session's bytes move to, each time the transport selects a new one.
+    ///
+    /// The live counterpart of [`conn_info`](Self::conn_info): an item per change, at the moment it
+    /// happens, so a reader never misses a flip between two snapshots. Additive and optional like it:
+    /// the default is [`PathChanges::ended`], right for a transport whose path never moves or that
+    /// cannot tell. A wrapper forwards this to its inner session, as it forwards `conn_info`.
+    fn path_changes(&self) -> PathChanges {
+        PathChanges::ended()
     }
 }
 

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 
-use bifrost_core::{ConnInfo, Error, NodeId};
+use bifrost_core::{ConnInfo, Error, NodeId, PathChanges};
 use bifrost_transport::{Sealed, Session};
 use snow::TransportState;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, ReadBuf};
@@ -206,7 +206,8 @@ impl Outbound {
 /// A sealed session: the inner session plus the Noise channel over its first stream.
 ///
 /// `peer()` is the identity the handshake proved, never the inner transport's announcement. The
-/// inner session is kept only for `wait_closed` and `conn_info`; its streams are not consulted.
+/// inner session is kept only for `wait_closed`, `conn_info` and `path_changes`; its streams are not
+/// consulted.
 pub struct NoiseSession<S: Session> {
     inner: S,
     peer: NodeId,
@@ -374,6 +375,10 @@ impl<S: Session> Session for NoiseSession<S> {
 
     fn conn_info(&self) -> ConnInfo {
         self.inner.conn_info()
+    }
+
+    fn path_changes(&self) -> PathChanges {
+        self.inner.path_changes()
     }
 }
 

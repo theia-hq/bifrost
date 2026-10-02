@@ -6,17 +6,25 @@
 //! leaking past this boundary.
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use core::pin::Pin;
+use core::task::{Context, Poll, ready};
+use core::time::Duration;
 use std::sync::Arc;
 
 pub use bifrost_core::NodeId;
-use bifrost_core::{Addr, BoxError, ConnInfo, CryptoKind, Error, HintStream, KeyError, Path};
+use bifrost_core::{
+    Addr, BoxError, ConnInfo, CryptoKind, Error, HintStream, KeyError, Path, PathChanges, Relay,
+};
 pub use bifrost_transport::{Sealed, Session, Transport};
+use futures_core::Stream;
 use iroh::address_lookup::AddressLookupBuilderError;
 use iroh::endpoint::{
-    Connection, PathList, PortmapperConfig, RecvStream, RelayMode, SendStream, presets,
+    Connection, PathEvent, PathEventStream, PathList, PortmapperConfig, RecvStream, RelayMode,
+    SendStream, WeakConnectionHandle, presets,
 };
 use iroh::{EndpointAddr, EndpointId, PublicKey, RelayMap, SecretKey, TransportAddr};
 use tokio::sync::Mutex;
+use url::Url;
 use zeroize::Zeroizing;
 
 mod reach;
@@ -447,39 +455,82 @@ impl Session for IrohSession {
         self.conn.close(0u32.into(), b"closed");
     }
 
-    /// Map iroh's live path set onto a best-effort [`ConnInfo`]. iroh tracks every open path and marks
-    /// one as selected for transmission; hole-punching means a session can start [`Path::Relayed`] and
-    /// upgrade to [`Path::Direct`] as a direct path opens, so this reports the CURRENT state honestly.
-    /// The rtt and remote come from the selected path (the one actually carrying bytes).
+    /// The path iroh has selected for application data, reduced to a [`ConnInfo`]. iroh holds every
+    /// open path and marks one as selected; a hole-punched session keeps its relay path open as a
+    /// standby beside the direct one, so only the selected path says where the bytes go.
     fn conn_info(&self) -> ConnInfo {
         conn_info(&self.conn.paths())
     }
+
+    /// iroh's path events, read down to the [`Path`] each newly selected path names.
+    ///
+    /// Subscribed before the current path is read, as iroh's path watcher asks, so a change between
+    /// the read and the first poll is still seen.
+    fn path_changes(&self) -> PathChanges {
+        let events = self.conn.path_events();
+        PathChanges::new(Selections {
+            events,
+            said: conn_info(&self.conn.paths()).path,
+            conn: self.conn.weak_handle(),
+        })
+    }
 }
 
-/// Reduce iroh's open-path snapshot to a [`ConnInfo`]. The [`Path`] classifies the set: all-direct is
-/// [`Path::Direct`], all-relay is [`Path::Relayed`], a mix of both is [`Path::Mixed`], and no open path
-/// yet is [`Path::Unknown`]. The rtt and remote describe the selected path (falling back to the first
-/// open one), since that is the path bytes actually take.
+/// Reduce iroh's open-path snapshot to a [`ConnInfo`] for the selected path, the one carrying bytes.
+/// The other open paths are standbys and say nothing about where bytes go. No path selected yet (or
+/// the selected one just closed) is [`Path::Unknown`] with no rtt or remote, never a guess from
+/// whichever path happens to be open.
 fn conn_info(paths: &PathList<'_>) -> ConnInfo {
-    let mut direct = false;
-    let mut relayed = false;
-    for path in paths {
-        direct |= path.is_ip();
-        relayed |= path.is_relay();
-    }
-    let path = match (direct, relayed) {
-        (true, false) => Path::Direct,
-        (false, true) => Path::Relayed,
-        (true, true) => Path::Mixed,
-        (false, false) => Path::Unknown,
-    };
+    selected(paths.iter())
+}
 
-    let selected = paths.iter().find(|path| path.is_selected());
-    let carrying = selected.or_else(|| paths.iter().next());
+/// The [`ConnInfo`] of the one selected path among `paths`, over [`OpenPath`] so a test can hand it
+/// a path set iroh would only build on a live connection.
+fn selected<P: OpenPath>(paths: impl IntoIterator<Item = P>) -> ConnInfo {
+    let Some(carrying) = paths.into_iter().find(OpenPath::is_selected) else {
+        return ConnInfo::default();
+    };
+    let remote = carrying.remote_addr();
     ConnInfo {
-        path,
-        rtt: carrying.as_ref().map(|path| path.rtt()),
-        remote: carrying.and_then(|path| direct_addr(path.remote_addr())),
+        path: path_of(remote),
+        rtt: Some(carrying.rtt()),
+        remote: direct_addr(remote),
+    }
+}
+
+/// What the reduction reads of one open path. iroh's own path type is built only inside a live
+/// connection, so this is the seam the selection test stands a fake path set on.
+trait OpenPath {
+    /// Whether iroh has selected this path to carry application data.
+    fn is_selected(&self) -> bool;
+    /// Where the path goes: an IP address, a relay, or a custom transport.
+    fn remote_addr(&self) -> &TransportAddr;
+    /// The path's own round-trip estimate.
+    fn rtt(&self) -> Duration;
+}
+
+impl OpenPath for iroh::endpoint::Path<'_> {
+    fn is_selected(&self) -> bool {
+        iroh::endpoint::Path::is_selected(self)
+    }
+
+    fn remote_addr(&self) -> &TransportAddr {
+        iroh::endpoint::Path::remote_addr(self)
+    }
+
+    fn rtt(&self) -> Duration {
+        iroh::endpoint::Path::rtt(self)
+    }
+}
+
+/// The [`Path`] a path's remote address names. A relay path keeps its relay's URL. A custom
+/// transport's address (or any later variant of iroh's `non_exhaustive` address) is not a kind this
+/// crate can name yet, so it is [`Path::Unknown`] rather than a guess.
+fn path_of(addr: &TransportAddr) -> Path {
+    match addr {
+        TransportAddr::Ip(_) => Path::Direct,
+        TransportAddr::Relay(relay) => Path::Relayed(Relay::from(Url::clone(relay))),
+        _ => Path::Unknown,
     }
 }
 
@@ -490,6 +541,47 @@ fn direct_addr(addr: &TransportAddr) -> Option<SocketAddr> {
     match addr {
         TransportAddr::Ip(socket) => Some(*socket),
         _ => None,
+    }
+}
+
+/// The stream behind [`IrohSession::path_changes`]: iroh's path events, kept to the selections that
+/// move the bytes to a different [`Path`].
+///
+/// iroh selects a new path id when, say, the direct path moves from IPv4 to IPv6; both are
+/// [`Path::Direct`], so the change is not said twice. The connection is held weakly: a reader holding
+/// this stream must not keep a closed session's connection alive.
+struct Selections {
+    events: PathEventStream,
+    /// The path last said, or read when the stream was made, so only a different one is said next.
+    said: Path,
+    conn: WeakConnectionHandle,
+}
+
+impl Stream for Selections {
+    type Item = Path;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Path>> {
+        let this = self.get_mut();
+        loop {
+            let selected = match ready!(Pin::new(&mut this.events).poll_next(cx)) {
+                None => return Poll::Ready(None),
+                Some(PathEvent::Selected { remote_addr, .. }) => path_of(&remote_addr),
+                // A selection may be among the dropped events, so answer with the path in force now.
+                // A connection that will not upgrade has closed, and so has this stream.
+                Some(PathEvent::Lagged { .. }) => {
+                    let Some(conn) = this.conn.upgrade() else {
+                        return Poll::Ready(None);
+                    };
+                    conn_info(&conn.paths()).path
+                }
+                // Opening and closing a path moves no bytes; only a selection does.
+                Some(_) => continue,
+            };
+            if selected != this.said {
+                this.said = selected.clone();
+                return Poll::Ready(Some(selected));
+            }
+        }
     }
 }
 
