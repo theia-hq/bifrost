@@ -120,17 +120,19 @@ impl Advertising {
         if let Some(advertised) = self.advertised() {
             return advertised.egress_v4();
         }
-        // A host with no LAN address has no interface to pin, and an unreadable one has none this
-        // node can name: either way the node keeps the default route's, which is what it had before
-        // it pinned anything. Only the unreadable host is news worth a warning.
-        match Self::of_dialable(host(), &[EVERY_V4]) {
-            Self::OnLan(advertised) => advertised.egress_v4(),
-            Self::BrowseOnly(MdnsError::Interfaces(cause)) => {
-                tracing::warn!(error = %cause, "could not list this host's interfaces; mDNS browses on the default route only");
-                Vec::new()
-            }
-            Self::LoopbackOnly(_) | Self::BrowseOnly(_) => Vec::new(),
+        // The pin is whatever a wildcard server here would pin, in every state, so the two can
+        // never disagree. A host with no LAN address publishes nothing and so pins nothing, and an
+        // unreadable one has nothing this node can name: either way the node keeps the default
+        // route's, which is what it had before it pinned anything. Only the unreadable host is
+        // news worth a warning.
+        let wildcard = Self::of_dialable(host(), &[EVERY_V4]);
+        if let Self::BrowseOnly(MdnsError::Interfaces(cause)) = &wildcard {
+            tracing::warn!(error = %cause, "could not list this host's interfaces; mDNS browses on the default route only");
         }
+        wildcard
+            .advertised()
+            .map(Advertised::egress_v4)
+            .unwrap_or_default()
     }
 }
 

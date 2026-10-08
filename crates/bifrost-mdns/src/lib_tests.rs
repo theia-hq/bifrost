@@ -4,8 +4,10 @@
 //! The multicast tests drive real sockets over the loopback/default interface, so they are
 //! `#[ignore]`d by default: CI and sandboxed environments routinely block multicast, and a
 //! network-dependent test must not flake the suite. Run them locally with
-//! `cargo test -p bifrost-mdns -- --ignored` to exercise the full advertise + browse + subscribe path
-//! against the OS mDNS stack. The subscription tests use the paused clock and write the table
+//! `cargo test -p bifrost-mdns -- --ignored --test-threads=1` to exercise the full advertise +
+//! browse + subscribe path against the OS mDNS stack. One at a time, because they share port 5353
+//! in one process, and in parallel one discoverer's traffic pushes another's first answer past its
+//! settle window. The subscription tests use the paused clock and write the table
 //! directly through the same calls the browse callback makes, so they run everywhere with no network.
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
