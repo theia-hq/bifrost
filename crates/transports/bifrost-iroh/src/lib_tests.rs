@@ -1,5 +1,5 @@
 //! What each bind registers, how each bind reads a discovery feed, the two pins the type system
-//! cannot make, and a reach changed on a bound endpoint.
+//! cannot make, the QUIC limits every bind applies, and a reach changed on a bound endpoint.
 //!
 //! iroh exposes the lookup services it was built with but no relay or certificate introspection, so
 //! the lookup counts are asserted on a real bind and the rest is read off this crate's own source. A
@@ -32,7 +32,8 @@ use tokio::time;
 
 use crate::reach::Role;
 use crate::{
-    ALPN, Endpoint, Finding, OpenPath, Reach, RelayHome, Resolver, SetReachError, peer_of, reach,
+    ALPN, CONNECTION_WINDOW, Endpoint, Finding, IrohSession, OpenPath, Reach, RelayHome, Resolver,
+    SetReachError, peer_of, reach,
 };
 
 /// A bind that finds peers by key dials at once over a feed that never answers; a hints-only bind
@@ -243,6 +244,144 @@ fn no_source_here_reaches_for_the_certificate_hatch() {
             );
         }
     }
+}
+
+/// Every bind in this crate goes through `finish`, and `finish` hands iroh the limits right before it
+/// binds: the one iroh `bind` call in the crate sits beside the transport config. A new bind path that
+/// built its own endpoint and skipped `finish` would run on noq's defaults, and fails here.
+#[test]
+fn every_bind_applies_the_quic_limits() {
+    // Assembled from halves: this file is under `src/` and the scan covers it too.
+    let bind = [".bind", "()"].concat();
+    let binds: usize = crate_sources()
+        .iter()
+        .map(|source| {
+            fs::read_to_string(source)
+                .expect("read a source file of this crate")
+                .matches(&bind)
+                .count()
+        })
+        .sum();
+    assert_eq!(binds, 1, "one iroh bind in the crate, inside `finish`");
+
+    let lib: String = include_str!("lib.rs").split_whitespace().collect();
+    assert!(
+        lib.contains(&[".transport_config(quic_limits())", &bind].concat()),
+        "the bind in `finish` must apply `quic_limits()` as the last thing before it binds"
+    );
+}
+
+/// A peer can send this node no datagram: neither side of a session advertises datagram support, so
+/// each sees no room for one and a send fails at once rather than being buffered by the other side.
+#[tokio::test]
+async fn an_endpoint_refuses_application_datagrams() {
+    let ((_dialer, dialed), (_host, accepted)) = local_session().await;
+    for (side, session) in [("the dialer", &dialed), ("the host", &accepted)] {
+        assert_eq!(
+            session.conn.max_datagram_size(),
+            None,
+            "{side} sees a peer that takes datagrams"
+        );
+        assert!(
+            session.conn.send_datagram(vec![1].into()).is_err(),
+            "{side} could send a datagram"
+        );
+    }
+}
+
+/// A peer can open no unidirectional stream to this node: each side grants the other none, so an
+/// open waits for credit that never comes.
+#[tokio::test]
+async fn an_endpoint_refuses_unidirectional_streams() {
+    let ((_dialer, dialed), (_host, accepted)) = local_session().await;
+    for (side, session) in [("the dialer", &dialed), ("the host", &accepted)] {
+        assert!(
+            time::timeout(STALL, session.conn.open_uni()).await.is_err(),
+            "{side} opened a unidirectional stream"
+        );
+    }
+}
+
+/// A peer that opens streams the host never accepts can make it buffer the connection window and no
+/// more: writes across twenty streams, each with room for a full stream window, stall once their sum
+/// reaches it. Reading is what frees room, so once the host accepts and reads, a stalled stream moves.
+#[tokio::test]
+async fn a_peer_is_held_to_the_connection_budget() {
+    const STREAMS: usize = 20;
+    let window = usize::try_from(CONNECTION_WINDOW).expect("the window fits a usize");
+    let ((_dialer, dialed), (_host, accepted)) = local_session().await;
+    let chunk = vec![0u8; 64 * 1024];
+
+    // `write` rather than `write_all`, so the bytes the host took are counted even when a write stalls
+    // part way through a stream.
+    let mut streams = Vec::with_capacity(STREAMS);
+    let mut written = 0;
+    for _ in 0..STREAMS {
+        let (mut send, recv) = dialed.conn.open_bi().await.expect("open a stream");
+        let mut sent = 0;
+        while sent < STREAM_WINDOW {
+            let room = (STREAM_WINDOW - sent).min(chunk.len());
+            match time::timeout(STALL, send.write(&chunk[..room])).await {
+                Ok(took) => sent += took.expect("write"),
+                Err(_stalled) => break,
+            }
+        }
+        written += sent;
+        streams.push((send, recv));
+    }
+    assert!(
+        written <= window,
+        "the host buffered {written} bytes, past its {window}-byte window"
+    );
+    assert!(
+        written > window - STREAM_WINDOW,
+        "only {written} bytes went before every write stalled, short of the {window}-byte window"
+    );
+
+    // noq announces freed room once the reader has freed an eighth of the window (2 MiB), so the host
+    // drains two whole streams rather than one.
+    for _ in 0..2 {
+        let (_back, mut heard) = time::timeout(BOUND, accepted.accept_bi())
+            .await
+            .expect("the host accepts in time")
+            .expect("accept a stream");
+        let mut body = vec![0u8; STREAM_WINDOW];
+        time::timeout(BOUND, heard.read_exact(&mut body))
+            .await
+            .expect("the host reads in time")
+            .expect("read a whole stream");
+    }
+    let (stalled, _) = streams.last_mut().expect("streams were opened");
+    let took = time::timeout(BOUND, stalled.write(&chunk))
+        .await
+        .expect("a stalled stream moves once the host reads")
+        .expect("write");
+    assert!(took > 0, "the stalled stream took no bytes");
+}
+
+/// noq's per-stream receive window, which the QUIC limits leave as it is.
+const STREAM_WINDOW: usize = 1_250_000;
+
+/// How long a write or an open may wait before it counts as refused or stalled. Long enough that a
+/// congestion pause on loopback is not mistaken for a flow-control stall.
+const STALL: Duration = Duration::from_secs(1);
+
+/// Two local endpoints with one session between them, the dialer's side first. Each endpoint is
+/// returned beside its session so it outlives it.
+async fn local_session() -> ((Endpoint, IrohSession), (Endpoint, IrohSession)) {
+    let host = Endpoint::bind_local().await.expect("bind the host");
+    let dialer = Endpoint::bind_local().await.expect("bind the dialer");
+    let (dialed, accepted) = tokio::join!(
+        time::timeout(BOUND, dialer.connect(host.local_addr())),
+        time::timeout(BOUND, host.accept()),
+    );
+    let dialed = dialed
+        .expect("the dial completes in time")
+        .expect("the dial");
+    let accepted = accepted
+        .expect("the accept completes in time")
+        .expect("the accept");
+    ((dialer, dialed), (host, accepted))
 }
 
 /// The declared profile is PINNED per backend: every consumer's trust decision rests on it, so an

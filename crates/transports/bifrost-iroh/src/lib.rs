@@ -19,8 +19,8 @@ pub use bifrost_transport::{Sealed, Session, Transport};
 use futures_core::Stream;
 use iroh::address_lookup::AddressLookupBuilderError;
 use iroh::endpoint::{
-    Connection, PathEvent, PathEventStream, PortmapperConfig, RecvStream, RelayMode, SendStream,
-    WeakConnectionHandle, presets,
+    Connection, PathEvent, PathEventStream, PortmapperConfig, QuicTransportConfig, RecvStream,
+    RelayMode, SendStream, VarInt, WeakConnectionHandle, presets,
 };
 use iroh::{EndpointAddr, EndpointId, PublicKey, RelayMap, SecretKey, TransportAddr};
 use tokio::sync::Mutex;
@@ -34,6 +34,31 @@ pub use reach::{Reach, ReachUrlError, RelayHome, RelayUrl, Resolver, ResolverUrl
 
 /// The ALPN that identifies the Bifrost substrate protocol during the handshake.
 pub const ALPN: &[u8] = b"bifrost/0";
+
+/// How many bytes of stream data one peer may have in flight to this node over one connection,
+/// across all its streams, before it must wait for this node to read. noq's own default is
+/// unbounded (`VarInt::MAX`), under which 100 streams at a 1.25 MB window each let a peer that
+/// never passes admission pin about 125 MB per connection. 16 MiB keeps one stream at noq's full
+/// per-stream window, so honest throughput is unchanged, while bounding what a hostile peer holds.
+const CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
+
+/// The QUIC limits bifrost owns. Every bind applies them, so no peer can make this node buffer more
+/// than [`CONNECTION_WINDOW`] of stream data per connection, open a unidirectional stream, or send a
+/// datagram.
+///
+/// Built from iroh's builder, never noq's `TransportConfig::default()`: iroh's carries the multipath
+/// and NAT-traversal settings hole punching needs. The same config serves accepted connections and
+/// dials, so a node that dials a hostile key is held to it too. Unidirectional streams and datagrams
+/// are off because a [`Session`] offers neither, so a peer could only use them to make this node
+/// buffer bytes nothing will read. The bidirectional stream count and the per-stream window stay at
+/// noq's defaults (100 and 1.25 MB).
+fn quic_limits() -> QuicTransportConfig {
+    QuicTransportConfig::builder()
+        .max_concurrent_uni_streams(VarInt::from_u32(0))
+        .datagram_receive_buffer_size(None)
+        .receive_window(VarInt::from_u32(CONNECTION_WINDOW))
+        .build()
+}
 
 /// A bound iroh endpoint.
 ///
@@ -337,9 +362,12 @@ impl Endpoint {
         // Derived from the secret, not parsed from iroh's id: a secret's public half is a canonical
         // prime-order point, so the own id has nothing to refuse. The copy of the secret is wiped here.
         let node = NodeId::from_ed25519_secret(&Zeroizing::new(secret.to_bytes()));
+        // Set last and unconditionally, so no preset or reach shapes these limits: every bind in this
+        // crate passes through here.
         let inner = builder
             .secret_key(secret)
             .alpns(vec![ALPN.to_vec()])
+            .transport_config(quic_limits())
             .bind()
             .await?;
         Ok(Self {
