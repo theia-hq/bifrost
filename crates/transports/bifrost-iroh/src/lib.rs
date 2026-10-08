@@ -37,14 +37,18 @@ pub const ALPN: &[u8] = b"bifrost/0";
 
 /// How many bytes of stream data one peer may have in flight to this node over one connection,
 /// across all its streams, before it must wait for this node to read. noq's own default is
-/// unbounded (`VarInt::MAX`), under which 100 streams at a 1.25 MB window each let a peer that
-/// never passes admission pin about 125 MB per connection. 16 MiB keeps one stream at noq's full
-/// per-stream window, so honest throughput is unchanged, while bounding what a hostile peer holds.
+/// unbounded (`VarInt::MAX`), under which 100 bidirectional and 100 unidirectional streams at a
+/// 1.25 MB window each let a peer that never passes admission fill about 250 MB of stream windows
+/// per connection. 16 MiB keeps one stream at noq's full per-stream window, so honest throughput is
+/// unchanged, while bounding what a hostile peer holds.
 const CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
 
-/// The QUIC limits bifrost owns. Every bind applies them, so no peer can make this node buffer more
-/// than [`CONNECTION_WINDOW`] of stream data per connection, open a unidirectional stream, or send a
-/// datagram.
+/// The QUIC limits bifrost owns. Every bind applies them, so no peer of a bifrost connection can
+/// make this node buffer more than [`CONNECTION_WINDOW`] of stream data per connection, open a
+/// unidirectional stream, or send a datagram.
+///
+/// They do not reach iroh's own address-discovery connection to a relay: iroh builds that one from
+/// noq's defaults, so a relay in this node's relay map is held only by noq's limits there.
 ///
 /// Built from iroh's builder, never noq's `TransportConfig::default()`: iroh's carries the multipath
 /// and NAT-traversal settings hole punching needs. The same config serves accepted connections and

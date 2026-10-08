@@ -294,17 +294,24 @@ async fn an_endpoint_refuses_application_datagrams() {
 #[tokio::test]
 async fn an_endpoint_refuses_unidirectional_streams() {
     let ((_dialer, dialed), (_host, accepted)) = local_session().await;
-    for (side, session) in [("the dialer", &dialed), ("the host", &accepted)] {
-        assert!(
-            time::timeout(STALL, session.conn.open_uni()).await.is_err(),
-            "{side} opened a unidirectional stream"
-        );
-    }
+    let (from_dialer, from_host) = tokio::join!(
+        time::timeout(STALL, dialed.conn.open_uni()),
+        time::timeout(STALL, accepted.conn.open_uni()),
+    );
+    assert!(
+        from_dialer.is_err(),
+        "the dialer opened a unidirectional stream"
+    );
+    assert!(
+        from_host.is_err(),
+        "the host opened a unidirectional stream"
+    );
 }
 
 /// A peer that opens streams the host never accepts can make it buffer the connection window and no
-/// more: writes across twenty streams, each with room for a full stream window, stall once their sum
-/// reaches it. Reading is what frees room, so once the host accepts and reads, a stalled stream moves.
+/// more: writes across up to twenty streams, each with room for a full stream window, stall once their
+/// sum reaches it. Reading is what frees room, so once the host accepts and reads, a stalled stream
+/// moves.
 #[tokio::test]
 async fn a_peer_is_held_to_the_connection_budget() {
     const STREAMS: usize = 20;
@@ -313,7 +320,7 @@ async fn a_peer_is_held_to_the_connection_budget() {
     let chunk = vec![0u8; 64 * 1024];
 
     // `write` rather than `write_all`, so the bytes the host took are counted even when a write stalls
-    // part way through a stream.
+    // part way through a stream. Each stream keeps the count it sent, which is what the drain reads.
     let mut streams = Vec::with_capacity(STREAMS);
     let mut written = 0;
     for _ in 0..STREAMS {
@@ -327,7 +334,12 @@ async fn a_peer_is_held_to_the_connection_budget() {
             }
         }
         written += sent;
-        streams.push((send, recv));
+        streams.push((send, recv, sent));
+        // A stream that took nothing once the window is nearly full shows the window is spent; the
+        // streams after it would each wait out a stall and prove nothing more.
+        if sent == 0 && written > window - STREAM_WINDOW {
+            break;
+        }
     }
     assert!(
         written <= window,
@@ -339,19 +351,29 @@ async fn a_peer_is_held_to_the_connection_budget() {
     );
 
     // noq announces freed room once the reader has freed an eighth of the window (2 MiB), so the host
-    // drains two whole streams rather than one.
-    for _ in 0..2 {
+    // drains streams, in the order it accepts them, until it has read past that. Each read takes
+    // exactly what its stream sent, which a stream that stalled early leaves short of a full window.
+    let mut drained = 0;
+    for &(_, _, sent) in &streams {
+        if drained > window / 8 {
+            break;
+        }
         let (_back, mut heard) = time::timeout(BOUND, accepted.accept_bi())
             .await
             .expect("the host accepts in time")
             .expect("accept a stream");
-        let mut body = vec![0u8; STREAM_WINDOW];
+        let mut body = vec![0u8; sent];
         time::timeout(BOUND, heard.read_exact(&mut body))
             .await
             .expect("the host reads in time")
-            .expect("read a whole stream");
+            .expect("read what the stream sent");
+        drained += sent;
     }
-    let (stalled, _) = streams.last_mut().expect("streams were opened");
+    assert!(
+        drained > window / 8,
+        "the host drained only {drained} bytes"
+    );
+    let (stalled, _, _) = streams.last_mut().expect("streams were opened");
     let took = time::timeout(BOUND, stalled.write(&chunk))
         .await
         .expect("a stalled stream moves once the host reads")
