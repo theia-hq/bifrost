@@ -26,6 +26,18 @@ All notable changes to bifrost, newest first.
 - **`bifrost-iroh`'s `Endpoint` is `Clone`:** a clone is a second handle on the same endpoint, sharing
   its socket, identity and reach.
 
+### Changed
+- **`bifrost-iroh` bounds what a peer can make an endpoint buffer.** Every endpoint it binds allows a
+  peer no unidirectional streams and no datagrams, and at most 16 MiB of unread stream data per
+  connection. Separately, noq-proto 1.3.0, the QUIC library iroh uses, lets a peer make an endpoint
+  buffer out-of-order stream data without limit (the bug RUSTSEC-2026-0185 names in quinn-proto, which
+  noq forks). Until a noq-proto release fixes it, add this to your workspace's root `Cargo.toml`; cargo
+  reads `[patch]` only there, never from a dependency:
+  ```toml
+  [patch.crates-io]
+  noq-proto = { git = "https://github.com/n0-computer/noq", rev = "d7c3160a7e7b5cb36682eae04e364d3f50e28925" }
+  ```
+
 ## v0.8.0
 
 ### Breaking

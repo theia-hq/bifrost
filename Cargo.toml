@@ -62,3 +62,11 @@ unused_must_use = "deny"
 # Allowed back per-file, and only in the two platform reads under `bifrost-mdns/src/host/stable/`, so
 # the next `unsafe` anywhere in the workspace has to be argued rather than merely written.
 unsafe_code = "deny"
+
+# noq-proto 1.3.0 never bounds how many out-of-order chunks one stream buffers, so a peer can make a
+# node hold gigabytes per connection with gapped stream frames (RUSTSEC-2026-0185 in quinn-proto,
+# which noq forks). n0-computer/noq#828 ports quinn's three fixes; this takes its head, pinned by full
+# hash, until n0 releases it. Drop this entry, and the matching `allow-git` line in deny.toml, the day
+# a noq-proto release carries #828.
+[patch.crates-io]
+noq-proto = { git = "https://github.com/n0-computer/noq", rev = "d7c3160a7e7b5cb36682eae04e364d3f50e28925" }
