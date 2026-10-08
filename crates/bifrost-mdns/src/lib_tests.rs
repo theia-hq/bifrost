@@ -22,8 +22,8 @@ use tokio::time::{self, Instant};
 
 use super::name::counter::matches_run;
 use super::{
-    Heard, MAX_HINTS, MAX_NAMES_PER_NODE, MAX_PEERS, MdnsDiscovery, MdnsError, ROTATE, SERVICE,
-    SETTLE_WINDOW, name, rotate, shape,
+    Advertising, Heard, MAX_HINTS, MAX_NAMES_PER_NODE, MAX_PEERS, MdnsDiscovery, MdnsError, ROTATE,
+    SERVICE, SETTLE_WINDOW, name, rotate, shape,
 };
 
 /// Every node announces and browses under the protocol's own name, `_bifrost._udp.local.`.
@@ -103,6 +103,45 @@ async fn a_subscription_releases_on_the_target_over_mdns() {
         "alice's first word on bob is bob's address, got {first:?}"
     );
     drop(bob_mdns);
+}
+
+/// A node that only browses hears a node announcing on a LAN interface, whichever interface the
+/// default route is. The shape of a dial: the dialer announces nothing. On a host routed through a
+/// tailnet the default route is the tunnel, and a browse that joined the group there alone never
+/// heard the answer sent on the LAN.
+#[tokio::test]
+#[ignore = "drives real multicast over a LAN interface; run locally with --ignored"]
+async fn a_browse_only_node_hears_a_lan_announcement() {
+    let lan = Advertising::of(vec![SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        4061,
+    )]);
+    let server_addr = lan
+        .advertised()
+        .and_then(|advertised| {
+            advertised
+                .addrs()
+                .iter()
+                .find(|addr| !addr.ip().is_loopback())
+        })
+        .copied()
+        .expect("this host has a LAN IPv4 address to announce on");
+    let (server, dialer) = (node(61), node(62));
+
+    let _server_mdns = MdnsDiscovery::advertise(server, [server_addr])
+        .expect("the server announces")
+        .discovery;
+    let started = MdnsDiscovery::advertise(dialer, []).expect("the dialer browses");
+    assert!(
+        started.advertising.advertised().is_none(),
+        "the dialer announces nothing"
+    );
+
+    let found = hints_within(&started.discovery, server, Duration::from_secs(10)).await;
+    assert!(
+        found.contains(&server_addr),
+        "the browse-only dialer should hear {server_addr} announced on the LAN, got {found:?}"
+    );
 }
 
 /// The case a subscription exists for: a node heard AFTER the subscriber asked still reaches it,

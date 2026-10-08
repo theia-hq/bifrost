@@ -1,5 +1,6 @@
 //! What this node puts on the wire: which of the sockets a bind answers on may be published,
-//! choosing the port, and naming what the resulting advertisement actually reaches.
+//! choosing the port, naming what the resulting advertisement actually reaches, and the interfaces
+//! its multicast is sent and heard on, whether it publishes or not.
 //!
 //! The addresses come from [`Dialable`](crate::Dialable), which expands bind truth
 //! (`bifrost::Transport::bound_sockets`) through this host's interfaces. Publication is POLICY over
@@ -97,7 +98,45 @@ impl Advertising {
             Self::BrowseOnly(_) => None,
         }
     }
+
+    /// The IPv4 interfaces this node's multicast is sent and heard on.
+    ///
+    /// The dependency joins the mDNS group on each pinned interface, and with no pin only on the
+    /// default route's. Membership is per interface, so a node that pins nothing never hears an
+    /// answer sent on any other one: a dialer on a Mac whose default route is a tailnet `utun`
+    /// listened there alone while the server it wanted answered on `en0`. So every node pins, and
+    /// what it pins is separate from what it announces.
+    ///
+    /// A node that publishes pins its record's own interfaces ([`Advertised::egress_v4`]), as
+    /// before. A node that publishes nothing pins the interfaces a node on this host bound to every
+    /// IPv4 interface would announce on: the same expansion and the same policy, so a dialer listens
+    /// on exactly the interfaces a wildcard server here answers on, and the host is read only for it.
+    pub(crate) fn interfaces_v4(&self) -> Vec<Ipv4Addr> {
+        self.interfaces_v4_over(|| Dialable::of(vec![EVERY_V4]))
+    }
+
+    /// [`interfaces_v4`](Self::interfaces_v4) over a host handed in, so a test can fix it.
+    pub(crate) fn interfaces_v4_over(&self, host: impl FnOnce() -> Dialable) -> Vec<Ipv4Addr> {
+        if let Some(advertised) = self.advertised() {
+            return advertised.egress_v4();
+        }
+        // A host with no LAN address has no interface to pin, and an unreadable one has none this
+        // node can name: either way the node keeps the default route's, which is what it had before
+        // it pinned anything. Only the unreadable host is news worth a warning.
+        match Self::of_dialable(host(), &[EVERY_V4]) {
+            Self::OnLan(advertised) => advertised.egress_v4(),
+            Self::BrowseOnly(MdnsError::Interfaces(cause)) => {
+                tracing::warn!(error = %cause, "could not list this host's interfaces; mDNS browses on the default route only");
+                Vec::new()
+            }
+            Self::LoopbackOnly(_) | Self::BrowseOnly(_) => Vec::new(),
+        }
+    }
 }
+
+/// A bind to every IPv4 interface: what a browse-only node expands to find the interfaces to listen
+/// on. The port is never read; only the addresses come out.
+const EVERY_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
 /// The addresses one mDNS advertisement carries: a port plus the bound addresses on it, at least one.
 ///

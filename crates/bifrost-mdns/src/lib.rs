@@ -224,7 +224,8 @@ impl MdnsDiscovery {
     /// starting at all.
     ///
     /// Peers are learned in the background; a subscription made right after this call hears a peer
-    /// once the first discovery cycle has run.
+    /// once the first discovery cycle has run. The browse listens on this host's LAN interfaces
+    /// whether or not anything is advertised, not only on the default route's.
     ///
     /// Must be called from within a Tokio runtime: the mDNS service spawns onto the current handle.
     pub fn advertise(
@@ -236,9 +237,13 @@ impl MdnsDiscovery {
         let heard = Arc::new(Heard::new(Instant::now() + SETTLE_WINDOW));
         let announce = advertising.advertised().map(|advertised| {
             let addrs: Vec<IpAddr> = advertised.addrs().iter().map(SocketAddr::ip).collect();
-            (advertised.port(), addrs, advertised.egress_v4())
+            (advertised.port(), addrs)
         });
         let announces = announce.is_some();
+        // Where to listen is separate from what to announce: a node that announces nothing still
+        // has to join the group on the interfaces a LAN answer arrives on, or it hears only the
+        // default route's (`Advertising::interfaces_v4`).
+        let interfaces = advertising.interfaces_v4();
         let sink = Arc::clone(&heard);
         let handle = Handle::current();
         // The name is the dependency's `peer_id`, which it puts on the wire twice: as the instance
@@ -255,13 +260,12 @@ impl MdnsDiscovery {
                 // a response can still carry AAAA records, so this drops only the narrow v6-only reach for
                 // a quiet, deterministic v4 path; a real v4 send failure still warns per interface.
                 .with_ip_class(IpClass::V4Only)
+                .with_multicast_interfaces_v4(interfaces.clone())
                 .with_callback(move |name, peer| sink.record(name, peer));
             // Registering no addresses is how the dependency spells browse-only: it keeps querying and
             // reading responses, and puts no record of its own on the wire.
-            if let Some((port, addrs, egress)) = &announce {
-                service = service
-                    .with_addrs(*port, addrs.iter().copied())
-                    .with_multicast_interfaces_v4(egress.clone());
+            if let Some((port, addrs)) = &announce {
+                service = service.with_addrs(*port, addrs.iter().copied());
             }
             service
                 .spawn(&handle)
