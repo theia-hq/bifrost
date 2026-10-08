@@ -6,8 +6,8 @@
 
 use core::net::{Ipv4Addr, SocketAddr};
 
-use crate::MdnsError;
 use crate::publish::{Advertised, Advertising};
+use crate::{At, Dialable, MdnsError, Scope};
 
 /// A published set with a non-loopback address in it reaches other hosts, which is the only state
 /// that lets a surface claim LAN discovery.
@@ -79,6 +79,47 @@ fn the_egress_pin_is_the_published_sets_own_v4_half() {
         vec![v4("192.168.1.5"), v4("10.0.0.7")],
         "the pin is the published set's own v4 addresses, in the same order"
     );
+}
+
+/// A node that announces nothing still pins where it listens: the LAN interfaces a wildcard bind
+/// here would announce on, and not a tunnel or loopback. Without the pin the dependency joins the
+/// group on the default route alone, which on a host routed through a tailnet is the tunnel, so the
+/// node never hears a peer answering on the LAN.
+#[test]
+fn a_browse_only_node_listens_on_the_hosts_lan_interfaces() {
+    let browse = Advertising::of_publishable(Vec::new());
+
+    assert_eq!(
+        browse.interfaces_v4_over(host),
+        vec![v4("192.168.1.100"), v4("10.0.0.7")],
+        "the pin is this host's LAN v4 addresses, never the tunnel or loopback"
+    );
+}
+
+/// A host with nothing off this machine has no LAN interface to pin, so the node keeps the default
+/// route's rather than pinning loopback.
+#[test]
+fn a_browse_only_node_on_a_host_without_a_lan_pins_nothing() {
+    let browse = Advertising::of_publishable(Vec::new());
+    let isolated = || {
+        Dialable::from_iter([
+            at("100.100.201.59", tunnel("utun4")),
+            at("127.0.0.1", Scope::ThisMachine),
+        ])
+    };
+
+    assert_eq!(browse.interfaces_v4_over(isolated), Vec::<Ipv4Addr>::new());
+}
+
+/// A node that announces keeps pinning its own record's interfaces, and never reads the host for a
+/// second set: the announce path is what it was.
+#[test]
+fn an_announcing_node_listens_where_it_announces() {
+    let advertising = Advertising::of_publishable(vec![socket("192.168.1.5", 51979)]);
+
+    let interfaces = advertising.interfaces_v4_over(|| panic!("an announcing node reads no host"));
+
+    assert_eq!(interfaces, vec![v4("192.168.1.5")]);
 }
 
 /// A multi-port bind (iroh binds a v4 and a v6 socket on different ephemeral ports) cannot be
@@ -156,4 +197,30 @@ fn socket(ip: &str, port: u16) -> SocketAddr {
 /// A bare IPv4 address, for the egress pin.
 fn v4(addr: &str) -> Ipv4Addr {
     addr.parse().expect("a valid IPv4 address")
+}
+
+/// What a v4 wildcard expands to on a host with a LAN address on each of two links, a tailnet
+/// tunnel, and loopback.
+fn host() -> Dialable {
+    Dialable::from_iter([
+        at("100.100.201.59", tunnel("utun4")),
+        at("192.168.1.100", Scope::Network),
+        at("127.0.0.1", Scope::ThisMachine),
+        at("10.0.0.7", Scope::Network),
+    ])
+}
+
+/// An expanded entry at port 0, the port a wildcard listen expands with.
+fn at(ip: &str, scope: Scope) -> At {
+    At {
+        socket: socket(ip, 0),
+        scope,
+    }
+}
+
+/// A tunnel scope on `link`.
+fn tunnel(link: &str) -> Scope {
+    Scope::Tunnel {
+        link: link.to_owned(),
+    }
 }
