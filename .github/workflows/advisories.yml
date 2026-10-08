@@ -11,6 +11,9 @@ on:
   pull_request:
   schedule:
     - cron: "17 6 * * *"
+# Reads the checkout and the public advisory database; writes nothing.
+permissions:
+  contents: read
 jobs:
   advisories:
     runs-on: ubuntu-latest

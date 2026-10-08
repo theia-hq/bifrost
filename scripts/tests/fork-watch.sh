@@ -23,9 +23,14 @@ mkdir -p "$tmp/db/crates/upstream"
 : > "$tmp/db/crates/upstream/RUSTSEC-0000-0001.md"
 : > "$tmp/db/crates/upstream/RUSTSEC-0000-0002.md"
 
-# A lock holding `fork` from the given source.
+# A lock holding `fork` 1.0.0 from the given source, at the given version when one is named.
 lock() {
-  printf '[[package]]\nname = "fork"\nversion = "1.0.0"\nsource = "%s"\n' "$1" > "$tmp/repo/Cargo.lock"
+  printf '[[package]]\nname = "fork"\nversion = "%s"\nsource = "%s"\n' "${2:-1.0.0}" "$1" > "$tmp/repo/Cargo.lock"
+}
+
+# Append a block to the lock.
+also() {
+  printf '%s\n' "$@" >> "$tmp/repo/Cargo.lock"
 }
 
 # A list made of the given rows.
@@ -51,26 +56,58 @@ case_() {
 
 mkdir -p "$tmp/repo/scripts"
 
-lock "$PIN"
-list "# a comment" "fork upstream RUSTSEC-0000-0001 ported" "fork upstream RUSTSEC-0000-0002 pinned $PIN"
-case_ "every advisory has a row and the pin holds" 0 "fork-watch: OK"
+ONE="fork upstream RUSTSEC-0000-0001 ported 1.0.0"
+TWO_PINNED="fork upstream RUSTSEC-0000-0002 pinned $PIN"
+TWO_PORTED="fork upstream RUSTSEC-0000-0002 ported 1.0.0"
 
-list "fork upstream RUSTSEC-0000-0001 ported"
+lock "$PIN"
+list "# a comment" "$ONE # read at 1.0.0" "$TWO_PINNED"
+case_ "every advisory has a row, the pin holds, a trailing comment is dropped" 0 "fork-watch: OK"
+
+list "$ONE"
 case_ "an advisory with no row" 1 "RUSTSEC-0000-0002 is filed against upstream and fork has no row"
 
+list "fork upstream -"
+case_ "a dash row is no wildcard for an upstream with advisories" 1 \
+  "RUSTSEC-0000-0001 is filed against upstream and fork has no row"
+
 lock "$REGISTRY"
-list "fork upstream RUSTSEC-0000-0001 ported" "fork upstream RUSTSEC-0000-0002 pinned $PIN"
+list "$ONE" "$TWO_PINNED"
 case_ "the patch was dropped" 1 "fork resolves from $REGISTRY, but RUSTSEC-0000-0002 is pinned"
 
+lock "$REGISTRY" 1.0.1
+list "$ONE" "$TWO_PORTED"
+case_ "a ported row read against another version" 1 \
+  "fork is 1.0.1 in the lock, but RUSTSEC-0000-0001 was read against 1.0.0"
+
 lock "$REGISTRY"
-list "fork upstream RUSTSEC-0000-0001 ported" "fork upstream RUSTSEC-0000-0002 ported" "gone elsewhere -"
+list "$ONE" "$TWO_PORTED" "fork upstrem RUSTSEC-0000-0001 ported 1.0.0"
+case_ "a misspelled upstream" 1 "names RUSTSEC-0000-0001 against upstrem, which the database does not file"
+
+list "$ONE" "$TWO_PORTED" "fork upstream RUSTSEC-0000-0003 ported 1.0.0"
+case_ "an advisory filed elsewhere" 1 "names RUSTSEC-0000-0003 against upstream"
+
+list "$ONE" "$TWO_PORTED" "gone elsewhere -"
 case_ "a listed fork not in the lock" 1 "gone is listed but not in Cargo.lock"
 
-list "fork upstream RUSTSEC-0000-0001 ported" "fork upstream RUSTSEC-0000-0002 maybe"
-case_ "a malformed row" 1 "is malformed"
+also '[[package]]' 'name = "noq"' 'version = "1.0.0"' "source = \"$REGISTRY\""
+list "$ONE" "$TWO_PORTED"
+case_ "a known fork in the lock with no rows" 1 "noq is in Cargo.lock but has no row"
 
-list "fork upstream RUSTSEC-0000-0001 ported" "fork upstream RUSTSEC-0000-0002 pinned"
-case_ "a pin with no source" 1 "is malformed"
+lock "$REGISTRY"
+also '[[patch.unused]]' 'name = "fork"' 'version = "9.9.9"' "source = \"$REGISTRY\""
+case_ "a trailing patch.unused block is not read as a package" 0 "fork-watch: OK"
+
+lock "$REGISTRY"
+for row in "fork upstream RUSTSEC-0000-0002 maybe" "fork upstream RUSTSEC-0000-0002 pinned" \
+  "fork upstream RUSTSEC-0000-0002 ported" "fork upstream RUSTSEC-0000-0002 ported 1.0.0 extra" \
+  "fork upstream RUSTSEC-0000-0002 pinned $PIN extra"; do
+  list "$ONE" "$row"
+  case_ "a malformed row: $row" 1 "is malformed"
+done
+
+list "# only a comment"
+case_ "a list with no rows" 1 "has no rows"
 
 echo "fork-watch fixture: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
