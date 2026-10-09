@@ -5,12 +5,12 @@ use data_encoding::BASE32_NOPAD;
 
 /// The cryptographic suite a [`NodeId`] belongs to.
 ///
-/// A node identity is a raw public key, but we tag it with a suite version so the cryptosystem can
-/// migrate without a flag day: a future suite is a new variant, and every `match` is forced to
-/// acknowledge it. The tag travels with the key everywhere, so a peer never has to guess the suite.
+/// A key's text form leads with its tag ([`CryptoKind::tag`]). A wire format that carries the bare
+/// 32-byte key has no tag; its version number fixes the suite. Adding a suite adds a variant, and every
+/// `match` without a wildcard arm stops compiling until it handles the new variant.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CryptoKind {
-    /// ed25519 identity with x25519 agreement, over QUIC and TLS 1.3. The v0 default.
+    /// ed25519 identity with x25519 agreement, over QUIC and TLS 1.3.
     Ed25519,
 }
 
