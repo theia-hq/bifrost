@@ -15,8 +15,10 @@ use iroh::address_lookup::{
     AddressLookup, AddressLookupBuilder as _, AddressLookupBuilderError, PkarrPublisher,
     PkarrPublisherBuilder, PkarrResolver, PkarrResolverBuilder,
 };
-use iroh::endpoint::{Builder, RelayMode, default_relay_mode, presets};
+use iroh::endpoint::{Builder, RelayMode, default_relay_mode};
 use url::{Host, Url};
+
+use crate::Hybrid;
 
 /// Where a bind goes for the two services a public key needs to be reachable. Both halves default to
 /// n0's, which is what a bind that names no [`Reach`] gets.
@@ -32,8 +34,8 @@ pub struct Reach {
 impl Reach {
     /// The builder for a bind that takes on `role` over this reach.
     ///
-    /// Every bind starts from `presets::Minimal`, which registers no lookup service and settles only
-    /// the crypto provider, and adds each half explicitly, so no half silently inherits a service the
+    /// Every bind starts from [`Hybrid`], which registers no lookup service and settles only the
+    /// crypto provider, and adds each half explicitly, so no half silently inherits a service the
     /// preset gains later. The relay half is always a custom map, n0's included: iroh configures the
     /// relay transport the same from its default mode as from that mode's map, and a map is what a
     /// later swap on the bound endpoint diffs against.
@@ -41,8 +43,7 @@ impl Reach {
     /// `relays` is this reach's [`RelayHome::relays`], taken from the caller so it can keep the very
     /// map it hands iroh.
     pub(crate) fn builder(&self, role: Role, relays: RelayMap) -> Builder {
-        let builder =
-            iroh::Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Custom(relays));
+        let builder = iroh::Endpoint::builder(Hybrid).relay_mode(RelayMode::Custom(relays));
         self.resolver.lookups(role).onto(builder)
     }
 }

@@ -18,11 +18,13 @@ use bifrost_core::{
 pub use bifrost_transport::{Sealed, Session, Transport};
 use futures_core::Stream;
 use iroh::address_lookup::AddressLookupBuilderError;
+use iroh::endpoint::presets::Preset;
 use iroh::endpoint::{
     Connection, PathEvent, PathEventStream, PortmapperConfig, QuicTransportConfig, RecvStream,
-    RelayMode, SendStream, VarInt, WeakConnectionHandle, presets,
+    RelayMode, SendStream, VarInt, WeakConnectionHandle,
 };
 use iroh::{EndpointAddr, EndpointId, PublicKey, RelayMap, SecretKey, TransportAddr};
+use rustls::crypto::aws_lc_rs::{self, kx_group};
 use tokio::sync::Mutex;
 use url::Url;
 use zeroize::Zeroizing;
@@ -62,6 +64,34 @@ fn quic_limits() -> QuicTransportConfig {
         .datagram_receive_buffer_size(None)
         .receive_window(VarInt::from_u32(CONNECTION_WINDOW))
         .build()
+}
+
+/// The preset every bind starts from: it sets the TLS crypto and nothing else, so the session key is
+/// agreed with X25519MLKEM768 whenever the other end offers it, and with X25519 when it does not.
+///
+/// The hybrid keeps a session recorded today unreadable to a quantum computer later, while the X25519
+/// half alone still holds against a classical one. One provider serves the peer link, the relay's
+/// HTTPS and pkarr publishing, so classical stays in the list: n0's relays and resolver speak only
+/// classical groups, and a peer with no ML-KEM still connects. The two elliptic-curve groups after
+/// X25519 are for an HTTPS host that offers neither of the first two.
+///
+/// Built here rather than taken from iroh's presets: those pick ring whenever its feature is on, and
+/// ring has no ML-KEM. The group list is written out rather than left to rustls, whose aws-lc-rs
+/// default puts ML-KEM first only when some crate in the build turns on `prefer-post-quantum`.
+#[derive(Debug, Clone, Copy)]
+struct Hybrid;
+
+impl Preset for Hybrid {
+    fn apply(self, builder: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
+        let mut provider = aws_lc_rs::default_provider();
+        provider.kx_groups = vec![
+            kx_group::X25519MLKEM768,
+            kx_group::X25519,
+            kx_group::SECP256R1,
+            kx_group::SECP384R1,
+        ];
+        builder.crypto_provider(Arc::new(provider))
+    }
 }
 
 /// A bound iroh endpoint.
@@ -190,7 +220,7 @@ impl Endpoint {
     /// runs binds [`bind_local_with_secret`](Self::bind_local_with_secret) instead.
     pub async fn bind_local() -> Result<Self, BindError> {
         Self::finish(
-            iroh::Endpoint::builder(presets::Minimal),
+            iroh::Endpoint::builder(Hybrid),
             SecretKey::generate(),
             Finding::ByHints,
             None,
@@ -205,8 +235,8 @@ impl Endpoint {
         secret: &[u8; 32],
     ) -> impl Future<Output = Result<Self, BindError>> + use<> {
         Self::finish(
-            iroh::Endpoint::builder(presets::Minimal)
-                // `presets::Minimal` leaves both of these at the iroh defaults (relays on, portmapper
+            iroh::Endpoint::builder(Hybrid)
+                // The preset leaves both of these at the iroh defaults (relays on, portmapper
                 // enabled). Pin them off explicitly so "no NAT traversal" is configuration, not an
                 // accident of an empty relay map or a future preset change.
                 .relay_mode(RelayMode::Disabled)
@@ -228,7 +258,7 @@ impl Endpoint {
         let secret = SecretKey::from_bytes(secret);
         async move {
             Self::finish(
-                iroh::Endpoint::builder(presets::Minimal).bind_addr(bind_addr)?,
+                iroh::Endpoint::builder(Hybrid).bind_addr(bind_addr)?,
                 secret,
                 Finding::ByHints,
                 None,
