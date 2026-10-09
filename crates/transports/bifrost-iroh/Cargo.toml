@@ -11,6 +11,7 @@ bifrost-core.workspace = true
 bifrost-transport.workspace = true
 futures-core.workspace = true
 iroh.workspace = true
+rustls.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
@@ -20,6 +21,7 @@ zeroize.workspace = true
 futures-util.workspace = true
 iroh = { workspace = true, features = ["test-utils", "unstable-net-report"] }
 iroh-relay = { workspace = true, features = ["server"] }
+noq = { workspace = true, features = ["rustls"] }
 tokio = { workspace = true, features = ["time"] }
 
 [lints]
