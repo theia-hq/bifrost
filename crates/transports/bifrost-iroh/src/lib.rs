@@ -24,6 +24,7 @@ use iroh::endpoint::{
     RelayMode, SendStream, VarInt, WeakConnectionHandle,
 };
 use iroh::{EndpointAddr, EndpointId, PublicKey, RelayMap, SecretKey, TransportAddr};
+use rustls::crypto::CryptoProvider;
 use rustls::crypto::aws_lc_rs::{self, kx_group};
 use tokio::sync::Mutex;
 use url::Url;
@@ -66,11 +67,14 @@ fn quic_limits() -> QuicTransportConfig {
         .build()
 }
 
-/// The preset every bind starts from: it sets the TLS crypto and nothing else, so the session key is
-/// agreed with X25519MLKEM768 whenever the other end offers it, and with X25519 when it does not.
+/// The preset every bind starts from: it sets the TLS crypto and nothing else. The dialer's list
+/// decides the group, so a session this end dials uses X25519MLKEM768 whenever the other end has it,
+/// and one the other end dials uses it when that end lists it first; otherwise X25519.
 ///
 /// The hybrid keeps a session recorded today unreadable to a quantum computer later, while the X25519
-/// half alone still holds against a classical one. One provider serves the peer link, the relay's
+/// half alone still holds against a classical one. It covers the key, not the peer: the peer's
+/// identity is still proven with an Ed25519 signature, so this protects recorded traffic, not against
+/// a forger at the time of the handshake. One provider serves the peer link, the relay's
 /// HTTPS and pkarr publishing, so classical stays in the list: n0's relays and resolver speak only
 /// classical groups, and a peer with no ML-KEM still connects. The two elliptic-curve groups after
 /// X25519 are for an HTTPS host that offers neither of the first two.
@@ -83,14 +87,15 @@ struct Hybrid;
 
 impl Preset for Hybrid {
     fn apply(self, builder: iroh::endpoint::Builder) -> iroh::endpoint::Builder {
-        let mut provider = aws_lc_rs::default_provider();
-        provider.kx_groups = vec![
-            kx_group::X25519MLKEM768,
-            kx_group::X25519,
-            kx_group::SECP256R1,
-            kx_group::SECP384R1,
-        ];
-        builder.crypto_provider(Arc::new(provider))
+        builder.crypto_provider(Arc::new(CryptoProvider {
+            kx_groups: vec![
+                kx_group::X25519MLKEM768,
+                kx_group::X25519,
+                kx_group::SECP256R1,
+                kx_group::SECP384R1,
+            ],
+            ..aws_lc_rs::default_provider()
+        }))
     }
 }
 

@@ -291,8 +291,25 @@ async fn two_endpoints_agree_the_hybrid_group() {
     }
 }
 
-/// A peer with no ML-KEM still connects, over X25519, and carries bytes. The peer is iroh's own
-/// preset, which picks ring on this feature set, the way an endpoint built without this crate would.
+/// A bind over a reach agrees the hybrid too: it is built by `Reach::builder`, not by the local binds,
+/// and it is the bind a serving or dialing node runs on.
+#[tokio::test]
+async fn a_reach_bind_agrees_the_hybrid_group() {
+    let host = Endpoint::bind_local().await.expect("bind the host");
+    let dialer = serving(41).await;
+    let (dialed, accepted) = session(&dialer, &host).await;
+    for (side, session) in [("the reach bind", &dialed), ("the host", &accepted)] {
+        assert_eq!(
+            group(&session.conn),
+            NamedGroup::X25519MLKEM768,
+            "{side} agreed a classical key"
+        );
+    }
+}
+
+/// A peer with no ML-KEM still connects, over X25519, and carries bytes, whichever end dials. The
+/// peer is iroh's own preset, which picks ring on this feature set, the way an endpoint built without
+/// this crate would. This end dialing it is the direction of every relay and pkarr link.
 #[tokio::test]
 async fn a_peer_without_ml_kem_connects_over_x25519() {
     let host = Endpoint::bind_local().await.expect("bind the host");
@@ -304,32 +321,49 @@ async fn a_peer_without_ml_kem_connects_over_x25519() {
     )
     .await
     .expect("bind the classical peer");
-    let (dialed, accepted) = session(&classical, &host).await;
-    for (side, session) in [("the classical peer", &dialed), ("the host", &accepted)] {
-        assert_eq!(group(&session.conn), NamedGroup::X25519, "{side}");
+    for (dialer, host) in [(&classical, &host), (&host, &classical)] {
+        let (dialed, accepted) = session(dialer, host).await;
+        for (side, session) in [("the dialer", &dialed), ("the host", &accepted)] {
+            assert_eq!(group(&session.conn), NamedGroup::X25519, "{side}");
+        }
+        echo((dialed.conn, accepted)).await;
     }
-    echo((dialed.conn, accepted)).await;
 }
 
-/// Every bind starts from [`Hybrid`](crate::Hybrid): the session test above reaches only the local
-/// bind, so this reads the other three off the source. iroh's presets pick ring whenever its feature
-/// is on, and a bind built from one would connect classically with nothing to show it.
+/// Every bind in the crate starts from [`Hybrid`](crate::Hybrid), and nothing after it swaps the
+/// provider: iroh's presets pick ring whenever its feature is on, and the builder keeps the last
+/// provider it is given, so either would connect classically with nothing to show it. The session
+/// tests above see two of the four binds on the wire; this reads every non-test source file.
 #[test]
 fn every_bind_starts_from_the_hybrid_preset() {
     let builder = "iroh::Endpoint::builder(";
-    let mut binds = 0;
-    for source in [include_str!("lib.rs"), include_str!("reach.rs")] {
-        for (at, _) in source.match_indices(builder) {
+    let (mut binds, mut providers) = (0, 0);
+    for source in crate_sources() {
+        // The test files build classical peers on purpose.
+        if source
+            .file_stem()
+            .is_some_and(|stem| stem.to_string_lossy().ends_with("_tests"))
+        {
+            continue;
+        }
+        let text = fs::read_to_string(&source).expect("read a source file of this crate");
+        for (at, _) in text.match_indices(builder) {
             assert!(
-                source[at + builder.len()..].starts_with("Hybrid)"),
-                "a bind starts from a preset other than `Hybrid`"
+                text[at + builder.len()..].starts_with("Hybrid)"),
+                "{}: a bind starts from a preset other than `Hybrid`",
+                source.display()
             );
             binds += 1;
         }
+        providers += text.matches(".crypto_provider(").count();
     }
     assert_eq!(
         binds, 4,
         "the four binds: local, local with a secret, offline, and over a reach"
+    );
+    assert_eq!(
+        providers, 1,
+        "one provider in the crate, set inside `Hybrid::apply`"
     );
 }
 
