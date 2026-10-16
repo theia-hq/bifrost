@@ -284,7 +284,7 @@ async fn two_endpoints_agree_the_hybrid_group() {
     let ((_dialer, dialed), (_host, accepted)) = local_session().await;
     for (side, session) in [("the dialer", &dialed), ("the host", &accepted)] {
         assert_eq!(
-            group(&session.conn),
+            group(session),
             NamedGroup::X25519MLKEM768,
             "{side} agreed a classical key"
         );
@@ -300,7 +300,7 @@ async fn a_reach_bind_agrees_the_hybrid_group() {
     let (dialed, accepted) = session(&dialer, &host).await;
     for (side, session) in [("the reach bind", &dialed), ("the host", &accepted)] {
         assert_eq!(
-            group(&session.conn),
+            group(session),
             NamedGroup::X25519MLKEM768,
             "{side} agreed a classical key"
         );
@@ -324,7 +324,7 @@ async fn a_peer_without_ml_kem_connects_over_x25519() {
     for (dialer, host) in [(&classical, &host), (&host, &classical)] {
         let (dialed, accepted) = session(dialer, host).await;
         for (side, session) in [("the dialer", &dialed), ("the host", &accepted)] {
-            assert_eq!(group(&session.conn), NamedGroup::X25519, "{side}");
+            assert_eq!(group(session), NamedGroup::X25519, "{side}");
         }
         echo((dialed.conn, accepted)).await;
     }
@@ -510,8 +510,9 @@ async fn session(dialer: &Endpoint, host: &Endpoint) -> (IrohSession, IrohSessio
 
 /// The key exchange group a finished handshake agreed. iroh hands its handshake record over untyped,
 /// so a record of another type fails here rather than reading as no group.
-fn group(conn: &iroh::endpoint::Connection) -> NamedGroup {
-    conn.handshake_data()
+fn group(session: &IrohSession) -> NamedGroup {
+    session
+        .handshake_data()
         .expect("a finished handshake has its record")
         .downcast::<HandshakeData>()
         .expect("the handshake record is rustls's")

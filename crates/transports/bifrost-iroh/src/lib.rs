@@ -69,7 +69,7 @@ fn quic_limits() -> QuicTransportConfig {
 
 /// The preset every bind starts from: it sets the TLS crypto and nothing else. The dialer's list
 /// decides the group, so a session this end dials uses X25519MLKEM768 whenever the other end has it,
-/// and one the other end dials uses it when that end lists it first; otherwise X25519.
+/// and one the other end dials uses it when that end lists it first; otherwise a supported classical group.
 ///
 /// The hybrid keeps a session recorded today unreadable to a quantum computer later, while the X25519
 /// half alone still holds against a classical one. It covers the key, not the peer: the peer's
@@ -487,6 +487,13 @@ pub struct IrohSession {
     /// The peer's identity, parsed once where the session is built: `peer` is synchronous and cannot
     /// refuse, so a key that is not a usable identity never becomes a session at all.
     peer: NodeId,
+}
+
+impl IrohSession {
+    /// Returns the completed connection's opaque handshake metadata, or `None` if unavailable.
+    pub fn handshake_data(&self) -> Option<Box<dyn core::any::Any>> {
+        self.conn.handshake_data()
+    }
 }
 
 impl Session for IrohSession {
