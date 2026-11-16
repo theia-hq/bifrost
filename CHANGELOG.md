@@ -31,11 +31,15 @@ All notable changes to bifrost, newest first.
   peer no unidirectional streams and no datagrams, and at most 16 MiB of unread stream data per
   connection. Separately, noq-proto 1.3.0, the QUIC library iroh uses, lets a peer make an endpoint
   buffer out-of-order stream data without limit (the bug RUSTSEC-2026-0185 names in quinn-proto, which
-  noq forks). Until a noq-proto release fixes it, add this to your workspace's root `Cargo.toml`; cargo
-  reads `[patch]` only there, never from a dependency:
+  noq forks). The source below also fixes RUSTSEC-2026-0339 to 0343, 0523 (a `MAX_STREAM_DATA` frame
+  could open streams beyond the limit) and 0524 (a long Retry or address-validation token could panic or
+  exhaust memory in a client) in noq-proto, and 0538 (the receive loop could spin after a truncated
+  datagram on Apple and some BSD targets) in noq-udp. Until noq releases fix them, add this to your
+  workspace's root `Cargo.toml`; cargo reads `[patch]` only there, never from a dependency:
   ```toml
   [patch.crates-io]
-  noq-proto = { git = "https://github.com/n0-computer/noq", rev = "d7c3160a7e7b5cb36682eae04e364d3f50e28925" }
+  noq-proto = { git = "https://github.com/theia-hq/noq", rev = "e97ac991b23287afe8756f64942ebc01e0a3d5a2" }
+  noq-udp = { git = "https://github.com/theia-hq/noq", rev = "e97ac991b23287afe8756f64942ebc01e0a3d5a2" }
   ```
 
 ## v0.8.0
