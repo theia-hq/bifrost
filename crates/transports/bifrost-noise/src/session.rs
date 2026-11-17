@@ -315,6 +315,8 @@ impl<S: Session> Session for NoiseSession<S> {
         self.peer
     }
 
+    /// Carries fewer streams than the 224 the trait states: 64 at once. An open past them errors and
+    /// does not wait.
     async fn open_bi(&self) -> Result<(StreamWrite, StreamRead), Error> {
         if self.exit.is_dead() {
             return Err(Error::Closed);

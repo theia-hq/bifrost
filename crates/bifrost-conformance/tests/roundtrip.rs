@@ -1,8 +1,8 @@
 use bifrost::{Node, StaticDiscovery, Transport};
 use bifrost_conformance::{
-    PeerNotice, bound_sockets_are_bind_truth, close_drains, close_ends_held_streams,
-    direct_conn_info, identity_binding, reach_roundtrip, wildcard_bind_is_not_rewritten,
-    wrong_key_rejected,
+    PeerNotice, StreamEnd, StreamLimit, a_session_carries_its_stream_floor,
+    bound_sockets_are_bind_truth, close_drains, close_ends_held_streams, direct_conn_info,
+    identity_binding, reach_roundtrip, wildcard_bind_is_not_rewritten, wrong_key_rejected,
 };
 use bifrost_iroh::Endpoint;
 
@@ -91,4 +91,24 @@ async fn iroh_close_ends_held_streams() {
     let receiver = Endpoint::bind_local().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
     close_ends_held_streams(sender, receiver, PeerNotice::Told).await;
+}
+
+/// One iroh session carries the stream floor, and an open past the peer's room waits rather than
+/// failing, then completes once fewer than the floor count: here each side finishes its writer and
+/// reads the other's to its end.
+#[tokio::test]
+async fn iroh_a_session_carries_its_stream_floor_finished() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    let limit = StreamLimit::Limited(StreamEnd::Finished);
+    a_session_carries_its_stream_floor(sender, receiver, limit).await;
+}
+
+/// As above, but each side drops both halves of a stream unread, the way a caller abandons one.
+#[tokio::test]
+async fn iroh_a_session_carries_its_stream_floor_dropped() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    let limit = StreamLimit::Limited(StreamEnd::Dropped);
+    a_session_carries_its_stream_floor(sender, receiver, limit).await;
 }

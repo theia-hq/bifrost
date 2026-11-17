@@ -159,6 +159,16 @@ pub trait Session {
     fn peer(&self) -> NodeId;
 
     /// Open a bidirectional stream to the peer.
+    ///
+    /// The peer grants room for the streams this side opens. Against a peer on the same transport, a
+    /// session carries at least 224 bidirectional streams at once. A stream counts until both ends have
+    /// finished with it: each has closed its writer and read the other's to its end, or dropped both
+    /// halves.
+    ///
+    /// Past the peer's room this waits and never errors for being full. A waiting open completes once
+    /// fewer than 224 streams count, and may complete sooner. A peer that grants no room keeps it waiting
+    /// indefinitely, so a caller that needs a bound sets its own deadline. A transport that carries fewer
+    /// streams says so on its own impl.
     async fn open_bi(&self) -> Result<(Self::Write, Self::Read), Error>;
 
     /// Accept the next bidirectional stream from the peer.

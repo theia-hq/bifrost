@@ -57,10 +57,13 @@ const CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
 /// and NAT-traversal settings hole punching needs. The same config serves accepted connections and
 /// dials, so a node that dials a hostile key is held to it too. Unidirectional streams and datagrams
 /// are off because a [`Session`] offers neither, so a peer could only use them to make this node
-/// buffer bytes nothing will read. The bidirectional stream count and the per-stream window stay at
-/// noq's defaults (100 and 1.25 MB).
+/// buffer bytes nothing will read. The bidirectional stream count is 256 and the per-stream window
+/// stays at noq's default (1.25 MB). noq returns stream credit to the opener only after more than an
+/// eighth of the count (more than 32) has ended, so an opener can wait while up to 32 ended streams
+/// still count. A session therefore carries at least 224 at once.
 fn quic_limits() -> QuicTransportConfig {
     QuicTransportConfig::builder()
+        .max_concurrent_bidi_streams(VarInt::from_u32(256))
         .max_concurrent_uni_streams(VarInt::from_u32(0))
         .datagram_receive_buffer_size(None)
         .receive_window(VarInt::from_u32(CONNECTION_WINDOW))

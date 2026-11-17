@@ -1,7 +1,8 @@
 use bifrost::{NoDiscovery, Node, Transport};
 use bifrost_conformance::{
-    PeerNotice, close_drains, close_ends_held_streams, identity_binding, reach_roundtrip,
-    unknown_conn_info, wrong_key_rejected,
+    PeerNotice, StreamLimit, a_session_carries_its_stream_floor, close_drains,
+    close_ends_held_streams, identity_binding, reach_roundtrip, unknown_conn_info,
+    wrong_key_rejected,
 };
 use bifrost_mem::MemTransport;
 
@@ -68,4 +69,13 @@ async fn mem_close_ends_held_streams() {
     let receiver = MemTransport::bind();
     let sender = Node::new(MemTransport::bind(), NoDiscovery);
     close_ends_held_streams(sender, receiver, PeerNotice::Told).await;
+}
+
+/// One in-process session carries the stream floor. Streams ride unbounded channels, so the transport
+/// has no count to stop at and no wait to check.
+#[tokio::test]
+async fn mem_a_session_carries_its_stream_floor() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    a_session_carries_its_stream_floor(sender, receiver, StreamLimit::Unlimited).await;
 }
