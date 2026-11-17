@@ -19,7 +19,7 @@
 //! backing implementation (iroh inherits QUIC and TLS, which this suite does not exercise) and on
 //! protocol review. Forward secrecy, nonce discipline, replay resistance against an active
 //! attacker, and entropy quality are protocol review of the handshake and its library, not
-//! black-box assertions. iroh (QUIC), the in-process mem transport, and quirk all pass the suite
+//! black-box assertions. iroh (QUIC) and the in-process mem transport both pass the suite
 //! unchanged; that is the byte contract plus the identity cases, and the security profile is what
 //! each backend declares beside them.
 
@@ -581,7 +581,7 @@ where
 
 /// A direct transport reports [`Path::Direct`] and names the remote over an established session.
 ///
-/// This is the `conn_info` contract for a transport with no relay in the path (quirk today, iroh over
+/// This is the `conn_info` contract for a transport with no relay in the path (iroh over
 /// loopback): the dialer's session must report the current path as [`Path::Direct`] and carry a remote
 /// socket address, since that is exactly the reassuring "am I peer-to-peer?" answer a status readout
 /// renders. Panics with a descriptive message on failure, so it reads as a test assertion.

@@ -13,8 +13,8 @@
 //! inspect the channel. The [`Security`] value and the marker types state what each profile means
 //! and what is left to protocol review.
 //!
-//! This is the pluggable boundary: iroh, quirk, and an in-process backend today, all exposing the
-//! same byte-stream interface and all held to the same behaviour by the conformance suite.
+//! This is the pluggable boundary: iroh and an in-process backend today, both exposing the
+//! same byte-stream interface and both held to the same behaviour by the conformance suite.
 //! Everything above this boundary (the wire, the products) is transport-blind.
 //!
 //! This crate is the byte-moving interface and nothing else: implement [`Transport`] + [`Session`] to

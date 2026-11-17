@@ -5,8 +5,8 @@ NATs, without knowing its address. Identity is an ed25519 public key (a `NodeId`
 peer is, not *where*. bifrost gives you the connection and nothing more; what you send over it is up to
 you.
 
-It carries the connection over its own backends: iroh (QUIC with NAT hole-punching), an in-process
-backend for tests, and [quirk](https://github.com/theia-hq/quirk), a QUIC-shaped transport written from scratch over UDP.
+It carries the connection over its own backends: iroh (QUIC with NAT hole-punching) and an in-process
+backend for tests.
 
 **The name.** Bifröst is the burning rainbow bridge of Norse myth, the span that reaches from one
 world to any other. This crate is the bridge to a peer: name a public key and it carries a
@@ -52,7 +52,6 @@ interfaces runs unchanged over any of them.
 | `bifrost-iroh`        | transport backend over iroh (QUIC with NAT hole-punching)           |
 | `bifrost-mem`         | in-process transport backend for hermetic tests                     |
 | `bifrost-noise`       | a Noise handshake over an announced transport: proves the peer's key, encrypts the session |
-| `bifrost-quirk`       | transport backend over [quirk](https://github.com/theia-hq/quirk), a QUIC-shaped transport written from scratch |
 | `bifrost-mdns`        | discovery over mDNS on the local network                            |
 | `bifrost-conformance` | transport-agnostic test suite every backend must pass               |
 | `bifrost-wire`        | one-shot blob transfer over a stream, BLAKE3-verified end to end    |
@@ -64,8 +63,8 @@ This page describes the default branch.
 - bifrost establishes the connection and hands you a byte-stream. It says nothing about what those bytes
   mean; that is the caller's protocol.
 - Verified blob transfer lives in `bifrost-wire`, a sibling crate the facade re-exports as `bifrost::wire`.
-- Transports are interchangeable in interface, not in security. iroh, an in-process backend, and quirk
-  all pass the same conformance suite, but each declares its own `Security` profile (`Sealed`,
+- Transports are interchangeable in interface, not in security. iroh and an in-process backend
+  both pass the same conformance suite, but each declares its own `Security` profile (`Sealed`,
   `Announced`, or `InProcess`), and a consumer states the bound it needs: `PeerProven` to trust the
   peer's key, `Secure` to carry a secret. A transport that does not meet the bound does not compile in.
 
