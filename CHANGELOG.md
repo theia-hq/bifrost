@@ -5,6 +5,11 @@ All notable changes to bifrost, newest first.
 ## Unreleased
 
 ### Breaking
+- **Every `Session::Write` must implement `Abort`.** `Abort::abort` cuts a stream's write half off
+  mid-stream: the peer's read fails with `ConnectionReset` and never sees a clean end. After a
+  successful `shutdown` it does nothing. It is synchronous, so it can run from a `Drop`. Dropping a
+  write half still ends the stream cleanly.
+  `bifrost-iroh` returns `IrohWrite` from `open_bi` and `accept_bi`.
 - **The `keystore` crate is no longer part of bifrost.** It is its own repository,
   [theia-hq/keystore](https://github.com/theia-hq/keystore), from v0.1.0.
 - **`NodeId::derive_ed25519` and `derive_ed25519_child_secret` are gone:** bifrost no longer derives child keys.

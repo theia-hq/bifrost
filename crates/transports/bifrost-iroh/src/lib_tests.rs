@@ -34,6 +34,7 @@ use iroh::{
 use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
 use noq::crypto::rustls::HandshakeData;
 use rustls::NamedGroup;
+use tokio::io::AsyncWriteExt as _;
 use tokio::sync::oneshot;
 use tokio::time;
 

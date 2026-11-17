@@ -1,6 +1,9 @@
 use bifrost::{NoDiscovery, Node, Transport};
 use bifrost_conformance::{
-    StreamLimit, a_session_carries_its_stream_floor, close_drains, close_ends_held_streams,
+    StreamLimit, a_dropped_writer_still_ends_cleanly, a_session_carries_its_stream_floor,
+    abort_is_idempotent_and_writes_after_it_fail, abort_leaves_the_sessions_other_streams_alive,
+    abort_leaves_the_streams_read_half_open, an_abort_after_shutdown_leaves_the_clean_end,
+    an_aborted_writer_errors_the_peers_read, close_drains, close_ends_held_streams,
     identity_binding, reach_roundtrip, unknown_conn_info, wrong_key_rejected,
 };
 use bifrost_mem::MemTransport;
@@ -78,4 +81,53 @@ async fn mem_a_session_carries_its_stream_floor() {
     let receiver = MemTransport::bind();
     let sender = Node::new(MemTransport::bind(), NoDiscovery);
     a_session_carries_its_stream_floor(sender, receiver, StreamLimit::Unlimited).await;
+}
+
+/// Aborting an in-process writer fires that direction's own signal, so the peer's read fails with
+/// `ConnectionReset` rather than reading the clean end a drop gives.
+#[tokio::test]
+async fn mem_an_aborted_writer_errors_the_peers_read() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    an_aborted_writer_errors_the_peers_read(sender, receiver).await;
+}
+
+/// An abort ends one direction of one stream, never the session: a second stream still round-trips.
+#[tokio::test]
+async fn mem_abort_leaves_the_sessions_other_streams_alive() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    abort_leaves_the_sessions_other_streams_alive(sender, receiver).await;
+}
+
+/// A second abort is harmless, and the aborted writer refuses further writes.
+#[tokio::test]
+async fn mem_abort_is_idempotent_and_writes_after_it_fail() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    abort_is_idempotent_and_writes_after_it_fail(sender, receiver).await;
+}
+
+/// Dropping an in-process writer without an abort still ends the stream cleanly.
+#[tokio::test]
+async fn mem_a_dropped_writer_still_ends_cleanly() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    a_dropped_writer_still_ends_cleanly(sender, receiver).await;
+}
+
+/// An abort after a successful shutdown does nothing, so the peer reads the clean end.
+#[tokio::test]
+async fn mem_an_abort_after_shutdown_leaves_the_clean_end() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    an_abort_after_shutdown_leaves_the_clean_end(sender, receiver).await;
+}
+
+/// An abort ends one direction only: the peer's writes toward the aborter still arrive.
+#[tokio::test]
+async fn mem_abort_leaves_the_streams_read_half_open() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    abort_leaves_the_streams_read_half_open(sender, receiver).await;
 }

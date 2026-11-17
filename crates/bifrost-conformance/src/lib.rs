@@ -30,7 +30,7 @@ use core::net::SocketAddr;
 use core::task::Poll;
 use std::collections::VecDeque;
 
-use bifrost::{Addr, Discovery, Error, Node, NodeId, Path, Session, Transport};
+use bifrost::{Abort as _, Addr, Discovery, Error, Node, NodeId, Path, Session, Transport};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// A message sent to a peer reached by key over a bidirectional stream echoes back byte-identical.
@@ -195,6 +195,237 @@ async fn read_to_the_end(mut recv: impl tokio::io::AsyncRead + Unpin) -> std::io
             return Ok(());
         }
     }
+}
+
+// How long an aborted stream's peer has to see the reset. Generous: this bounds a hang, not a latency.
+const ABORT_BOUND: core::time::Duration = core::time::Duration::from_secs(5);
+
+/// After a write half is aborted, the peer's read of that stream fails with `ConnectionReset`, not a
+/// clean end. Panics if the read ends cleanly or fails any other way.
+pub async fn an_aborted_writer_errors_the_peers_read<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened
+        .send
+        .write_all(b"cut short")
+        .await
+        .expect("write before the abort");
+    opened.send.abort();
+    // Dropped after the abort, as a caller does: an abort that did nothing leaves the drop's clean
+    // end, so this reads as `None` below rather than hanging.
+    drop(opened.send);
+
+    let ended = read_kind(&mut opened.peer_recv).await;
+    assert_eq!(
+        ended,
+        Some(tokio::io::ErrorKind::ConnectionReset),
+        "an aborted stream's peer read fails with ConnectionReset, never a clean end"
+    );
+    sender.close().await;
+}
+
+/// Aborting one stream leaves the session and its other streams working: a second stream still
+/// carries bytes both ways. Panics if it does not within a bound.
+pub async fn abort_leaves_the_sessions_other_streams_alive<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened.send.abort();
+    assert_eq!(
+        read_kind(&mut opened.peer_recv).await,
+        Some(tokio::io::ErrorKind::ConnectionReset),
+        "the aborted stream's peer read fails with ConnectionReset"
+    );
+
+    // Checked after the peer has seen the reset, so a reset that took the session with it shows.
+    let dialing = async {
+        let (mut send, mut recv) = opened.dialed.open_bi().await.expect("open a second stream");
+        round_trip_one(&mut send, &mut recv, 7).await;
+    };
+    let accepting = async {
+        let (mut send, mut recv) = opened
+            .accepted
+            .accept_bi()
+            .await
+            .expect("accept a second stream");
+        echo_one(&mut send, &mut recv).await;
+    };
+    tokio::time::timeout(ABORT_BOUND, async { tokio::join!(dialing, accepting) })
+        .await
+        .expect("a second stream round-trips after an abort");
+    sender.close().await;
+}
+
+/// Aborting twice is the same as aborting once, and a write after an abort fails. The peer's read
+/// still fails with `ConnectionReset`. Panics otherwise.
+pub async fn abort_is_idempotent_and_writes_after_it_fail<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened.send.abort();
+    opened.send.abort();
+    assert!(
+        opened.send.write_all(b"too late").await.is_err(),
+        "a write after an abort fails"
+    );
+    assert_eq!(
+        read_kind(&mut opened.peer_recv).await,
+        Some(tokio::io::ErrorKind::ConnectionReset),
+        "a second abort leaves the reset as it was"
+    );
+    sender.close().await;
+}
+
+/// Dropping a write half without aborting ends the stream cleanly: the peer reads every byte written,
+/// then a clean end, not an error. Panics if the read errors or hangs.
+pub async fn a_dropped_writer_still_ends_cleanly<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened
+        .send
+        .write_all(b"whole")
+        .await
+        .expect("write before the drop");
+    opened.send.flush().await.expect("flush before the drop");
+    drop(opened.send);
+
+    let mut rest = Vec::new();
+    tokio::time::timeout(ABORT_BOUND, opened.peer_recv.read_to_end(&mut rest))
+        .await
+        .expect("a dropped writer's peer read must end, not hang")
+        .expect("a dropped writer's stream ends cleanly, never with an error");
+    assert_eq!(rest, b"whole", "a dropped writer's bytes all arrive");
+    sender.close().await;
+}
+
+/// An abort after a successful `shutdown` does nothing: the peer reads every byte, then a clean end.
+/// Panics if the read errors or hangs.
+pub async fn an_abort_after_shutdown_leaves_the_clean_end<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened
+        .send
+        .write_all(b"whole")
+        .await
+        .expect("write before the shutdown");
+    opened.send.shutdown().await.expect("shut the writer down");
+    // At once, before the peer can have acknowledged the bytes: the window a reset would race.
+    opened.send.abort();
+
+    let mut rest = Vec::new();
+    tokio::time::timeout(ABORT_BOUND, opened.peer_recv.read_to_end(&mut rest))
+        .await
+        .expect("a finished stream's peer read must end, not hang")
+        .expect("an abort after shutdown leaves the clean end, never an error");
+    assert_eq!(rest, b"whole", "a finished writer's bytes all arrive");
+    sender.close().await;
+}
+
+/// Aborting a write half leaves the same stream's read half working: the peer's writes toward the
+/// aborter still arrive, then a clean end. Panics if they do not.
+pub async fn abort_leaves_the_streams_read_half_open<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened.send.abort();
+    // Checked after the peer has seen the reset, so a reset that took both directions shows.
+    assert_eq!(
+        read_kind(&mut opened.peer_recv).await,
+        Some(tokio::io::ErrorKind::ConnectionReset),
+        "the aborted direction's peer read fails with ConnectionReset"
+    );
+
+    opened
+        .peer_send
+        .write_all(b"reply")
+        .await
+        .expect("the peer writes toward the aborter");
+    opened
+        .peer_send
+        .shutdown()
+        .await
+        .expect("the peer finishes its writer");
+    let mut reply = Vec::new();
+    tokio::time::timeout(ABORT_BOUND, opened.recv.read_to_end(&mut reply))
+        .await
+        .expect("the aborter's read must end, not hang")
+        .expect("the aborter's read half still reads to a clean end");
+    assert_eq!(reply, b"reply", "the peer's writes reach the aborter");
+    sender.close().await;
+}
+
+/// One stream, open and announced on both ends, with both sessions held so a session's end cannot
+/// stand in for the stream's.
+struct Opened<S: Session> {
+    dialed: S,
+    accepted: S,
+    /// The dialer's halves.
+    send: S::Write,
+    recv: S::Read,
+    /// The acceptor's halves.
+    peer_send: S::Write,
+    peer_recv: S::Read,
+}
+
+impl<S: Session> Opened<S> {
+    /// Dial `receiver` through `sender` and open one stream, whose first byte the acceptor has read.
+    async fn open<T, D>(sender: &Node<T, D>, receiver: &T) -> Self
+    where
+        T: Transport<Session = S>,
+        D: Discovery,
+    {
+        let dialing = async {
+            let session = sender.connect(receiver.node_id()).await.expect("connect");
+            let (mut send, recv) = session.open_bi().await.expect("open stream");
+            // Some transports announce a stream only once it carries a byte.
+            send.write_all(b"x").await.expect("write the first byte");
+            send.flush().await.expect("flush the first byte");
+            (session, send, recv)
+        };
+        let accepting = async {
+            let session = receiver.accept().await.expect("accept session");
+            let (send, mut recv) = session.accept_bi().await.expect("accept stream");
+            let mut first = [0u8; 1];
+            recv.read_exact(&mut first)
+                .await
+                .expect("read the first byte");
+            (session, send, recv)
+        };
+        let ((dialed, send, recv), (accepted, peer_send, peer_recv)) =
+            tokio::join!(dialing, accepting);
+        Self {
+            dialed,
+            accepted,
+            send,
+            recv,
+            peer_send,
+            peer_recv,
+        }
+    }
+}
+
+/// How the peer's read of an aborted stream ended: the error kind, or `None` for a clean end.
+async fn read_kind(recv: impl tokio::io::AsyncRead + Unpin) -> Option<tokio::io::ErrorKind> {
+    tokio::time::timeout(ABORT_BOUND, read_to_the_end(recv))
+        .await
+        .expect("an aborted stream's peer read must end, not hang")
+        .err()
+        .map(|err| err.kind())
 }
 
 /// Whether a transport caps how many bidirectional streams a session holds at once.

@@ -1,7 +1,7 @@
 #!/bin/sh
 # sealed-gate fixture: exercise every PASS and FAIL path of scripts/sealed-gate.sh on throwaway trees,
 # so a regression in the impl pattern, the comment filter, the `[package]` name parse, the transport
-# list, the test-only rule, or the identity-case check fails HERE instead of passing silently in CI.
+# list, the test-only rule, or the required-case check fails HERE instead of passing silently in CI.
 # Each case builds a temp tree, runs the gate against it, and asserts the exit code plus a substring
 # of the output. Dependency-free: POSIX sh + find + grep + sed.
 
@@ -68,16 +68,16 @@ expect_fail() {
   printf 'FAIL %s\n%s\n' "$1" "$out"
 }
 
-both_cases='use bifrost_iroh::Endpoint;
-fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); }'
+every_case='use bifrost_iroh::Endpoint;
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); an_aborted_writer_errors_the_peers_read(a, b); }'
 
-# The pass path: both listed crates implement both traits, the backend runs the identity cases, and
+# The pass path: both listed crates implement both traits, the backend runs the required cases, and
 # the test-only backend is taken as a dev-dependency.
 write_crate listed bifrost-iroh 'impl Transport for E {}
 impl Session for S {}'
 write_crate listed bifrost-mem 'impl Transport for M {}
 impl Session for N {}'
-write_suite listed "$both_cases"
+write_suite listed "$every_case"
 expect_ok 'listed crates pass' listed '4 Transport/Session impl'
 
 # The list: any other crate's impl fails.
@@ -132,14 +132,26 @@ write_crate split-session liar 'impl<T: Session + Send + Sync + '"'"'static> Ses
     for Wrapped<T> {}'
 expect_fail 'a rustfmt-split Session header fails' split-session 'UNLISTED'
 
-# The identity cases: a listed backend with no test file running both fails, and one is not enough.
-write_crate no-identity bifrost-iroh 'impl Transport for E {}'
-expect_fail 'a backend with no identity cases fails' no-identity 'NO-IDENTITY'
+# The required cases: a listed backend with no test file running every one fails, and a subset is not
+# enough.
+write_crate no-cases bifrost-iroh 'impl Transport for E {}'
+expect_fail 'a backend with no required cases fails' no-cases 'NO-CASES'
 
 write_crate half-identity bifrost-iroh 'impl Transport for E {}'
 write_suite half-identity 'use bifrost_iroh::Endpoint;
-fn t() { identity_binding(a, b); }'
-expect_fail 'a backend running one identity case fails' half-identity 'NO-IDENTITY'
+fn t() { identity_binding(a, b); an_aborted_writer_errors_the_peers_read(a, b); }'
+expect_fail 'a backend running one identity case fails' half-identity 'NO-CASES'
+
+write_crate no-abort bifrost-iroh 'impl Transport for E {}'
+write_suite no-abort 'use bifrost_iroh::Endpoint;
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); }'
+expect_fail 'a backend running no abort case fails' no-abort 'NO-CASES'
+
+write_crate abort-defined bifrost-iroh 'impl Transport for E {}'
+write_suite abort-defined 'use bifrost_iroh::Endpoint;
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); }
+fn an_aborted_writer_errors_the_peers_read(a: A, b: B) {}'
+expect_fail 'defining the abort case is not calling it' abort-defined 'NO-CASES'
 
 # The test-only rule: a test-only backend taken as a normal dependency fails, in either TOML form.
 write_crate not-dev bifrost-mem 'impl Transport for M {}'

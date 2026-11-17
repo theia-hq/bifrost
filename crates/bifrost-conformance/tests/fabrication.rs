@@ -9,10 +9,14 @@
 //! transport's admission checklist.
 
 use core::net::SocketAddr;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use bifrost::{Addr, Error, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport};
+use bifrost::{
+    Abort, Addr, Error, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport,
+};
 use bifrost_conformance::{
     claimed_identity_not_attributed, identity_binding, reach_roundtrip, wrong_key_rejected,
 };
@@ -64,23 +68,50 @@ impl Transport for Fabricator {
     async fn close(&self) {}
 }
 
+/// A write half whose abort does nothing, so a double can stand on any writer: these doubles exist for
+/// the identity cases and are never run through `an_aborted_writer_errors_the_peers_read`, which they
+/// would fail.
+struct NoAbort<W>(W);
+
+impl<W> Abort for NoAbort<W> {
+    fn abort(&mut self) {}
+}
+
+impl<W: io::AsyncWrite + Unpin> io::AsyncWrite for NoAbort<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
 /// A session that reports an identity no handshake established.
 struct FabricatedSession;
 
 impl Session for FabricatedSession {
-    type Write = io::Sink;
+    type Write = NoAbort<io::Sink>;
     type Read = io::Empty;
 
     fn peer(&self) -> NodeId {
         attributed()
     }
 
-    async fn open_bi(&self) -> Result<(io::Sink, io::Empty), Error> {
-        Ok((io::sink(), io::empty()))
+    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
+        Ok((NoAbort(io::sink()), io::empty()))
     }
 
-    async fn accept_bi(&self) -> Result<(io::Sink, io::Empty), Error> {
-        Ok((io::sink(), io::empty()))
+    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
+        Ok((NoAbort(io::sink()), io::empty()))
     }
 
     async fn wait_closed(&self) {}
@@ -131,19 +162,19 @@ struct ImpersonatedSession {
 }
 
 impl Session for ImpersonatedSession {
-    type Write = io::Sink;
+    type Write = NoAbort<io::Sink>;
     type Read = io::Empty;
 
     fn peer(&self) -> NodeId {
         self.peer
     }
 
-    async fn open_bi(&self) -> Result<(io::Sink, io::Empty), Error> {
-        Ok((io::sink(), io::empty()))
+    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
+        Ok((NoAbort(io::sink()), io::empty()))
     }
 
-    async fn accept_bi(&self) -> Result<(io::Sink, io::Empty), Error> {
-        Ok((io::sink(), io::empty()))
+    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
+        Ok((NoAbort(io::sink()), io::empty()))
     }
 
     async fn wait_closed(&self) {}
@@ -165,7 +196,7 @@ const CAP: usize = 64 * 1024;
 
 /// One bidirectional stream, split into its writable and readable halves.
 type Stream = (
-    io::WriteHalf<io::DuplexStream>,
+    NoAbort<io::WriteHalf<io::DuplexStream>>,
     io::ReadHalf<io::DuplexStream>,
 );
 
@@ -271,7 +302,7 @@ struct EchoSession {
 }
 
 impl Session for EchoSession {
-    type Write = io::WriteHalf<io::DuplexStream>;
+    type Write = NoAbort<io::WriteHalf<io::DuplexStream>>;
     type Read = io::ReadHalf<io::DuplexStream>;
 
     fn peer(&self) -> NodeId {
@@ -283,9 +314,9 @@ impl Session for EchoSession {
         let (near_read, near_write) = io::split(near);
         let (far_read, far_write) = io::split(far);
         self.opens
-            .send((far_write, far_read))
+            .send((NoAbort(far_write), far_read))
             .map_err(|_| Error::Closed)?;
-        Ok((near_write, near_read))
+        Ok((NoAbort(near_write), near_read))
     }
 
     async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
