@@ -5,9 +5,9 @@
 # sh + grep, no toolchain. The fixture runs the gate's pass and fail paths on throwaway trees so
 # its fail path cannot rot.
 # The check lives in scripts/layering-gate.sh; see notes/reviews/layering-leak-audit.md.
-# The same job runs scripts/sealed-gate.sh, which fails a proof-bearing profile
-# (`Sealed`/`InProcess`) outside the reviewed per-crate table (see that script's header for the
-# rule and the escape hatch), plus its pass/fail fixture so the gate's own fail path cannot rot.
+# The same job runs scripts/sealed-gate.sh, which fails an `impl Transport` or `impl Session` in
+# any crate outside its list of transport crates (see that script's header for the rule and what
+# else it checks), plus its pass/fail fixture so the gate's own fail path cannot rot.
 name: layering-gate
 on:
   push:

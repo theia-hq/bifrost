@@ -9,7 +9,6 @@ members = [
     "crates/bifrost-wire",
     "crates/transports/bifrost-iroh",
     "crates/transports/bifrost-mem",
-    "crates/transports/bifrost-noise",
 ]
 
 [workspace.package]
@@ -23,7 +22,6 @@ bifrost-core = { path = "crates/bifrost-core" }
 bifrost-iroh = { path = "crates/transports/bifrost-iroh" }
 bifrost-mdns = { path = "crates/bifrost-mdns" }
 bifrost-mem = { path = "crates/transports/bifrost-mem" }
-bifrost-noise = { path = "crates/transports/bifrost-noise" }
 bifrost-transport = { path = "crates/bifrost-transport" }
 bifrost-wire = { path = "crates/bifrost-wire" }
 
@@ -41,7 +39,6 @@ iroh-relay = "1.1"
 libc = "0.2"
 noq = { version = "1.3", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
-snow = { version = "=0.10.0", default-features = false, features = ["use-chacha20poly1305", "use-curve25519", "use-getrandom", "use-sha2"] }
 swarm-discovery = "0.6"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }

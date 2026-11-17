@@ -5,16 +5,14 @@
 //! given; `ImpersonatorAtHint` answers a dial with the dialed key; `EchoLiar` carries bytes and
 //! echoes identities with no handshake at all, so it shows the gap the claim-rejection case closes.
 //! Each must panic where the assertion expects it, so the assertions are not vacuous. What the suite
-//! still cannot catch (plaintext under `Sealed`, capture, tamper, replay) is named in the crate docs
-//! and the transport's admission checklist.
+//! still cannot catch (plaintext, capture, tamper, replay) is named in the crate docs and the
+//! transport's admission checklist.
 
 use core::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use bifrost::{
-    Addr, Announced, Error, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport,
-};
+use bifrost::{Addr, Error, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport};
 use bifrost_conformance::{
     claimed_identity_not_attributed, identity_binding, reach_roundtrip, wrong_key_rejected,
 };
@@ -41,7 +39,6 @@ fn own(byte: u8) -> NodeId {
 struct Fabricator;
 
 impl Transport for Fabricator {
-    type Security = Announced;
     type Session = FabricatedSession;
 
     fn node_id(&self) -> NodeId {
@@ -71,7 +68,6 @@ impl Transport for Fabricator {
 struct FabricatedSession;
 
 impl Session for FabricatedSession {
-    type Security = Announced;
     type Write = io::Sink;
     type Read = io::Empty;
 
@@ -104,7 +100,6 @@ impl Session for FabricatedSession {
 struct ImpersonatorAtHint;
 
 impl Transport for ImpersonatorAtHint {
-    type Security = Announced;
     type Session = ImpersonatedSession;
 
     fn node_id(&self) -> NodeId {
@@ -136,7 +131,6 @@ struct ImpersonatedSession {
 }
 
 impl Session for ImpersonatedSession {
-    type Security = Announced;
     type Write = io::Sink;
     type Read = io::Empty;
 
@@ -214,7 +208,6 @@ impl Drop for EchoLiar {
 }
 
 impl Transport for EchoLiar {
-    type Security = Announced;
     type Session = EchoSession;
 
     fn node_id(&self) -> NodeId {
@@ -278,7 +271,6 @@ struct EchoSession {
 }
 
 impl Session for EchoSession {
-    type Security = Announced;
     type Write = io::WriteHalf<io::DuplexStream>;
     type Read = io::ReadHalf<io::DuplexStream>;
 
@@ -322,8 +314,7 @@ async fn fabricated_peer_fails_identity_binding() {
     identity_binding(Fabricator, Fabricator).await;
 }
 
-/// A transport that accepts every key fails [`wrong_key_rejected`], the case a naive announced-key
-/// wrapper passes today.
+/// A transport that accepts every key fails [`wrong_key_rejected`], a transport with no handshake.
 #[tokio::test]
 #[should_panic(expected = "identity that was never reached")]
 async fn session_for_wrong_key_fails_wrong_key_rejection() {

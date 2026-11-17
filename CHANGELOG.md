@@ -15,11 +15,18 @@ All notable changes to bifrost, newest first.
   `Path` and `ConnInfo` are no longer `Copy`.
 - **`Session` gains a required `path_changes`,** a `PathChanges` stream: the path carrying the
   session's bytes when called, then an item each time the transport selects a different `Path`.
-  `bifrost-iroh` reports each change, `bifrost-noise` returns its inner session's, and `bifrost-mem`
-  returns `PathChanges::fixed(Unknown)`.
+  `bifrost-iroh` reports each change and `bifrost-mem` returns `PathChanges::fixed(Unknown)`.
 - **`bifrost-quirk`, the backend over the quirk transport, is gone.** Depend on `bifrost-iroh` for a
-  network backend or `bifrost-mem` for tests. `bifrost-noise` stays, and wraps any transport that
-  declares `Announced`.
+  network backend or `bifrost-mem` for tests.
+- **`bifrost-noise` is gone.**
+- **The security profile is gone:** `Security`, `SecurityProfile`, `Sealed`, `Announced`, `InProcess`,
+  `PeerProof`, `PeerProven`, `Confidential`, `ChannelProtection`, `Secure`, and the `Security`
+  associated type on `Transport` and `Session`. `Session::peer` now states that the handshake proved
+  the key.
+- **`bifrost-mem` is for tests only:** it has no handshake and proves nothing about a peer. A new
+  backend clears the checklist in `bifrost-transport`, which now requires authenticated encryption
+  under the handshake's keys, before any binary wires it.
+- **`bifrost-conformance`: `PeerNotice` is gone;** `close_ends_held_streams` takes no third argument.
 
 ### New
 - **`Node::connect_hinted` dials a peer with the call's own addresses first, then what discovery finds;**
@@ -34,7 +41,6 @@ All notable changes to bifrost, newest first.
 ### Changed
 - **`bifrost-iroh` carries at least 224 bidirectional streams per session, up from 100.** `Session::open_bi`
   now states that floor: past the peer's room it waits, and completes once fewer than 224 streams count.
-  `bifrost-noise` (64 at once) carries fewer, and an open past its count errors.
 - **`bifrost-iroh` bounds what a peer can make an endpoint buffer.** Every endpoint it binds allows a
   peer no unidirectional streams and no datagrams, and at most 16 MiB of unread stream data per
   connection. Separately, noq-proto 1.3.0, the QUIC library iroh uses, lets a peer make an endpoint

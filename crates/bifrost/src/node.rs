@@ -47,8 +47,8 @@ impl<T: Transport, D: Discovery> Node<T, D> {
     /// One dial, no retry, and no timer of its own: the transport reads the feed as its bind allows
     /// (a self-discovering bind dials at once, a direct-only one waits for the first answer) and the
     /// feed dies with the attempt. How long a silent source may hold the dial is the caller's
-    /// deadline; wrap this call in one. A transport may bound its own attempt too (a sealed
-    /// wrapper's deadline covers its dial, discovery included), but none waits on discovery alone.
+    /// deadline; wrap this call in one. A transport may bound its own attempt too, but none waits on
+    /// discovery alone.
     pub async fn connect(&self, node: NodeId) -> Result<T::Session, Error> {
         self.transport
             .connect_with_updates(Addr::from_node(node), self.discovery.subscribe(node))

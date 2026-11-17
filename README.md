@@ -38,9 +38,9 @@ let (mut writer, mut reader) = session.open_bi().await?;
 ```
 
 `Transport`, `Session`, and `Discovery` are the pluggable interfaces. Implement `Transport` to add a
-backend; every backend declares its `Security` profile (`Sealed`, `Announced`, or `InProcess`) and is
-held to the same byte-movement behaviour by the conformance suite, so a dial written against these
-interfaces runs unchanged over any of them.
+backend; it passes the conformance suite, so a dial written against these interfaces runs unchanged over
+any of them. A shipping backend proves the peer's key in its handshake and protects its streams under
+that handshake's keys; the in-process backend is for tests and proves nothing.
 
 ## The crates
 
@@ -51,7 +51,6 @@ interfaces runs unchanged over any of them.
 | `bifrost-transport`   | the `Transport` and `Session` traits                                |
 | `bifrost-iroh`        | transport backend over iroh (QUIC with NAT hole-punching)           |
 | `bifrost-mem`         | in-process transport backend for hermetic tests                     |
-| `bifrost-noise`       | a Noise handshake over an announced transport: proves the peer's key, encrypts the session |
 | `bifrost-mdns`        | discovery over mDNS on the local network                            |
 | `bifrost-conformance` | transport-agnostic test suite every backend must pass               |
 | `bifrost-wire`        | one-shot blob transfer over a stream, BLAKE3-verified end to end    |
@@ -63,10 +62,6 @@ This page describes the default branch.
 - bifrost establishes the connection and hands you a byte-stream. It says nothing about what those bytes
   mean; that is the caller's protocol.
 - Verified blob transfer lives in `bifrost-wire`, a sibling crate the facade re-exports as `bifrost::wire`.
-- Transports are interchangeable in interface, not in security. iroh and an in-process backend
-  both pass the same conformance suite, but each declares its own `Security` profile (`Sealed`,
-  `Announced`, or `InProcess`), and a consumer states the bound it needs: `PeerProven` to trust the
-  peer's key, `Secure` to carry a secret. A transport that does not meet the bound does not compile in.
 
 ## License
 
