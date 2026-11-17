@@ -35,9 +35,8 @@ impl CryptoKind {
 ///
 /// This is the only way a peer is named in Bifrost. Every `NodeId` passed [`try_new`](Self::try_new)'s
 /// check or was derived from a secret, so it is never a small-order point, a non-canonical encoding, or
-/// a torsioned twin of another identity. Whether reaching a `NodeId` proves the peer holds its key is
-/// the transport's security profile, not a property of the type: a `Sealed` transport proves it, an
-/// `Announced` one reaches whatever key answers. Consumers that need proof require the `PeerProven` bound.
+/// a torsioned twin of another identity. A session's peer is a `NodeId` its transport's handshake
+/// proved (see `Session::peer`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId {
     kind: CryptoKind,

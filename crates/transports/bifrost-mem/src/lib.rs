@@ -8,6 +8,9 @@
 //! Discovery is built in via a process-global registry keyed by [`NodeId`], so this is a
 //! self-discovering transport: `connect` finds the peer with no external `Discovery` object,
 //! exactly as the design intends.
+//!
+//! It has no handshake and proves nothing about a peer: every identity's secret is computable (see
+//! [`MemTransport::bind`]). It is for tests only, a dev-dependency, never wired into a binary.
 
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -16,7 +19,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, Error, HintStream, Path, PathChanges};
-pub use bifrost_transport::{InProcess, Session, Transport};
+pub use bifrost_transport::{Session, Transport};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
@@ -86,7 +89,6 @@ impl Drop for MemTransport {
 }
 
 impl Transport for MemTransport {
-    type Security = InProcess;
     type Session = MemSession;
 
     fn node_id(&self) -> NodeId {
@@ -163,7 +165,6 @@ pub struct MemSession {
 }
 
 impl Session for MemSession {
-    type Security = InProcess;
     type Write = MemWrite;
     type Read = MemRead;
 
@@ -223,21 +224,3 @@ enum MemError {
 
 #[cfg(test)]
 mod lib_tests;
-#[cfg(test)]
-mod tests {
-    use bifrost_transport::SecurityProfile as _;
-
-    use super::{InProcess, MemTransport, Transport};
-
-    /// The declared profile is PINNED per backend: every consumer's trust decision rests on it, so an
-    /// accidental flip fails HERE, in the crate that declares it, rather than downstream in code that went
-    /// on believing the old promise. `InProcess` is the profile the `bifrost-mem` entry in
-    /// `scripts/sealed-gate.sh` authorizes (test-only backend, no wire).
-    #[test]
-    fn the_declared_profile_is_pinned_to_in_process() {
-        assert_eq!(
-            <MemTransport as Transport>::Security::SECURITY,
-            InProcess::SECURITY
-        );
-    }
-}

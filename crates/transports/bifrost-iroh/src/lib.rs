@@ -15,7 +15,7 @@ pub use bifrost_core::NodeId;
 use bifrost_core::{
     Addr, BoxError, ConnInfo, CryptoKind, Error, HintStream, KeyError, Path, PathChanges, Relay,
 };
-pub use bifrost_transport::{Sealed, Session, Transport};
+pub use bifrost_transport::{Session, Transport};
 use futures_core::Stream;
 use iroh::address_lookup::AddressLookupBuilderError;
 use iroh::endpoint::presets::Preset;
@@ -422,7 +422,6 @@ impl Endpoint {
 }
 
 impl Transport for Endpoint {
-    type Security = Sealed;
     type Session = IrohSession;
 
     fn node_id(&self) -> NodeId {
@@ -504,7 +503,6 @@ impl IrohSession {
 }
 
 impl Session for IrohSession {
-    type Security = Sealed;
     type Write = SendStream;
     type Read = RecvStream;
 

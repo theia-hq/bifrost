@@ -1,8 +1,8 @@
 use bifrost::{Node, StaticDiscovery, Transport};
 use bifrost_conformance::{
-    PeerNotice, StreamEnd, StreamLimit, a_session_carries_its_stream_floor,
-    bound_sockets_are_bind_truth, close_drains, close_ends_held_streams, direct_conn_info,
-    identity_binding, reach_roundtrip, wildcard_bind_is_not_rewritten, wrong_key_rejected,
+    StreamEnd, StreamLimit, a_session_carries_its_stream_floor, bound_sockets_are_bind_truth,
+    close_drains, close_ends_held_streams, direct_conn_info, identity_binding, reach_roundtrip,
+    wildcard_bind_is_not_rewritten, wrong_key_rejected,
 };
 use bifrost_iroh::Endpoint;
 
@@ -90,7 +90,7 @@ async fn iroh_wildcard_bind_is_not_rewritten() {
 async fn iroh_close_ends_held_streams() {
     let receiver = Endpoint::bind_local().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
-    close_ends_held_streams(sender, receiver, PeerNotice::Told).await;
+    close_ends_held_streams(sender, receiver).await;
 }
 
 /// One iroh session carries the stream floor, and an open past the peer's room waits rather than

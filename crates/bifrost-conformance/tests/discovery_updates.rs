@@ -20,7 +20,7 @@ use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use bifrost::{
-    Addr, AddrUpdate, Announced, Discovery, Error, HintStream, Latest, Layered, Node, NodeId, Path,
+    Addr, AddrUpdate, Discovery, Error, HintStream, Latest, Layered, Node, NodeId, Path,
     PathChanges, Session, StaticDiscovery, Transport,
 };
 use bifrost_mem::MemTransport;
@@ -476,7 +476,6 @@ impl core::fmt::Display for NoHints {
 impl core::error::Error for NoHints {}
 
 impl Transport for Recording {
-    type Security = Announced;
     type Session = Recorded;
 
     fn node_id(&self) -> NodeId {
@@ -523,7 +522,6 @@ impl Transport for Recording {
 struct Glancing(Recording);
 
 impl Transport for Glancing {
-    type Security = Announced;
     type Session = Recorded;
 
     fn node_id(&self) -> NodeId {
@@ -565,7 +563,6 @@ struct Recorded {
 }
 
 impl Session for Recorded {
-    type Security = Announced;
     type Write = io::Sink;
     type Read = io::Empty;
 

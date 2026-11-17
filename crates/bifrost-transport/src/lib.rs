@@ -1,20 +1,10 @@
 //! The Bifrost transport interface.
 //!
-//! A [`Transport`] moves bytes to a peer identified by its [`NodeId`]. Every transport declares what
-//! it proves and protects as a [`SecurityProfile`]: [`Sealed`] (a handshake proves the peer holds
-//! the `NodeId` key, and the channel is end-to-end AEAD), [`Announced`] (the peer key is
-//! self-announced over a plaintext channel), or [`InProcess`] (no wire; the process boundary is the
-//! trust boundary). The declaration is required and has no default, so a new backend cannot compile
-//! without stating what it provides.
+//! A [`Transport`] moves bytes to a peer identified by its [`NodeId`].
 //!
-//! The declaration is a claim, not a proof. A consumer that carries authority bounds on
-//! [`PeerProven`] or [`Secure`] and reads [`SecurityProfile::SECURITY`] at a runtime seam; the
-//! conformance suite proves byte movement and falsifies a mis-attributing fabricator; it does not
-//! inspect the channel. The [`Security`] value and the marker types state what each profile means
-//! and what is left to protocol review.
-//!
-//! This is the pluggable boundary: iroh and an in-process backend today, both exposing the
-//! same byte-stream interface and both held to the same behaviour by the conformance suite.
+//! This is the pluggable boundary: iroh, and an in-process backend for tests that has no handshake
+//! and proves nothing about a peer. Both expose the same byte-stream interface and pass the same
+//! conformance suite.
 //! Everything above this boundary (the wire, the products) is transport-blind.
 //!
 //! This crate is the byte-moving interface and nothing else: implement [`Transport`] + [`Session`] to
@@ -28,29 +18,30 @@
 //!
 //! # Admitting a new transport
 //!
-//! A new backend runs parity tests and carries nothing else until it clears this list. The bar
-//! applies to the [`Sealed`] declaration; a transport that cannot clear it declares [`Announced`]
-//! (public traffic only) or [`InProcess`] (same-process scaffolding only).
+//! A new backend runs parity tests and carries nothing else until it clears this list.
 //!
-//! 1. Declare the profile from the sealed set, with review: [`Sealed`] only for a named handshake
-//!    that binds the `NodeId` private key (a Noise pattern, TLS with raw public keys). Pairing, a
-//!    uid, or a transport-level channel is not `NodeId` proof.
+//! 1. Prove the peer: a named handshake binds the `NodeId` private key (TLS with raw public keys, a
+//!    Noise pattern). Pairing, a uid, or a transport-level channel is not `NodeId` proof.
 //! 2. Prove key possession in that handshake and test it: the accepted peer holds the dialed key's
 //!    private half, and a claim that cannot sign for it yields no session.
-//! 3. Pass the shared conformance suite in the backend's own CI, against a pinned conformance rev.
-//! 4. Run the identity falsifiers where the wire is drivable: a wrong-key dial is refused, and a
+//! 3. Protect every stream with authenticated encryption under keys from that same handshake, so
+//!    the bytes come from the peer it proved and no one on the path reads or alters them. A signed
+//!    handshake followed by plaintext does not clear this step.
+//! 4. Pass the shared conformance suite in the backend's own CI, against a pinned conformance rev.
+//! 5. Run the identity falsifiers where the wire is drivable: a wrong-key dial is refused, and a
 //!    hostile dialer claiming a foreign `NodeId` is never attributed it. A stack whose handshake
 //!    lives inside a dependency (iroh's RPK TLS) cannot be driven from the suite; state that and
 //!    keep the review of that stack.
-//! 5. Bound the handshake and the wire: a handshake deadline, per-peer and global session and stream
+//! 6. Bound the handshake and the wire: a handshake deadline, per-peer and global session and stream
 //!    caps, bounded queues and buffers, and bounded parsing (closing on abuse, never growing).
-//! 6. Fuzz or property-test every byte parser the transport owns.
-//! 7. Pin and deny-check every crypto dependency; hand-rolled primitives are refused.
-//! 8. Run a live adversarial pass with observed evidence: wrong key, on-path impersonation, replay,
+//! 7. Fuzz or property-test every byte parser the transport owns.
+//! 8. Pin and deny-check every crypto dependency; hand-rolled primitives are refused.
+//! 9. Run a live adversarial pass with observed evidence: wrong key, on-path impersonation, replay,
 //!    and any planned downgrade.
 //!
 //! Until all of that passes: no credential, no gated route, no default reach path, and no
-//! peer-supplied transport selection.
+//! peer-supplied transport selection. A backend that has not cleared this list is not wired into
+//! any binary.
 
 use core::net::SocketAddr;
 
@@ -60,29 +51,15 @@ pub use bifrost_core::{
 };
 use tokio::io;
 
-mod security;
-pub use security::{
-    Announced, ChannelProtection, Confidential, InProcess, PeerProof, PeerProven, Sealed, Secure,
-    Security, SecurityProfile,
-};
-
 // `async fn` in these traits is deliberate. The returned futures are not `Send`-bounded, which is
 // fine here: callers drive sessions with structured concurrency (join/select on one task), not
 // `tokio::spawn` across threads. If a future consumer must spawn sessions onto other threads,
 // revisit with `trait_variant` or an explicit `-> impl Future + Send`. See DECISIONS.
 /// A pluggable transport: binds a local identity and moves [`Session`]s to and from peers.
-///
-/// Every transport declares a [`SecurityProfile`]; the profile is required, so a new backend cannot
-/// compile without stating what it provides. The session type must carry the same profile, which the
-/// compiler enforces through the [`Session::Security`] equality below.
 #[allow(async_fn_in_trait)]
 pub trait Transport {
-    /// The security profile every session of this transport carries. Required, no default.
-    type Security: SecurityProfile;
-
-    /// The session type this transport establishes. Its profile is the transport's, so a function
-    /// that only sees a session still knows what the transport declared.
-    type Session: Session<Security = Self::Security>;
+    /// The session type this transport establishes.
+    type Session: Session;
 
     /// This transport's local identity.
     fn node_id(&self) -> NodeId;
@@ -99,9 +76,9 @@ pub trait Transport {
     /// loopback so the address is dialable on this host. That rewrite is many-to-one: it maps a
     /// wildcard bind and a deliberate loopback bind onto the same value, and a publisher must tell
     /// them apart, because it has to expand the first into the host's real addresses and must never
-    /// expand the second. Required with no default for the same reason [`Self::Security`] is: the
-    /// only default a transport-blind trait could offer is the rewritten hint set, which would
-    /// compile that confusion into every backend that stayed silent.
+    /// expand the second. Required with no default: the only default a transport-blind trait could
+    /// offer is the rewritten hint set, which would compile that confusion into every backend that
+    /// stayed silent.
     fn bound_sockets(&self) -> Vec<SocketAddr>;
 
     /// Dial a peer: the floor, a one-shot dial with whatever hints the caller holds.
@@ -141,25 +118,16 @@ pub trait Transport {
 }
 
 /// A session with a peer.
-///
-/// This trait moves bytes. What the session proves about the peer and protects on the wire is the
-/// transport's declared [`SecurityProfile`], mirrored here as [`Self::Security`] so the requirement
-/// travels with every value the transport hands up.
 #[allow(async_fn_in_trait)]
 pub trait Session {
-    /// The security profile this session's transport declared.
-    type Security: SecurityProfile;
-
     /// The writable half of a stream to the peer.
     type Write: io::AsyncWrite + Unpin + Send;
     /// The readable half of a stream from the peer.
     type Read: io::AsyncRead + Unpin + Send;
 
-    /// The peer's identity, as this session's transport attributes it.
-    ///
-    /// The strength of the attribution is declared by [`Self::Security`]: proven, announced, or
-    /// exact by construction. This accessor reports the attribution; the profile says how far it can
-    /// be trusted.
+    /// The peer's identity: a key the handshake proved the peer holds the private half of, never one
+    /// it only claimed. The in-process mem transport has no handshake; its peer is the other endpoint
+    /// in the same process.
     fn peer(&self) -> NodeId;
 
     /// Open a bidirectional stream to the peer.
@@ -171,8 +139,7 @@ pub trait Session {
     ///
     /// Past the peer's room this waits and never errors for being full. A waiting open completes once
     /// fewer than 224 streams count, and may complete sooner. A peer that grants no room keeps it waiting
-    /// indefinitely, so a caller that needs a bound sets its own deadline. A transport that carries fewer
-    /// streams says so on its own impl.
+    /// indefinitely, so a caller that needs a bound sets its own deadline.
     async fn open_bi(&self) -> Result<(Self::Write, Self::Read), Error>;
 
     /// Accept the next bidirectional stream from the peer.
@@ -193,8 +160,7 @@ pub trait Session {
     /// - **Every stream ends.** A held stream's reads and writes then fail with an error, never a clean
     ///   end, so a transfer the close cut short can never pass for a complete one.
     /// - **The peer learns of it.** Its reads on the session's streams error, and its
-    ///   [`wait_closed`](Self::wait_closed) resolves. A transport that cannot yet tell the peer says so
-    ///   on its own impl.
+    ///   [`wait_closed`](Self::wait_closed) resolves.
     /// - **Afterwards,** [`open_bi`](Self::open_bi) and [`accept_bi`](Self::accept_bi) fail, and the
     ///   local [`wait_closed`](Self::wait_closed) resolves.
     /// - **Idempotent,** never blocks, and never panics.
@@ -220,6 +186,3 @@ pub trait Session {
     /// session that wraps another returns the inner session's.
     fn path_changes(&self) -> PathChanges;
 }
-
-#[cfg(test)]
-mod security_tests;

@@ -18,9 +18,6 @@ pub use bifrost_core::{
     Layered, NoDiscovery, NodeId, NodeIdParseError, Path, PathChanges, Refusal, RefusalDetail,
     RefusalDetailError, Relay, StaticDiscovery,
 };
-pub use bifrost_transport::{
-    Announced, ChannelProtection, Confidential, InProcess, PeerProof, PeerProven, Sealed, Secure,
-    Security, SecurityProfile, Session, Transport,
-};
+pub use bifrost_transport::{Session, Transport};
 pub use bifrost_wire as wire;
 pub use node::Node;

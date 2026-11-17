@@ -1,10 +1,9 @@
 #!/bin/sh
-# sealed-gate fixture: exercise the PASS and FAIL paths of scripts/sealed-gate.sh on throwaway trees,
-# so a regression in the comment filter, the per-hit profile match, the profile table, or the
-# `[package]` name parse fails HERE instead of passing silently in CI (delib-72; the Rust Reviewer's
-# D5, MAJOR-1; the Adversary's P-1). Every case builds a temp tree with a `[package]` manifest and a
-# `src/lib.rs`, runs the gate against it, and asserts the exit code plus a substring of the output.
-# Dependency-free: POSIX sh + find + grep + sed.
+# sealed-gate fixture: exercise every PASS and FAIL path of scripts/sealed-gate.sh on throwaway trees,
+# so a regression in the impl pattern, the comment filter, the `[package]` name parse, the transport
+# list, the test-only rule, or the identity-case check fails HERE instead of passing silently in CI.
+# Each case builds a temp tree, runs the gate against it, and asserts the exit code plus a substring
+# of the output. Dependency-free: POSIX sh + find + grep + sed.
 
 set -eu
 
@@ -16,145 +15,146 @@ trap 'rm -rf "$tmp"' EXIT
 pass=0
 fail=0
 
-# write_crate <case> <crate> <lib.rs line>: a throwaway crate tree with a plain `[package]` manifest.
+# write_crate <case> <crate> <lib.rs text>: a throwaway crate with a plain `[package]` manifest.
 write_crate() {
   dir="$tmp/$1/$2"
   mkdir -p "$dir/src"
-  cat > "$dir/Cargo.toml" <<EOF
-[package]
-name = "$2"
-version = "0.0.0"
-edition = "2024"
-EOF
+  printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2024"\n' "$2" > "$dir/Cargo.toml"
   printf '%s\n' "$3" > "$dir/src/lib.rs"
 }
 
-# write_spoof_crate <case> <crate> <spoofed name> <lib.rs line>: a manifest whose FIRST `name =` line
-# sits outside `[package]`, so only a `[package]`-scoped parse reads the real crate name.
-write_spoof_crate() {
+# write_manifest <case> <crate> <manifest text>: a crate whose manifest is given whole, with an
+# unlisted impl in its source, so the gate's verdict turns on the name it reads.
+write_manifest() {
   dir="$tmp/$1/$2"
   mkdir -p "$dir/src"
-  cat > "$dir/Cargo.toml" <<EOF
-[lib]
-name = "$3"
-
-[package]
-name = "$2"
-version = "0.0.0"
-edition = "2024"
-EOF
-  printf '%s\n' "$4" > "$dir/src/lib.rs"
+  printf '%s\n' "$3" > "$dir/Cargo.toml"
+  printf 'pub struct X;\nimpl Transport for X {}\n' > "$dir/src/lib.rs"
 }
 
-# write_quoted_crate <case> <crate> <lib.rs line>: a manifest whose `[package]` name is a TOML
-# literal (single-quoted) string, so the gate's name parse cannot read it; the gate must fail loud
-# instead of skipping the crate (the Adversary's P-1).
-write_quoted_crate() {
-  dir="$tmp/$1/$2"
-  mkdir -p "$dir/src"
-  cat > "$dir/Cargo.toml" <<EOF
-[package]
-name = '$2'
-version = "0.0.0"
-edition = "2024"
-EOF
-  printf '%s\n' "$3" > "$dir/src/lib.rs"
+# write_suite <case> <tests/x.rs text>: a crate that takes the test-only backend as a dev-dependency
+# and carries one integration test file.
+write_suite() {
+  dir="$tmp/$1/suite"
+  mkdir -p "$dir/src" "$dir/tests"
+  printf '[package]\nname = "suite"\nversion = "0.0.0"\n\n[dev-dependencies]\nbifrost-mem = { path = "../bifrost-mem" }\n' > "$dir/Cargo.toml"
+  : > "$dir/src/lib.rs"
+  printf '%s\n' "$2" > "$dir/tests/x.rs"
 }
 
-# expect_ok <label> <root> [needle]: the gate exits 0 (and the output carries `needle` when given).
+# expect_ok <label> <case> [needle]: the gate exits 0 (and the output carries `needle` when given).
 expect_ok() {
-  label=$1
-  root=$2
-  needle=${3:-}
-  if out=$(sh "$gate" "$root" 2>&1); then
-    if [ -z "$needle" ] || printf '%s\n' "$out" | grep -q -- "$needle"; then
+  if out=$(sh "$gate" "$tmp/$2" 2>&1); then
+    if [ -z "${3:-}" ] || printf '%s\n' "$out" | grep -q -- "$3"; then
       pass=$((pass + 1))
-      printf 'ok   %s\n' "$label"
-    else
-      fail=$((fail + 1))
-      printf 'FAIL %s: the output does not mention "%s"\n%s\n' "$label" "$needle" "$out"
+      printf 'ok   %s\n' "$1"
+      return
     fi
-  else
-    fail=$((fail + 1))
-    printf 'FAIL %s: the gate exited non-zero\n%s\n' "$label" "$out"
   fi
+  fail=$((fail + 1))
+  printf 'FAIL %s\n%s\n' "$1" "$out"
 }
 
-# expect_fail <label> <root> <needle>: the gate exits non-zero and names the refusal.
+# expect_fail <label> <case> <needle>: the gate exits non-zero and the output names the refusal.
 expect_fail() {
-  label=$1
-  root=$2
-  needle=$3
-  if out=$(sh "$gate" "$root" 2>&1); then
-    fail=$((fail + 1))
-    printf 'FAIL %s: the gate exited zero\n%s\n' "$label" "$out"
-  elif printf '%s\n' "$out" | grep -q -- "$needle"; then
+  if out=$(sh "$gate" "$tmp/$2" 2>&1); then
+    :
+  elif printf '%s\n' "$out" | grep -q -- "$3"; then
     pass=$((pass + 1))
-    printf 'ok   %s\n' "$label"
-  else
-    fail=$((fail + 1))
-    printf 'FAIL %s: the output does not mention "%s"\n%s\n' "$label" "$needle" "$out"
+    printf 'ok   %s\n' "$1"
+    return
   fi
+  fail=$((fail + 1))
+  printf 'FAIL %s\n%s\n' "$1" "$out"
 }
 
-# The fail path: an unreviewed crate may not declare either proof-bearing spelling.
-write_crate unreviewed-sealed liar1 'pub struct X; impl X { type Security = Sealed; }'
-expect_fail 'unreviewed Sealed fails' "$tmp/unreviewed-sealed" 'not reviewed'
+both_cases='use bifrost_iroh::Endpoint;
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); }'
 
-write_crate unreviewed-inprocess liar2 'pub struct X; impl X { type Security = InProcess; }'
-expect_fail 'unreviewed InProcess fails' "$tmp/unreviewed-inprocess" 'not reviewed'
+# The pass path: both listed crates implement both traits, the backend runs the identity cases, and
+# the test-only backend is taken as a dev-dependency.
+write_crate listed bifrost-iroh 'impl Transport for E {}
+impl Session for S {}'
+write_crate listed bifrost-mem 'impl Transport for M {}
+impl Session for N {}'
+write_suite listed "$both_cases"
+expect_ok 'listed crates pass' listed '4 Transport/Session impl'
 
-# The pass path: a table crate declaring exactly its reviewed profile.
-write_crate reviewed-sealed bifrost-iroh 'pub struct X; impl X { type Security = Sealed; }'
-expect_ok 'reviewed Sealed passes' "$tmp/reviewed-sealed" '1 reviewed profile declaration'
+# The list: any other crate's impl fails.
+write_crate unlisted liar 'impl Transport for X {}'
+expect_fail 'an unlisted crate fails' unlisted 'UNLISTED'
 
-write_crate reviewed-inprocess bifrost-mem 'pub struct X; impl X { type Security = InProcess; }'
-expect_ok 'reviewed InProcess passes' "$tmp/reviewed-inprocess" '1 reviewed profile declaration'
+# The `[package]`-only name parse: a first `name =` outside `[package]` does not ride a list entry.
+write_manifest spoof liar '[lib]
+name = "bifrost-mem"
 
-# A table crate may not declare the OTHER proof-bearing spelling.
-write_crate wrong-profile bifrost-mem 'pub struct X; impl X { type Security = Sealed; }'
-expect_fail 'a profile outside the crate pair fails' "$tmp/wrong-profile" 'not reviewed'
+[package]
+name = "liar"'
+expect_fail 'a [lib] name does not spoof a listed crate' spoof 'UNLISTED    crate liar'
 
-# MAJOR-1: the profile match is per hit, on the declaration token, so a trailing mention of the
-# crate's ALLOWED profile cannot mask the other proof-bearing declaration, in either direction.
-write_crate masked-sealed bifrost-mem 'pub struct X; impl X { type Security = Sealed; } // audit note: type Security = InProcess is not used'
-expect_fail 'a trailing InProcess mention does not mask a Sealed declaration' "$tmp/masked-sealed" 'not reviewed'
+# A name the parse cannot read fails loud instead of hiding the crate.
+write_manifest unparsed liar "[package]
+name = 'liar'"
+expect_fail 'a single-quoted package name fails loud' unparsed 'UNPARSED'
 
-write_crate masked-inprocess bifrost-iroh 'pub struct X; impl X { type Security = InProcess; } // audit: type Security = Sealed reviewed'
-expect_fail 'a trailing Sealed mention does not mask an InProcess declaration' "$tmp/masked-inprocess" 'not reviewed'
+# The comment filter: a comment-leading mention passes; a trailing comment does not hide an impl.
+write_crate comment liar '/// impl Transport for X {}
+// impl Session for X {}'
+expect_ok 'a comment-leading mention passes' comment
 
-# `Announced` is free, and an unknown token is not a Sealed match.
-write_crate announced-free liar3 'pub struct X; impl X { type Security = Announced; }'
-expect_ok 'Announced is free' "$tmp/announced-free"
+write_crate trailing liar 'impl Transport for X {} // reviewed elsewhere'
+expect_fail 'a trailing comment does not hide an impl' trailing 'UNLISTED'
 
-write_crate extended-token liar4 'pub struct X; impl X { type Security = SealedExt; }'
-expect_ok 'an unknown profile token is not a match' "$tmp/extended-token"
+# The word boundary: a longer trait name is not a match.
+write_crate boundary liar 'impl SubTransport for X {}
+impl TransportExt for X {}
+impl SessionStore for X {}'
+expect_ok 'SubTransport, TransportExt and SessionStore pass' boundary
 
-# The comment filter: a comment-leading mention passes; a trailing citation cannot suppress a hit.
-write_crate comment-mention liar5 '// type Security = Sealed;'
-expect_ok 'a comment-leading mention passes' "$tmp/comment-mention"
+# The spellings: raw, macro path, absolute path, split header, and the Session trait.
+write_crate raw liar 'impl r#Transport for X {}'
+expect_fail 'impl r#Transport fails' raw 'UNLISTED'
 
-write_crate trailing-url liar6 'pub struct X; impl X { type Security = Sealed; } // audited: https://example.com/review'
-expect_fail 'a trailing URL cannot suppress a hit' "$tmp/trailing-url" 'not reviewed'
+write_crate macro-path liar 'impl $crate::Transport for X {}'
+expect_fail 'impl $crate::Transport fails' macro-path 'UNLISTED'
 
-# The escape hatch: a marker WITH a review ref passes and is counted; a bare marker is not an escape.
-write_crate cited-exception liar7 'pub struct X; impl X { type Security = Sealed; } // sealed-gate:allow notes/reviews/example.md'
-expect_ok 'a cited exception passes and is counted' "$tmp/cited-exception" '1 cited exception'
+write_crate absolute liar 'impl ::bifrost_transport::Transport for X {}'
+expect_fail 'impl ::path::Transport fails' absolute 'UNLISTED'
 
-write_crate bare-marker liar8 'pub struct X; impl X { type Security = Sealed; } // sealed-gate:allow'
-expect_fail 'a bare marker is not an escape' "$tmp/bare-marker" 'not reviewed'
+write_crate split liar 'impl<D: Discovery + Send + Sync + '"'"'static> Transport
+    for Wrapped<D> {}'
+expect_fail 'a rustfmt-split Transport header fails' split 'UNLISTED'
 
-# The `[package]`-only parse: a first `name =` outside `[package]` must not spoof a table entry.
-write_spoof_crate spoof namespoof-liar bifrost-iroh 'pub struct X; impl X { type Security = Sealed; }'
-expect_fail 'a manifest-name spoof does not ride a table entry' "$tmp/spoof" 'not reviewed'
+write_crate session liar 'impl Session for X {}'
+expect_fail 'impl Session fails' session 'UNLISTED'
 
-# The `[package]` parse: a name the gate cannot read fails loud instead of hiding the crate (P-1).
-write_quoted_crate quoted-name liar9 'pub struct X; impl X { type Security = Sealed; }'
-expect_fail 'a single-quoted package name fails loud' "$tmp/quoted-name" 'UNPARSED'
+write_crate split-session liar 'impl<T: Session + Send + Sync + '"'"'static> Session
+    for Wrapped<T> {}'
+expect_fail 'a rustfmt-split Session header fails' split-session 'UNLISTED'
+
+# The identity cases: a listed backend with no test file running both fails, and one is not enough.
+write_crate no-identity bifrost-iroh 'impl Transport for E {}'
+expect_fail 'a backend with no identity cases fails' no-identity 'NO-IDENTITY'
+
+write_crate half-identity bifrost-iroh 'impl Transport for E {}'
+write_suite half-identity 'use bifrost_iroh::Endpoint;
+fn t() { identity_binding(a, b); }'
+expect_fail 'a backend running one identity case fails' half-identity 'NO-IDENTITY'
+
+# The test-only rule: a test-only backend taken as a normal dependency fails, in either TOML form.
+write_crate not-dev bifrost-mem 'impl Transport for M {}'
+mkdir -p "$tmp/not-dev/app/src"
+printf '[package]\nname = "app"\n\n[dependencies]\nbifrost-mem = { path = "../bifrost-mem" }\n' > "$tmp/not-dev/app/Cargo.toml"
+expect_fail 'a test-only backend as a dependency fails' not-dev 'NOT-DEV'
+
+write_crate not-dev-table bifrost-mem 'impl Transport for M {}'
+mkdir -p "$tmp/not-dev-table/app/src"
+printf '[package]\nname = "app"\n\n[dependencies.bifrost-mem]\npath = "../bifrost-mem"\n' > "$tmp/not-dev-table/app/Cargo.toml"
+expect_fail 'a test-only backend as a dependency table fails' not-dev-table 'NOT-DEV'
 
 # An empty tree (no manifests) passes.
 mkdir -p "$tmp/empty"
-expect_ok 'an empty tree passes' "$tmp/empty"
+expect_ok 'an empty tree passes' empty
 
 printf '\nsealed-gate fixture: %s passed, %s failed.\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

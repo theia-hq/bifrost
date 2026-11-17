@@ -19,9 +19,7 @@
 //! backing implementation (iroh inherits QUIC and TLS, which this suite does not exercise) and on
 //! protocol review. Forward secrecy, nonce discipline, replay resistance against an active
 //! attacker, and entropy quality are protocol review of the handshake and its library, not
-//! black-box assertions. iroh (QUIC) and the in-process mem transport both pass the suite
-//! unchanged; that is the byte contract plus the identity cases, and the security profile is what
-//! each backend declares beside them.
+//! black-box assertions. iroh (QUIC) and the in-process mem transport pass the suite unchanged.
 
 // This crate is test scaffolding: every public function is a conformance assertion invoked from other
 // crates' tests, so `expect` is the assertion mechanism, not production error handling.
@@ -117,20 +115,6 @@ where
     );
 }
 
-/// Whether a transport's [`Session::close`] reaches the peer yet.
-///
-/// Every transport must say, so a gap is recorded where it is run, with its owner, and never skipped in
-/// silence.
-#[derive(Clone, Copy, Debug)]
-pub enum PeerNotice {
-    /// The peer learns of the close: its reads on the session's streams error and its `wait_closed`
-    /// resolves. The contract.
-    Told,
-    /// The transport cannot tell the peer yet, for the named reason and owner. The peer-side checks are
-    /// not run; every local one is.
-    NotYet(&'static str),
-}
-
 /// How long a closed session's streams have to fail. Generous: this bounds a hang, not a latency.
 const CLOSE_BOUND: core::time::Duration = core::time::Duration::from_secs(5);
 
@@ -139,11 +123,11 @@ const CLOSE_BOUND: core::time::Duration = core::time::Duration::from_secs(5);
 ///
 /// The shape is the one a cut takes: the receiver moves a stream's halves into a detached task that
 /// keeps holding them, keeps its session value alive, and closes it. Then, within a bound: the held
-/// read fails rather than reading end-of-stream, a second close is harmless, `open_bi` fails, and (where
-/// the transport can tell the peer) the dialer's read fails and its `wait_closed` resolves. A transport
-/// whose streams outlive a close fails here, which is what a no-op close is. Panics with a descriptive
-/// message on failure, so it reads as a test assertion.
-pub async fn close_ends_held_streams<T, D>(sender: Node<T, D>, receiver: T, peer: PeerNotice)
+/// read fails rather than reading end-of-stream, a second close is harmless, `open_bi` fails, and the
+/// dialer's read fails and its `wait_closed` resolves. A transport whose streams outlive a close fails
+/// here, which is what a no-op close is. Panics with a descriptive message on failure, so it reads as a
+/// test assertion.
+pub async fn close_ends_held_streams<T, D>(sender: Node<T, D>, receiver: T)
 where
     T: Transport,
     D: Discovery,
@@ -190,18 +174,16 @@ where
         "a closed session opens no new stream"
     );
 
-    if let PeerNotice::Told = peer {
-        let dialer_read = tokio::time::timeout(CLOSE_BOUND, read_to_the_end(&mut dialed_recv))
-            .await
-            .expect("the peer's stream must end when the session is closed");
-        assert!(
-            dialer_read.is_err(),
-            "the peer's stream fails on a close, never reads a clean end"
-        );
-        tokio::time::timeout(CLOSE_BOUND, dialed.wait_closed())
-            .await
-            .expect("the peer's wait_closed resolves on a close");
-    }
+    let dialer_read = tokio::time::timeout(CLOSE_BOUND, read_to_the_end(&mut dialed_recv))
+        .await
+        .expect("the peer's stream must end when the session is closed");
+    assert!(
+        dialer_read.is_err(),
+        "the peer's stream fails on a close, never reads a clean end"
+    );
+    tokio::time::timeout(CLOSE_BOUND, dialed.wait_closed())
+        .await
+        .expect("the peer's wait_closed resolves on a close");
     sender.close().await;
 }
 
@@ -541,12 +523,11 @@ pub async fn wrong_key_rejected<T: Transport>(sender: T, receiver: T, fabricated
 /// must refuse the session or attribute its true peer, never `claimed`. This is the accept-side
 /// case the shared assertions cannot reach: [`identity_binding`] passes for a transport that
 /// echoes keys with no handshake, and [`wrong_key_rejected`] passes when the echoer refuses keys it
-/// has no endpoint for. Run it where the transport's wire can be driven by a hostile peer (a
-/// byte-carrying wrapper inner, a plaintext UDP handshake); a stack whose handshake lives inside a
-/// dependency (iroh's RPK TLS) cannot be driven by a foreign claim at all, and that is the
-/// guarantee itself, held by review of that stack rather than by this suite. The receiver's
-/// `accept` is joined with the dial, so a transport whose handshake has no deadline can park here.
-/// Panics with a descriptive message on failure, so it reads as a test assertion.
+/// has no endpoint for. Run it where the transport's wire can be driven by a hostile peer; a stack
+/// whose handshake lives inside a dependency (iroh's RPK TLS) cannot be driven by a foreign claim at
+/// all, and that is the guarantee itself, held by review of that stack rather than by this suite.
+/// The receiver's `accept` is joined with the dial, so a transport whose handshake has no deadline
+/// can park here. Panics with a descriptive message on failure, so it reads as a test assertion.
 pub async fn claimed_identity_not_attributed<L, R>(liar: L, receiver: R, claimed: NodeId)
 where
     L: Transport,

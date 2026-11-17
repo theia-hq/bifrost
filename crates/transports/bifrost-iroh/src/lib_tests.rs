@@ -593,20 +593,6 @@ fn group(session: &IrohSession) -> NamedGroup {
         .expect("a finished handshake names its group")
 }
 
-/// The declared profile is PINNED per backend: every consumer's trust decision rests on it, so an
-/// accidental flip fails HERE, in the crate that declares it, rather than downstream in code that went on
-/// believing the old promise. `Sealed` is the profile the `bifrost-iroh` entry in
-/// `scripts/sealed-gate.sh` authorizes.
-#[test]
-fn the_declared_profile_is_pinned_to_sealed() {
-    use bifrost_transport::SecurityProfile as _;
-
-    assert_eq!(
-        <Endpoint as bifrost_transport::Transport>::Security::SECURITY,
-        bifrost_transport::Sealed::SECURITY
-    );
-}
-
 /// `A + T`: the public key the seed `[7; 32]` binds plus the order-8 torsion point. iroh's key parse
 /// only decompresses, so it takes these bytes as an endpoint id.
 const TWIN_OF_SEVEN: [u8; NodeId::KEY_LEN] = [
