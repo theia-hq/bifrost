@@ -27,6 +27,10 @@ All notable changes to bifrost, newest first.
   its socket, identity and reach.
 
 ### Changed
+- **`bifrost-iroh` carries at least 224 bidirectional streams per session, up from 100.** `Session::open_bi`
+  now states that floor: past the peer's room it waits, and completes once fewer than 224 streams count.
+  `bifrost-quirk` (one stream per connection) and `bifrost-noise` (64 at once) carry fewer, and an
+  open past their count errors.
 - **`bifrost-iroh` bounds what a peer can make an endpoint buffer.** Every endpoint it binds allows a
   peer no unidirectional streams and no datagrams, and at most 16 MiB of unread stream data per
   connection. Separately, noq-proto 1.3.0, the QUIC library iroh uses, lets a peer make an endpoint

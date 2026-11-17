@@ -143,6 +143,7 @@ impl Session for QuirkSession {
         self.peer
     }
 
+    /// Carries fewer streams than the 224 the trait states: one per connection. A second open errors.
     async fn open_bi(&self) -> Result<(quirk::SendStream, quirk::RecvStream), Error> {
         self.conn
             .open_bi()
