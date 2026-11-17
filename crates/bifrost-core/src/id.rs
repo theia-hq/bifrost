@@ -62,9 +62,9 @@ impl NodeId {
     }
 
     /// The node id an ed25519 secret binds under: its public (verifying) key, tagged
-    /// [`CryptoKind::Ed25519`]. This is the same id the iroh and quirk backends derive when they bind the
-    /// secret, so it can be computed offline, with no transport stood up, to pre-provision an identity a
-    /// machine will later adopt.
+    /// [`CryptoKind::Ed25519`]. This is the same id the iroh backend derives when it binds the secret,
+    /// so it can be computed offline, with no transport stood up, to pre-provision an identity a machine
+    /// will later adopt.
     ///
     /// Infallible: a secret's public key always passes [`try_new`](Self::try_new)'s check.
     pub fn from_ed25519_secret(secret: &[u8; Self::KEY_LEN]) -> Self {

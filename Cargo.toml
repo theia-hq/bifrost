@@ -10,7 +10,6 @@ members = [
     "crates/transports/bifrost-iroh",
     "crates/transports/bifrost-mem",
     "crates/transports/bifrost-noise",
-    "crates/transports/bifrost-quirk",
 ]
 
 [workspace.package]
@@ -25,7 +24,6 @@ bifrost-iroh = { path = "crates/transports/bifrost-iroh" }
 bifrost-mdns = { path = "crates/bifrost-mdns" }
 bifrost-mem = { path = "crates/transports/bifrost-mem" }
 bifrost-noise = { path = "crates/transports/bifrost-noise" }
-bifrost-quirk = { path = "crates/transports/bifrost-quirk" }
 bifrost-transport = { path = "crates/bifrost-transport" }
 bifrost-wire = { path = "crates/bifrost-wire" }
 

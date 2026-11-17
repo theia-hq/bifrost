@@ -12,7 +12,7 @@
 unknown-registry = "deny"
 unknown-git      = "deny"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
-allow-git        = ["https://github.com/theia-hq", "https://github.com/theia-hq/bifrost", "https://github.com/theia-hq/nauthy", "https://github.com/theia-hq/quirk", "https://github.com/theia-hq/noq"]
+allow-git        = ["https://github.com/theia-hq", "https://github.com/theia-hq/bifrost", "https://github.com/theia-hq/nauthy", "https://github.com/theia-hq/noq"]
 
 # Advisories against the resolved graph, checked on every push, every pull request and daily
 # (.github/workflows/advisories.yml), because an advisory filed against an unchanged lock must still
