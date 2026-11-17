@@ -126,8 +126,8 @@ pub trait Abort {
     ///
     /// Before a successful `shutdown`, the peer's read fails with `ConnectionReset` after any bytes
     /// already delivered; it never sees a clean end. After one, this does nothing and the peer sees
-    /// the clean end. Later writes on this half fail. Dropping a write half without calling this still ends
-    /// the stream cleanly.
+    /// the clean end. Later writes on this half fail. Dropping a write half without calling this still
+    /// ends the stream cleanly.
     ///
     /// Synchronous and never blocks, so it can run from a `Drop`. Calling it again does nothing. Other
     /// streams on the session are untouched.
