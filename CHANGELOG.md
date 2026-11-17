@@ -19,6 +19,8 @@ All notable changes to bifrost, newest first.
   returns `PathChanges::fixed(Unknown)` and `bifrost-quirk` returns `PathChanges::fixed(Direct)`.
 
 ### New
+- **`Node::connect_hinted` dials a peer with the call's own addresses first, then what discovery finds;**
+  they enter only that dial's own candidates. With no addresses it is `connect`, and the peer's identity is checked the same way.
 - **`bifrost-iroh`'s `Endpoint::set_reach` changes the relay and the resolver of a bound endpoint,**
   with no rebind; open connections stay open. The new home relay takes effect on iroh's next network
   report, and if no relay in the new map answers, the old home stays in use. `Endpoint::reach` reads

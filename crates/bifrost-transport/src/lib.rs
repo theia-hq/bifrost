@@ -105,6 +105,10 @@ pub trait Transport {
     fn bound_sockets(&self) -> Vec<SocketAddr>;
 
     /// Dial a peer: the floor, a one-shot dial with whatever hints the caller holds.
+    ///
+    /// A transport may remember the addresses it is given for a peer, for as long as it keeps state
+    /// for that peer, and try them in later dials to the same peer. The identity check still decides
+    /// who is reached; an address only chooses where the dial goes.
     async fn connect(&self, addr: Addr) -> Result<Self::Session, Error>;
 
     /// Dial a peer whose hints a discovery feed supplies. Additive: a caller holding only an

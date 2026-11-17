@@ -9,6 +9,10 @@
 //! never waits on a silent source; no update ever causes a dial, and the subscription dies with the
 //! attempt so no later update has anyone to act on it; dropping a dial cancels its subscription;
 //! and a transport that finds peers itself never waits on the feed at all.
+//!
+//! A dial's own hints (`connect_hinted`): with none it hands the transport what `connect` does; its
+//! hints lead the feed as given, repeats and all, then what discovery finds; they are in the feed's
+//! first answer before any source speaks; and they reach only the dial they were given to.
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -184,6 +188,101 @@ async fn a_self_discovering_transport_never_waits_on_the_feed() {
     );
 }
 
+/// With no hints of its own, a hinted dial is a plain one: the transport gets the same first answer.
+#[tokio::test(start_paused = true)]
+async fn connect_hinted_with_no_hints_is_connect() {
+    let peer = id(0x55);
+    let transport = Recording::default();
+    let log = transport.log.clone();
+    let node = Node::new(transport, table(peer, vec![addr(7006)]));
+
+    node.connect(peer).await.expect("a plain dial goes");
+    node.connect_hinted(peer, &[])
+        .await
+        .expect("a hinted dial with no hints goes");
+
+    assert_eq!(log.each(), vec![vec![addr(7006)], vec![addr(7006)]]);
+}
+
+/// The call's hints lead, exactly as given, and what discovery finds follows them.
+#[tokio::test(start_paused = true)]
+async fn connect_hinted_leads_with_the_calls_hints_as_given() {
+    let peer = id(0x66);
+    let transport = Recording::default();
+    let log = transport.log.clone();
+    let node = Node::new(transport, table(peer, vec![addr(7007)]));
+
+    node.connect_hinted(peer, &[addr(7008), addr(7008), addr(7007)])
+        .await
+        .expect("a hinted dial goes");
+
+    assert_eq!(
+        log.hints(),
+        vec![addr(7008), addr(7008), addr(7007)],
+        "the call's hints reach the transport in order, repeats kept, ahead of discovery's"
+    );
+}
+
+/// A transport that reads only what the feed holds at the instant it dials still gets the call's
+/// hints, over a source that never answers.
+#[tokio::test(start_paused = true)]
+async fn connect_hinted_hints_are_ready_at_once() {
+    let silent = Scripted::default();
+    let transport = Glancing(Recording::default());
+    let log = transport.0.log.clone();
+    let node = Node::new(transport, silent.clone());
+
+    node.connect_hinted(id(0x77), &[addr(7009)])
+        .await
+        .expect("the hints are there at once");
+
+    assert_eq!(log.hints(), vec![addr(7009)]);
+    assert!(silent.reads() > 0, "the silent source was subscribed");
+}
+
+/// Two dials to one peer through one node: the hinted one is parked in the transport while a
+/// plain one runs from start to finish, and the plain one never sees the other's hint.
+#[tokio::test(start_paused = true)]
+async fn connect_hinted_hints_stay_in_their_own_feed() {
+    let peer = id(0x88);
+    let (release, parked) = watch::channel(false);
+    let transport = Recording {
+        park: Some((addr(7010), parked)),
+        ..Recording::default()
+    };
+    let log = transport.log.clone();
+    let node = Node::new(transport, table(peer, vec![addr(7011)]));
+
+    let hints = [addr(7010)];
+    let (hinted, ()) = tokio::join!(node.connect_hinted(peer, &hints), async {
+        // The barrier: the hinted dial has reached the transport and is parked there. Bounded, so
+        // a hinted dial refused before it reaches the transport fails here instead of hanging.
+        time::timeout(Duration::from_secs(5), log.dialed(1))
+            .await
+            .expect("the hinted dial reaches the transport");
+        // Bounded, since a plain dial that picked up the hint would park beside it for ever.
+        time::timeout(Duration::from_secs(5), node.connect(peer))
+            .await
+            .expect("a plain dial carrying the other dial's hint was parked with it")
+            .expect("the plain dial goes while the hinted one is parked");
+        assert_eq!(
+            log.each(),
+            vec![vec![addr(7010), addr(7011)], vec![addr(7011)]],
+            "the plain dial carries only what discovery finds"
+        );
+        release.send_replace(true);
+    });
+
+    hinted.expect("the parked dial goes once released");
+}
+
+/// A fixed table holding `hints` for `peer`.
+fn table(peer: NodeId, hints: Vec<SocketAddr>) -> StaticDiscovery {
+    let mut table = StaticDiscovery::new();
+    table.insert(peer, hints);
+    table
+}
+
 /// A source the test drives. It holds one state for its node and every subscription re-reads it on
 /// wake, so a slow subscriber sees the latest state (as a real source must), never a queue.
 #[derive(Clone, Default)]
@@ -287,8 +386,21 @@ impl Drop for Guard {
 
 /// What a [`Recording`] transport was asked to do, shared with the test after the transport moves
 /// into the node.
-#[derive(Clone, Default)]
-struct Log(Arc<Mutex<Calls>>);
+#[derive(Clone)]
+struct Log {
+    calls: Arc<Mutex<Calls>>,
+    /// How many dials have been recorded, so a test can wait on one reaching the transport.
+    count: watch::Sender<usize>,
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        Self {
+            calls: Arc::default(),
+            count: watch::channel(0).0,
+        }
+    }
+}
 
 #[derive(Default)]
 struct Calls {
@@ -297,13 +409,38 @@ struct Calls {
 
 impl Log {
     fn calls(&self) -> std::sync::MutexGuard<'_, Calls> {
-        self.0
+        self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn record(&self, addr: Addr) {
+        let dials = {
+            let mut calls = self.calls();
+            calls.dials.push(addr);
+            calls.dials.len()
+        };
+        self.count.send_replace(dials);
+    }
+
+    /// Wait until at least `dials` dials have been recorded.
+    async fn dialed(&self, dials: usize) {
+        let mut count = self.count.subscribe();
+        // The sender lives in this log, so the channel cannot close while it is awaited.
+        let _ = count.wait_for(|recorded| *recorded >= dials).await;
+    }
+
     fn dials(&self) -> usize {
         self.calls().dials.len()
+    }
+
+    /// Every dial's hints, in the order the dials reached the transport.
+    fn each(&self) -> Vec<Vec<SocketAddr>> {
+        self.calls()
+            .dials
+            .iter()
+            .map(|addr| addr.hints.clone())
+            .collect()
     }
 
     fn hints(&self) -> Vec<SocketAddr> {
@@ -321,6 +458,9 @@ impl Log {
 #[derive(Default)]
 struct Recording {
     log: Log,
+    /// A dial carrying this address is recorded and then held until the receiver reads `true`, so
+    /// a test can keep one dial in flight while another runs.
+    park: Option<(SocketAddr, watch::Receiver<bool>)>,
 }
 
 /// Why a hint-less dial is refused: a direct-only backend cannot dial an identity alone.
@@ -356,7 +496,16 @@ impl Transport for Recording {
             return Err(Error::Connect(Box::new(NoHints)));
         }
         let peer = addr.node;
-        self.log.calls().dials.push(addr);
+        let parks = self
+            .park
+            .as_ref()
+            .filter(|(parked, _)| addr.hints.contains(parked))
+            .map(|(_, release)| release.clone());
+        self.log.record(addr);
+        if let Some(mut release) = parks {
+            // The test holds the sender until it releases, so a closed channel is a test bug.
+            let _ = release.wait_for(|go| *go).await;
+        }
         Ok(Recorded { peer })
     }
 
@@ -367,6 +516,47 @@ impl Transport for Recording {
     }
 
     async fn close(&self) {}
+}
+
+/// A [`Recording`] that never waits on its feed: it dials with what the feed holds at that instant,
+/// the way a transport that finds peers by key reads it.
+struct Glancing(Recording);
+
+impl Transport for Glancing {
+    type Security = Announced;
+    type Session = Recorded;
+
+    fn node_id(&self) -> NodeId {
+        self.0.node_id()
+    }
+
+    fn local_addr(&self) -> Addr {
+        self.0.local_addr()
+    }
+
+    fn bound_sockets(&self) -> Vec<SocketAddr> {
+        self.0.bound_sockets()
+    }
+
+    async fn connect(&self, addr: Addr) -> Result<Recorded, Error> {
+        self.0.connect(addr).await
+    }
+
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        updates: HintStream,
+    ) -> Result<Recorded, Error> {
+        self.0.connect(addr.seeded(updates.ready())?).await
+    }
+
+    async fn accept(&self) -> Result<Recorded, Error> {
+        self.0.accept().await
+    }
+
+    async fn close(&self) {
+        self.0.close().await;
+    }
 }
 
 /// A session that carries only the dialed identity; these tests never open a stream.

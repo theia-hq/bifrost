@@ -1,4 +1,5 @@
-//! What each bind registers, how each bind reads a discovery feed, the two pins the type system
+//! What each bind registers, how each bind reads a discovery feed and what of a dial's hints reaches
+//! iroh, the two pins the type system
 //! cannot make, the QUIC limits every bind applies, the key exchange every bind offers, and a reach
 //! changed on a bound endpoint.
 //!
@@ -27,7 +28,9 @@ use bifrost_transport::{Session as _, Transport as _};
 use futures_util::{FutureExt as _, StreamExt as _, stream};
 use iroh::endpoint::presets;
 use iroh::test_utils::DnsPkarrServer;
-use iroh::{EndpointAddr, RelayConfig, RelayMap, SecretKey, TransportAddr, Watcher as _};
+use iroh::{
+    EndpointAddr, PublicKey, RelayConfig, RelayMap, SecretKey, TransportAddr, Watcher as _,
+};
 use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
 use noq::crypto::rustls::HandshakeData;
 use rustls::NamedGroup;
@@ -37,7 +40,7 @@ use tokio::time;
 use crate::reach::Role;
 use crate::{
     ALPN, CONNECTION_WINDOW, Endpoint, Finding, IrohSession, OpenPath, Reach, RelayHome, Resolver,
-    SetReachError, peer_of, reach,
+    SetReachError, peer_of, reach, to_endpoint_addr,
 };
 
 /// A bind that finds peers by key dials at once over a feed that never answers; a hints-only bind
@@ -101,6 +104,76 @@ async fn by_hints_waits_for_the_first_answer() {
         .now_or_never()
         .expect("a by-key bind must not wait for a late answer");
     assert_eq!(seeded.expect("no answer is no failure").hints, Vec::new());
+}
+
+/// iroh keeps a dial's addresses as a set: the order hints arrive in, and their repeats, never
+/// reach the dial. A transport here that dialed in order would make the order of a feed matter.
+#[test]
+fn an_iroh_dial_takes_its_hints_as_a_set() {
+    let (a, b) = (
+        hint(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7102),
+    );
+    let with = |hints| {
+        to_endpoint_addr(Addr {
+            node: peer(),
+            hints,
+        })
+        .expect("the test peer is a valid key")
+    };
+
+    assert_eq!(with(vec![b, a, a]), with(vec![a, b]));
+    // Equal sets alone would pass if no hint reached iroh at all, so each hint must count.
+    assert_ne!(with(vec![a]), with(vec![a, b]));
+    assert_ne!(with(Vec::new()), with(vec![a]));
+}
+
+/// iroh remembers a dial's hints for the peer after the dial is gone: a dial on a local bind to a
+/// dead address, cut off by its deadline, leaves that address in iroh's state for the peer. Pins the
+/// `connect_with_updates` doc; red means iroh forgets, and the doc can say less.
+#[tokio::test]
+async fn iroh_keeps_a_dials_hints_for_the_peer() {
+    let dialer = Endpoint::bind_local().await.expect("bind the dialer");
+    let dead = hint();
+    let feed = HintStream::once(AddrUpdate::Hints(vec![dead]));
+
+    let dialed = time::timeout(
+        Duration::from_millis(500),
+        dialer.connect_with_updates(bare(), feed),
+    )
+    .await;
+    assert!(
+        !matches!(dialed, Ok(Ok(_))),
+        "no peer listens at the dead address"
+    );
+
+    let id = PublicKey::from_bytes(peer().key()).expect("the test peer is a valid key");
+    let kept = dialer
+        .inner
+        .remote_info(id)
+        .await
+        .expect("iroh still holds state for the peer")
+        .into_addrs()
+        .any(|info| *info.addr() == TransportAddr::Ip(dead));
+    assert!(kept, "the dial's hint stays in iroh's state for the peer");
+}
+
+/// A hints-only bind reads its feed once: an answer after the first never reaches the dial.
+#[test]
+fn iroh_seeds_once() {
+    let later = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7102);
+    let feed = HintStream::new(stream::iter([
+        Ok(AddrUpdate::Hints(vec![hint()])),
+        Ok(AddrUpdate::Hints(vec![later])),
+    ]));
+
+    let seeded = Finding::ByHints
+        .seed(bare(), feed)
+        .now_or_never()
+        .expect("the first answer is already there")
+        .expect("an answer is no failure");
+
+    assert_eq!(seeded.hints, vec![hint()]);
 }
 
 /// A feed whose first word is a failure fails the dial under either bind: not waiting is no
