@@ -1,6 +1,6 @@
 use core::net::SocketAddr;
 
-use bifrost_core::{Addr, Discovery, Error, NodeId};
+use bifrost_core::{Addr, AddrUpdate, Discovery, Error, HintStream, Layered, NodeId};
 use bifrost_transport::Transport;
 
 /// A composed endpoint: a [`Transport`] paired with a [`Discovery`].
@@ -55,6 +55,36 @@ impl<T: Transport, D: Discovery> Node<T, D> {
             .await
     }
 
+    /// Dial a peer by identity, trying `hints` first and then what the node's discovery finds.
+    ///
+    /// The hints go into this call's feed only: nothing is stored on the node, so no other dial's
+    /// feed, running alongside or later, holds them. The transport may still keep addresses it was
+    /// given for a peer while it keeps state for that peer, and try them in a later dial to it; see
+    /// [`Transport::connect`]. The transport gets them at once, so a transport that does not
+    /// wait for discovery still dials with them. Order and repeats reach the transport as given, and
+    /// what it keeps of them is its own choice; this method does not limit how many you pass. The
+    /// peer's identity is checked exactly as in [`connect`](Self::connect), so an address only
+    /// chooses where the dial goes. With no hints this is `connect`, including its single attempt and
+    /// the caller's deadline.
+    pub async fn connect_hinted(
+        &self,
+        node: NodeId,
+        hints: &[SocketAddr],
+    ) -> Result<T::Session, Error> {
+        // No hints is a plain dial by construction, not by how the union treats an empty source.
+        if hints.is_empty() {
+            return self.connect(node).await;
+        }
+        // The call's hints are the primary of a union scoped to this one subscription: the union
+        // keeps the primary's list whole and in order, and says it on its first poll, before the
+        // discovery behind it has answered. Built per call and dropped with the feed, so the
+        // node itself holds nothing a second dial could read.
+        let feed = Layered::new(Given(hints), Borrowed(&self.discovery)).subscribe(node);
+        self.transport
+            .connect_with_updates(Addr::from_node(node), feed)
+            .await
+    }
+
     /// Accept the next inbound session.
     pub async fn accept(&self) -> Result<T::Session, Error> {
         self.transport.accept().await
@@ -63,5 +93,28 @@ impl<T: Transport, D: Discovery> Node<T, D> {
     /// Gracefully close, draining buffered data first.
     pub async fn close(&self) {
         self.transport.close().await;
+    }
+}
+
+/// One dial's addresses, as a source that answers once with them and ends.
+///
+/// Built for one subscription, so it ignores the node it is asked about. Never empty: a hint set is
+/// non-empty when present, and `connect_hinted` takes the plain path when there are none. Borrows
+/// the caller's addresses, so the one copy is the one the feed must own.
+struct Given<'a>(&'a [SocketAddr]);
+
+impl Discovery for Given<'_> {
+    fn subscribe(&self, _node: NodeId) -> HintStream {
+        HintStream::once(AddrUpdate::Hints(self.0.to_vec()))
+    }
+}
+
+/// The node's discovery, borrowed for one subscription: the feed owns what it reads, so the borrow
+/// ends with the `subscribe` call.
+struct Borrowed<'a, D>(&'a D);
+
+impl<D: Discovery> Discovery for Borrowed<'_, D> {
+    fn subscribe(&self, node: NodeId) -> HintStream {
+        self.0.subscribe(node)
     }
 }

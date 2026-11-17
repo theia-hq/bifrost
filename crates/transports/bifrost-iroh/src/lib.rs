@@ -464,6 +464,10 @@ impl Transport for Endpoint {
 
     /// The feed is read as the bind allows ([`Finding::seed`]): a bind that finds peers by key
     /// never waits on it, and a hints-only bind waits for its first answer.
+    ///
+    /// iroh keeps every address a dial is given in its state for the peer, while any connection to
+    /// the peer is open and for 60 s after the last one closes; a dial that starts with no open
+    /// connection to the peer sends to all of them until it selects a path.
     async fn connect_with_updates(
         &self,
         addr: Addr,
