@@ -1,21 +1,28 @@
-//! A session's stream halves, and the one signal that ends them all.
+//! A session's stream halves, the signal that ends them all, and the one that ends one direction.
 //!
 //! An in-process stream is a `tokio::io::duplex` pair, which shares nothing with the session that made
 //! it: left alone, a held half would keep carrying bytes after its session was closed. So both ends of a
 //! session share one [`Severance`], and every half checks it. Once it fires, reads fail with
 //! `ConnectionAborted` and writes with `BrokenPipe`, never a clean end, so a transfer the close cut
 //! short can never pass for a complete one.
+//!
+//! Each direction of a stream has a [`Severance`] of its own, shared by the half that writes it and
+//! the peer's half that reads it. An abort fires only that one: the peer's read fails with
+//! `ConnectionReset` and the aborted writer's later writes with `BrokenPipe`, while the opposite
+//! direction and every other stream carry on, as a QUIC stream reset leaves them.
 
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, Waker, ready};
 use std::sync::Arc;
 
+use bifrost_transport::Abort;
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Notify;
 use tokio::sync::futures::OwnedNotified;
 
-/// The close signal one session pair shares: sticky once set, and waking every half parked on it.
+/// A sticky end signal that wakes every half parked on it: one per session pair for a close, and one
+/// per stream direction for an abort.
 #[derive(Default)]
 pub(crate) struct Severance {
     severed: AtomicBool,
@@ -23,18 +30,18 @@ pub(crate) struct Severance {
 }
 
 impl Severance {
-    /// End the session: every half fails from now on, and any parked on a read or write is woken.
+    /// Fire the signal: every half watching it fails from now on, and any parked on it is woken.
     pub(crate) fn sever(&self) {
         self.severed.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
 
-    /// Whether the session was closed.
+    /// Whether the signal has fired.
     pub(crate) fn is_severed(&self) -> bool {
         self.severed.load(Ordering::Acquire)
     }
 
-    /// Resolve once the session is closed.
+    /// Resolve once the signal fires.
     pub(crate) async fn severed(&self) {
         let notified = self.notify.notified();
         tokio::pin!(notified);
@@ -47,7 +54,7 @@ impl Severance {
     }
 }
 
-/// Watches one half's [`Severance`] across polls, so a half parked on the duplex is woken by a close.
+/// Watches one [`Severance`] across polls, so a half parked on the duplex is woken when it fires.
 struct Watch {
     severance: Arc<Severance>,
     /// Held across polls: a fresh `Notified` per poll would miss a close between two of them.
@@ -62,7 +69,7 @@ impl Watch {
         }
     }
 
-    /// `true` once the session is closed. Otherwise registers the task to be woken by a close and
+    /// `true` once the signal has fired. Otherwise registers the task to be woken when it fires and
     /// returns `false`. Interest is registered before the flag is read, never after.
     fn severed(&mut self, cx: &mut Context<'_>) -> bool {
         let waiter = self
@@ -83,26 +90,66 @@ impl Watch {
 /// The readable half of an in-process stream.
 pub struct MemRead {
     half: io::ReadHalf<io::DuplexStream>,
-    watch: Watch,
+    session: Watch,
+    /// The peer writer's abort signal for this direction.
+    stream: Watch,
 }
 
 /// The writable half of an in-process stream.
 pub struct MemWrite {
     half: io::WriteHalf<io::DuplexStream>,
-    watch: Watch,
+    session: Watch,
+    /// This direction's abort signal. Only this half fires it, through `&mut self`, so no write can be
+    /// parked across the abort and a plain flag check is enough here; the peer's read is the side
+    /// that has to be woken.
+    stream: Arc<Severance>,
+    end: End,
 }
 
-/// Split one duplex end into the two halves a session hands out, both watching `severance`.
-pub(crate) fn halves(end: io::DuplexStream, severance: &Arc<Severance>) -> (MemWrite, MemRead) {
+/// How far a write half has got toward its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum End {
+    /// Still open: an abort fires the signal.
+    Open,
+    /// `shutdown` returned success, so the peer reads the clean end and an abort does nothing.
+    Finished,
+}
+
+/// Build both ends of one stream from a duplex pair: each end's halves watch the session's
+/// `severance`, and each direction gets its own abort signal, shared by its writer and the reader at
+/// the other end.
+pub(crate) fn ends(
+    (near, far): (io::DuplexStream, io::DuplexStream),
+    severance: &Arc<Severance>,
+) -> ((MemWrite, MemRead), (MemWrite, MemRead)) {
+    let outward = Arc::new(Severance::default());
+    let inward = Arc::new(Severance::default());
+    (
+        halves(near, severance, &outward, &inward),
+        halves(far, severance, &inward, &outward),
+    )
+}
+
+/// Split one duplex end into the two halves a session hands out: the writer fires `writes`, the
+/// reader watches `reads`, and both watch the session's `severance`.
+fn halves(
+    end: io::DuplexStream,
+    severance: &Arc<Severance>,
+    writes: &Arc<Severance>,
+    reads: &Arc<Severance>,
+) -> (MemWrite, MemRead) {
     let (read, write) = io::split(end);
     (
         MemWrite {
             half: write,
-            watch: Watch::new(Arc::clone(severance)),
+            session: Watch::new(Arc::clone(severance)),
+            stream: Arc::clone(writes),
+            end: End::Open,
         },
         MemRead {
             half: read,
-            watch: Watch::new(Arc::clone(severance)),
+            session: Watch::new(Arc::clone(severance)),
+            stream: Watch::new(Arc::clone(reads)),
         },
     )
 }
@@ -111,8 +158,38 @@ fn aborted() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, "session closed")
 }
 
+fn reset() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionReset, "stream aborted")
+}
+
 fn broken() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "session closed")
+}
+
+fn broken_by_abort() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "stream aborted")
+}
+
+impl MemWrite {
+    /// Why this half can no longer write, if it cannot: a closed session first, then an abort.
+    fn ended(&mut self, cx: &mut Context<'_>) -> Option<io::Error> {
+        if self.session.severed(cx) {
+            return Some(broken());
+        }
+        self.stream.is_severed().then(broken_by_abort)
+    }
+}
+
+impl Abort for MemWrite {
+    // Fires this direction's signal and nothing else: the peer's read of it fails from now on, and any
+    // bytes still in the duplex are never read, the in-process form of a reset discarding them. After
+    // a successful shutdown it does nothing, so the clean end stands, as on every backend.
+    fn abort(&mut self) {
+        if self.end == End::Finished {
+            return;
+        }
+        self.stream.sever();
+    }
 }
 
 impl AsyncRead for MemRead {
@@ -122,8 +199,11 @@ impl AsyncRead for MemRead {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.watch.severed(cx) {
+        if this.session.severed(cx) {
             return Poll::Ready(Err(aborted()));
+        }
+        if this.stream.severed(cx) {
+            return Poll::Ready(Err(reset()));
         }
         Pin::new(&mut this.half).poll_read(cx, buf)
     }
@@ -136,33 +216,50 @@ impl AsyncWrite for MemWrite {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.watch.severed(cx) {
-            return Poll::Ready(Err(broken()));
+        if let Some(ended) = this.ended(cx) {
+            return Poll::Ready(Err(ended));
         }
         Pin::new(&mut this.half).poll_write(cx, buf)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.watch.severed(cx) {
-            return Poll::Ready(Err(broken()));
+        if let Some(ended) = this.ended(cx) {
+            return Poll::Ready(Err(ended));
         }
         Pin::new(&mut this.half).poll_flush(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.watch.severed(cx) {
-            return Poll::Ready(Err(broken()));
+        if let Some(ended) = this.ended(cx) {
+            return Poll::Ready(Err(ended));
         }
-        Pin::new(&mut this.half).poll_shutdown(cx)
+        let done = ready!(Pin::new(&mut this.half).poll_shutdown(cx));
+        if done.is_ok() {
+            this.end = End::Finished;
+        }
+        Poll::Ready(done)
+    }
+}
+
+// A split half shares its duplex with the read half, so dropping the writer alone would close
+// nothing while the reader is held: the peer would wait forever instead of reading the clean end a
+// dropped QUIC send stream gives. Shutting the write side here makes a drop end the stream, with
+// buffered bytes still delivered first. The duplex's shutdown never pends and needs no waker, and
+// after an abort the peer's read still fails, since it checks the abort before the pipe.
+impl Drop for MemWrite {
+    fn drop(&mut self) {
+        let mut cx = Context::from_waker(Waker::noop());
+        let _ready = Pin::new(&mut self.half).poll_shutdown(&mut cx);
     }
 }
 
 impl core::fmt::Debug for MemRead {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MemRead")
-            .field("severed", &self.watch.severance.is_severed())
+            .field("severed", &self.session.severance.is_severed())
+            .field("aborted", &self.stream.severance.is_severed())
             .finish_non_exhaustive()
     }
 }
@@ -170,7 +267,8 @@ impl core::fmt::Debug for MemRead {
 impl core::fmt::Debug for MemWrite {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MemWrite")
-            .field("severed", &self.watch.severance.is_severed())
+            .field("severed", &self.session.severance.is_severed())
+            .field("aborted", &self.stream.is_severed())
             .finish_non_exhaustive()
     }
 }

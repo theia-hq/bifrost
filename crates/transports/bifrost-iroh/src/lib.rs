@@ -15,7 +15,7 @@ pub use bifrost_core::NodeId;
 use bifrost_core::{
     Addr, BoxError, ConnInfo, CryptoKind, Error, HintStream, KeyError, Path, PathChanges, Relay,
 };
-pub use bifrost_transport::{Session, Transport};
+pub use bifrost_transport::{Abort, Session, Transport};
 use futures_core::Stream;
 use iroh::address_lookup::AddressLookupBuilderError;
 use iroh::endpoint::presets::Preset;
@@ -26,6 +26,7 @@ use iroh::endpoint::{
 use iroh::{EndpointAddr, EndpointId, PublicKey, RelayMap, SecretKey, TransportAddr};
 use rustls::crypto::CryptoProvider;
 use rustls::crypto::aws_lc_rs::{self, kx_group};
+use tokio::io;
 use tokio::sync::Mutex;
 use url::Url;
 use zeroize::Zeroizing;
@@ -503,25 +504,29 @@ impl IrohSession {
 }
 
 impl Session for IrohSession {
-    type Write = SendStream;
+    type Write = IrohWrite;
     type Read = RecvStream;
 
     fn peer(&self) -> NodeId {
         self.peer
     }
 
-    async fn open_bi(&self) -> Result<(SendStream, RecvStream), Error> {
-        self.conn
+    async fn open_bi(&self) -> Result<(IrohWrite, RecvStream), Error> {
+        let (send, recv) = self
+            .conn
             .open_bi()
             .await
-            .map_err(|err| Error::Stream(Box::new(err)))
+            .map_err(|err| Error::Stream(Box::new(err)))?;
+        Ok((IrohWrite::from(send), recv))
     }
 
-    async fn accept_bi(&self) -> Result<(SendStream, RecvStream), Error> {
-        self.conn
+    async fn accept_bi(&self) -> Result<(IrohWrite, RecvStream), Error> {
+        let (send, recv) = self
+            .conn
             .accept_bi()
             .await
-            .map_err(|err| Error::Stream(Box::new(err)))
+            .map_err(|err| Error::Stream(Box::new(err)))?;
+        Ok((IrohWrite::from(send), recv))
     }
 
     async fn wait_closed(&self) {
@@ -555,6 +560,78 @@ impl Session for IrohSession {
             said: now,
             conn: self.conn.weak_handle(),
         })
+    }
+}
+
+/// The write half of an iroh stream.
+///
+/// [`abort`](Abort::abort) resets the stream, so the peer's read fails with `ConnectionReset`. Dropping
+/// it, or calling `shutdown`, ends the stream cleanly.
+// A newtype because the orphan rule bars implementing a `bifrost-transport` trait on iroh's own
+// `SendStream`. Writes, flush and shutdown forward to its `AsyncWrite` impl, named in full because
+// `SendStream` has an inherent `poll_write` with a different error type.
+#[derive(Debug)]
+pub struct IrohWrite {
+    send: SendStream,
+    end: End,
+}
+
+/// How far a write half has got toward its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum End {
+    /// Still open, or shutting down without success yet: an abort resets.
+    Open,
+    /// `shutdown` returned success. QUIC would still reset a finished stream whose bytes are not yet
+    /// acknowledged, so the peer would see a reset or a clean end by timing; from here an abort does
+    /// nothing, and the clean end stands.
+    Finished,
+}
+
+impl From<SendStream> for IrohWrite {
+    fn from(send: SendStream) -> Self {
+        Self {
+            send,
+            end: End::Open,
+        }
+    }
+}
+
+/// The code an abort resets the stream with. bifrost carries no reason for an abort, and a peer's
+/// read sees only `ConnectionReset`.
+const ABORTED: VarInt = VarInt::from_u32(0);
+
+impl Abort for IrohWrite {
+    // A QUIC stream reset: buffered bytes are dropped and the peer's read fails with
+    // `ConnectionReset`. A second call finds the stream already reset; that error is the idempotence
+    // the contract asks for, so it is discarded.
+    fn abort(&mut self) {
+        if self.end == End::Finished {
+            return;
+        }
+        let _already_reset = self.send.reset(ABORTED);
+    }
+}
+
+impl io::AsyncWrite for IrohWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        io::AsyncWrite::poll_write(Pin::new(&mut self.get_mut().send), cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        io::AsyncWrite::poll_flush(Pin::new(&mut self.get_mut().send), cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let done = ready!(io::AsyncWrite::poll_shutdown(Pin::new(&mut this.send), cx));
+        if done.is_ok() {
+            this.end = End::Finished;
+        }
+        Poll::Ready(done)
     }
 }
 

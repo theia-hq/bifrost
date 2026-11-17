@@ -19,14 +19,14 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, Error, HintStream, Path, PathChanges};
-pub use bifrost_transport::{Session, Transport};
+pub use bifrost_transport::{Abort, Session, Transport};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 mod stream;
 
 pub use crate::stream::{MemRead, MemWrite};
-use crate::stream::{Severance, halves};
+use crate::stream::{Severance, ends};
 
 /// Buffer size for each in-memory stream, matching the wire's streaming chunk.
 const CAP: usize = 64 * 1024;
@@ -176,11 +176,9 @@ impl Session for MemSession {
         if self.severance.is_severed() {
             return Err(Error::Closed);
         }
-        let (near, far) = io::duplex(CAP);
-        self.opens
-            .send(halves(far, &self.severance))
-            .map_err(|_| Error::Closed)?;
-        Ok(halves(near, &self.severance))
+        let (near, far) = ends(io::duplex(CAP), &self.severance);
+        self.opens.send(far).map_err(|_| Error::Closed)?;
+        Ok(near)
     }
 
     async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), Error> {

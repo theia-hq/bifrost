@@ -11,12 +11,16 @@
 #     about a peer (every identity's secret is computable). The gate fails any manifest under ROOT
 #     that takes a test-only backend as anything but a dev-dependency.
 #
-# THE IDENTITY CASES. Each listed backend that is not test-only and has its manifest under ROOT
+# THE REQUIRED CASES. Each listed backend that is not test-only and has its manifest under ROOT
 # must have a file under some `tests/` directory in ROOT that names its library (`bifrost_iroh`) and
-# calls both `identity_binding(` and `wrong_key_rejected(`, or the gate fails. The limit: both cases pass for a
-# transport that echoes the dialed key with no handshake (`bifrost-conformance/src/lib.rs`, on
-# `claimed_identity_not_attributed`), so they falsify a fabricator and never prove a handshake. And
-# the gate checks that the calls and the name share a file, not that the calls run that transport.
+# calls every case in REQUIRED_CASES, or the gate fails. Two are the identity cases,
+# `identity_binding(` and `wrong_key_rejected(`. The limit: both pass for a transport that echoes the
+# dialed key with no handshake (`bifrost-conformance/src/lib.rs`, on
+# `claimed_identity_not_attributed`), so they falsify a fabricator and never prove a handshake. The
+# third is the abort case, `an_aborted_writer_errors_the_peers_read(`: the trait bound makes every
+# backend implement an abort, and only this case shows the abort reaches the peer as an error rather
+# than as a clean end. And the gate checks that the calls and the name share a file, not that the
+# calls run that transport.
 #
 # WHAT IT CHECKS. Every line in a crate's `src/` tree that starts an impl of either trait, named bare,
 # raw (`r#Transport`), or by path (`::bifrost_transport::Transport`, `$crate::Session`), with `for`
@@ -39,10 +43,15 @@ set -eu
 ROOT="${1:-.}"
 
 # The transport crates. A `:test` suffix marks a test-only backend.
-#   bifrost-iroh      -- cleared the checklist; runs the identity cases in
+#   bifrost-iroh      -- cleared the checklist; runs the required cases in
 #                        bifrost-conformance/tests/roundtrip.rs
 #   bifrost-mem:test  -- no handshake, proves nothing; a dev-dependency only
 TRANSPORT_CRATES="bifrost-iroh bifrost-mem:test"
+
+# The conformance cases every listed backend that is not test-only must call from one `tests/` file.
+REQUIRED_CASES="identity_binding wrong_key_rejected an_aborted_writer_errors_the_peers_read"
+# The same names as one alternation, to drop the lines that define a case rather than call it.
+defined=$(printf '%s' "$REQUIRED_CASES" | tr ' ' '|')
 
 # The impl header: `impl`, optional generics, an optional path (`::`, `$crate::`, raw segments), then
 # the trait token, raw or not, delimited on both sides so `SubTransport` and `TransportExt` are not a
@@ -56,7 +65,7 @@ tests=$(find "$ROOT" -path '*/tests/*' -name '*.rs' -not -path '*/target/*' -not
 
 fail=0
 impls=0
-# The listed crates whose manifest is under ROOT: only those owe the identity cases here.
+# The listed crates whose manifest is under ROOT: only those owe the required cases here.
 present=""
 
 for manifest in $manifests; do
@@ -98,7 +107,7 @@ for manifest in $manifests; do
     printf 'UNLISTED    crate %s implements Transport or Session but is not a listed transport crate:\n' "$own"
     printf '%s\n' "$found" | sed 's/^/        /'
     printf '        a new backend clears the admission checklist in bifrost-transport, runs the\n'
-    printf '        identity cases, and is then added to TRANSPORT_CRATES in scripts/sealed-gate.sh.\n'
+    printf '        required cases, and is then added to TRANSPORT_CRATES in scripts/sealed-gate.sh.\n'
     fail=1
   fi
 done
@@ -130,7 +139,7 @@ for entry in $TRANSPORT_CRATES; do
   fi
 
   # A backend that is not test-only and is in this tree: some `tests/` file names its library and
-  # calls both cases.
+  # calls every required case.
   case " $present " in
     *" $crate "*) ;;
     *) continue ;;
@@ -140,16 +149,20 @@ for entry in $TRANSPORT_CRATES; do
   for t in $tests; do
     code=$(grep -Ev '^[[:space:]]*//' "$t" || true)
     printf '%s\n' "$code" | grep -Eq "(^|[^A-Za-z0-9_])$lib([^A-Za-z0-9_]|$)" || continue
-    calls=$(printf '%s\n' "$code" | grep -Ev 'fn[[:space:]]+(identity_binding|wrong_key_rejected)' || true)
-    printf '%s\n' "$calls" | grep -Eq '(^|[^A-Za-z0-9_])identity_binding[[:space:]]*\(' || continue
-    printf '%s\n' "$calls" | grep -Eq '(^|[^A-Za-z0-9_])wrong_key_rejected[[:space:]]*\(' || continue
+    # A definition is not a call: a line declaring one of the cases is dropped before the search.
+    calls=$(printf '%s\n' "$code" | grep -Ev "fn[[:space:]]+($defined)" || true)
+    every=1
+    for case_name in $REQUIRED_CASES; do
+      printf '%s\n' "$calls" | grep -Eq "(^|[^A-Za-z0-9_])$case_name[[:space:]]*\\(" || every=0
+    done
+    [ "$every" -eq 1 ] || continue
     runs=1
-    printf 'IDENTITY    %s runs the identity cases in %s\n' "$crate" "$t"
+    printf 'CASES       %s runs the required cases in %s\n' "$crate" "$t"
     break
   done
   if [ "$runs" -eq 0 ]; then
-    printf 'NO-IDENTITY listed backend %s has no tests/ file that names %s and calls both\n' "$crate" "$lib"
-    printf '        identity_binding( and wrong_key_rejected(.\n'
+    printf 'NO-CASES    listed backend %s has no tests/ file that names %s and calls every one of\n' "$crate" "$lib"
+    printf '        %s.\n' "$REQUIRED_CASES"
     fail=1
   fi
 done

@@ -117,11 +117,28 @@ pub trait Transport {
     async fn close(&self);
 }
 
+/// Cut a stream's write half off mid-stream so the peer learns it was cut off.
+///
+/// Every [`Session::Write`] implements it. A write half with no abort would leave a caller unable to
+/// tell the peer a stream was cut short, so the bound makes that a compile error.
+pub trait Abort {
+    /// Abort the stream's write half now.
+    ///
+    /// Before a successful `shutdown`, the peer's read fails with `ConnectionReset` after any bytes
+    /// already delivered; it never sees a clean end. After one, this does nothing and the peer sees
+    /// the clean end. Later writes on this half fail. Dropping a write half without calling this still ends
+    /// the stream cleanly.
+    ///
+    /// Synchronous and never blocks, so it can run from a `Drop`. Calling it again does nothing. Other
+    /// streams on the session are untouched.
+    fn abort(&mut self);
+}
+
 /// A session with a peer.
 #[allow(async_fn_in_trait)]
 pub trait Session {
     /// The writable half of a stream to the peer.
-    type Write: io::AsyncWrite + Unpin + Send;
+    type Write: io::AsyncWrite + Abort + Unpin + Send;
     /// The readable half of a stream from the peer.
     type Read: io::AsyncRead + Unpin + Send;
 

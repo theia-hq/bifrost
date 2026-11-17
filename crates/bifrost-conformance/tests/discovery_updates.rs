@@ -15,12 +15,14 @@
 //! first answer before any source speaks; and they reach only the dial they were given to.
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::pin::Pin;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::task::{Context, Poll};
 use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use bifrost::{
-    Addr, AddrUpdate, Discovery, Error, HintStream, Latest, Layered, Node, NodeId, Path,
+    Abort, Addr, AddrUpdate, Discovery, Error, HintStream, Latest, Layered, Node, NodeId, Path,
     PathChanges, Session, StaticDiscovery, Transport,
 };
 use bifrost_mem::MemTransport;
@@ -563,19 +565,19 @@ struct Recorded {
 }
 
 impl Session for Recorded {
-    type Write = io::Sink;
+    type Write = NoAbort<io::Sink>;
     type Read = io::Empty;
 
     fn peer(&self) -> NodeId {
         self.peer
     }
 
-    async fn open_bi(&self) -> Result<(io::Sink, io::Empty), Error> {
-        Ok((io::sink(), io::empty()))
+    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
+        Ok((NoAbort(io::sink()), io::empty()))
     }
 
-    async fn accept_bi(&self) -> Result<(io::Sink, io::Empty), Error> {
-        Ok((io::sink(), io::empty()))
+    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), Error> {
+        Ok((NoAbort(io::sink()), io::empty()))
     }
 
     async fn wait_closed(&self) {}
@@ -585,6 +587,31 @@ impl Session for Recorded {
 
     fn path_changes(&self) -> PathChanges {
         PathChanges::fixed(Path::Unknown)
+    }
+}
+
+/// A write half whose abort does nothing: these tests never open a stream, so there is none to abort.
+struct NoAbort<W>(W);
+
+impl<W> Abort for NoAbort<W> {
+    fn abort(&mut self) {}
+}
+
+impl<W: io::AsyncWrite + Unpin> io::AsyncWrite for NoAbort<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
     }
 }
 

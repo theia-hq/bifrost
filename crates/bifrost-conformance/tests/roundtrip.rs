@@ -1,8 +1,11 @@
 use bifrost::{Node, StaticDiscovery, Transport};
 use bifrost_conformance::{
-    StreamEnd, StreamLimit, a_session_carries_its_stream_floor, bound_sockets_are_bind_truth,
-    close_drains, close_ends_held_streams, direct_conn_info, identity_binding, reach_roundtrip,
-    wildcard_bind_is_not_rewritten, wrong_key_rejected,
+    StreamEnd, StreamLimit, a_dropped_writer_still_ends_cleanly,
+    a_session_carries_its_stream_floor, abort_is_idempotent_and_writes_after_it_fail,
+    abort_leaves_the_sessions_other_streams_alive, abort_leaves_the_streams_read_half_open,
+    an_abort_after_shutdown_leaves_the_clean_end, an_aborted_writer_errors_the_peers_read,
+    bound_sockets_are_bind_truth, close_drains, close_ends_held_streams, direct_conn_info,
+    identity_binding, reach_roundtrip, wildcard_bind_is_not_rewritten, wrong_key_rejected,
 };
 use bifrost_iroh::Endpoint;
 
@@ -111,4 +114,53 @@ async fn iroh_a_session_carries_its_stream_floor_dropped() {
     let sender = dialing(&receiver).await;
     let limit = StreamLimit::Limited(StreamEnd::Dropped);
     a_session_carries_its_stream_floor(sender, receiver, limit).await;
+}
+
+/// Aborting an iroh writer resets the QUIC stream, so the peer's read fails with `ConnectionReset`
+/// rather than reading the clean end a drop gives.
+#[tokio::test]
+async fn iroh_an_aborted_writer_errors_the_peers_read() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    an_aborted_writer_errors_the_peers_read(sender, receiver).await;
+}
+
+/// A stream reset ends one stream, never the connection: a second stream still round-trips.
+#[tokio::test]
+async fn iroh_abort_leaves_the_sessions_other_streams_alive() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    abort_leaves_the_sessions_other_streams_alive(sender, receiver).await;
+}
+
+/// A second reset is harmless, and the reset writer refuses further writes.
+#[tokio::test]
+async fn iroh_abort_is_idempotent_and_writes_after_it_fail() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    abort_is_idempotent_and_writes_after_it_fail(sender, receiver).await;
+}
+
+/// Dropping an iroh writer without an abort still finishes the stream cleanly.
+#[tokio::test]
+async fn iroh_a_dropped_writer_still_ends_cleanly() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    a_dropped_writer_still_ends_cleanly(sender, receiver).await;
+}
+
+/// An abort after a successful shutdown does nothing, so the peer reads the clean end.
+#[tokio::test]
+async fn iroh_an_abort_after_shutdown_leaves_the_clean_end() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    an_abort_after_shutdown_leaves_the_clean_end(sender, receiver).await;
+}
+
+/// An abort ends one direction only: the peer's writes toward the aborter still arrive.
+#[tokio::test]
+async fn iroh_abort_leaves_the_streams_read_half_open() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    abort_leaves_the_streams_read_half_open(sender, receiver).await;
 }
