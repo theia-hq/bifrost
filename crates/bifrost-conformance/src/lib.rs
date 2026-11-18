@@ -30,7 +30,7 @@ use core::net::SocketAddr;
 use core::task::Poll;
 use std::collections::VecDeque;
 
-use bifrost::{Abort as _, Addr, Discovery, Error, Node, NodeId, Path, Session, Transport};
+use bifrost::{Addr, Discovery, Error, Node, NodeId, Path, Session, Transport, WriteEnd as _};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// A message sent to a peer reached by key over a bidirectional stream echoes back byte-identical.
@@ -366,6 +366,321 @@ where
         .expect("the aborter's read must end, not hang")
         .expect("the aborter's read half still reads to a clean end");
     assert_eq!(reply, b"reply", "the peer's writes reach the aborter");
+    sender.close().await;
+}
+
+/// When a transport's [`delivered`](bifrost::WriteEnd::delivered) resolves, which decides when the
+/// delivery cases let the peer read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// Once the peer's transport acknowledges every byte and the end, whether or not anything has read
+    /// them. The peer reads only after the close, so the close cannot be outrun by a read.
+    Acknowledged,
+    /// Once the peer has read the end, because a close discards what the peer has not read. The peer
+    /// reads as the bytes arrive, or the writer would wait forever.
+    ReadToEnd,
+}
+
+// How long a delivery or a peer's read has to finish. Generous: this bounds a hang, not a latency.
+const DELIVERY_BOUND: core::time::Duration = core::time::Duration::from_secs(10);
+
+// How many bytes the close case writes: a mebibyte, under the per-stream window a QUIC peer grants
+// (1.25 MB on iroh), so a peer that is not reading yet still takes them all.
+const DELIVERED_BYTES: usize = 1024 * 1024;
+
+/// Once `delivered` resolves, closing the session at once costs the peer nothing: it reads every byte
+/// written, then a clean end. With [`Delivery::Acknowledged`], the peer starts reading only after its
+/// session has seen the close, so this checks the transport keeps acknowledged bytes readable past a
+/// close. Panics otherwise.
+pub async fn a_delivered_stream_survives_a_close<T, D>(
+    sender: Node<T, D>,
+    receiver: T,
+    delivery: Delivery,
+) where
+    T: Transport,
+    D: Discovery,
+{
+    let Opened {
+        dialed,
+        accepted,
+        mut send,
+        mut peer_recv,
+        ..
+    } = Opened::open(&sender, &receiver).await;
+    let message: Vec<u8> = (0..=u8::MAX).cycle().take(DELIVERED_BYTES).collect();
+
+    let writing = async {
+        send.write_all(&message).await.expect("write the message");
+        send.shutdown().await.expect("shut the writer down");
+        tokio::time::timeout(DELIVERY_BOUND, send.delivered())
+            .await
+            .expect("a peer that takes every byte lets delivered resolve")
+            .expect("a finished stream the peer took is delivered");
+        // At once: nothing between the delivery and the close lets more bytes arrive.
+        dialed.close();
+    };
+    let reading = async {
+        if delivery == Delivery::Acknowledged {
+            tokio::time::timeout(DELIVERY_BOUND, accepted.wait_closed())
+                .await
+                .expect("the peer's session sees the close");
+        }
+        let mut received = Vec::new();
+        let end = tokio::time::timeout(DELIVERY_BOUND, peer_recv.read_to_end(&mut received))
+            .await
+            .expect("the peer's read must end, not hang");
+        (received, end)
+    };
+    let ((), (received, end)) = tokio::join!(writing, reading);
+
+    end.expect("a delivered stream reads to its clean end after a close");
+    assert!(
+        received == message,
+        "a delivered stream's peer reads every byte after a close: {} of {}",
+        received.len(),
+        message.len()
+    );
+    sender.close().await;
+}
+
+// How long `delivered` must stay pending while the peer has not read. Long enough that a delivery
+// resolved on the writer's side alone would already have resolved.
+const UNREAD_FOR: core::time::Duration = core::time::Duration::from_millis(200);
+
+/// For a [`Delivery::ReadToEnd`] transport: `delivered` stays pending while the peer has not read
+/// the stream, and resolves once it reads the end. Panics otherwise.
+pub async fn delivered_waits_for_the_peers_read<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened.send.write_all(b"held").await.expect("write");
+    opened.send.shutdown().await.expect("shut the writer down");
+    let delivered = opened.send.delivered();
+    tokio::pin!(delivered);
+
+    assert!(
+        tokio::time::timeout(UNREAD_FOR, &mut delivered)
+            .await
+            .is_err(),
+        "delivered must not resolve while the peer has not read"
+    );
+    let mut rest = Vec::new();
+    tokio::time::timeout(DELIVERY_BOUND, opened.peer_recv.read_to_end(&mut rest))
+        .await
+        .expect("the peer's read must end, not hang")
+        .expect("the peer reads a clean end");
+    assert_eq!(rest, b"held", "the peer reads every byte");
+    tokio::time::timeout(DELIVERY_BOUND, delivered)
+        .await
+        .expect("delivered resolves once the peer has read the end")
+        .expect("a stream read to its end is delivered");
+    sender.close().await;
+}
+
+/// For a [`Delivery::ReadToEnd`] transport: a read into an empty buffer, which fills nothing, is not
+/// the end of the stream, so `delivered` stays pending. Panics otherwise.
+pub async fn an_empty_read_is_not_the_end<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened.send.write_all(b"held").await.expect("write");
+    opened.send.shutdown().await.expect("shut the writer down");
+    let delivered = opened.send.delivered();
+    tokio::pin!(delivered);
+
+    let filled = tokio::time::timeout(DELIVERY_BOUND, opened.peer_recv.read(&mut []))
+        .await
+        .expect("an empty read must return, not hang")
+        .expect("an empty read succeeds");
+    assert_eq!(filled, 0, "an empty read fills nothing");
+    assert!(
+        tokio::time::timeout(UNREAD_FOR, &mut delivered)
+            .await
+            .is_err(),
+        "an empty read must not count as reading the end"
+    );
+    sender.close().await;
+}
+
+/// A delivery still pending when the caller's timeout fires, then a close: the peer's read errors,
+/// never a clean end, so bytes the close cut off never pass for a whole stream. With
+/// [`Delivery::Acknowledged`] the peer's transport takes bytes without being read, so the stream is
+/// written past the window a peer grants, and the timeout fires while the writer waits for room.
+/// Panics otherwise.
+pub async fn a_close_after_a_pending_delivery_errors_the_peer<T, D>(
+    sender: Node<T, D>,
+    receiver: T,
+    delivery: Delivery,
+) where
+    T: Transport,
+    D: Discovery,
+{
+    let Opened {
+        dialed,
+        mut send,
+        mut peer_recv,
+        ..
+    } = Opened::open(&sender, &receiver).await;
+    let size = match delivery {
+        Delivery::Acknowledged => PAST_THE_WINDOW,
+        Delivery::ReadToEnd => 1024,
+    };
+    let message: Vec<u8> = (0..=u8::MAX).cycle().take(size).collect();
+    let mut delivering = false;
+    let attempt = tokio::time::timeout(UNREAD_FOR, async {
+        send.write_all(&message).await?;
+        send.shutdown().await?;
+        delivering = true;
+        send.delivered().await
+    })
+    .await;
+    assert!(
+        attempt.is_err(),
+        "a peer that reads nothing must leave the delivery pending"
+    );
+    if delivery == Delivery::ReadToEnd {
+        assert!(delivering, "the delivery itself is what was pending");
+    }
+    dialed.close();
+
+    let read = tokio::time::timeout(DELIVERY_BOUND, read_to_the_end(&mut peer_recv))
+        .await
+        .expect("the peer's read must end, not hang");
+    assert!(
+        read.is_err(),
+        "a stream a close cut off before delivery reads an error, never a clean end"
+    );
+    sender.close().await;
+}
+
+// More than a QUIC peer's per-stream window (1.25 MB on iroh), so a peer that reads nothing cannot
+// take it all.
+const PAST_THE_WINDOW: usize = 4 * 1024 * 1024;
+
+/// `delivered` on an aborted write half fails with `ConnectionReset`, never resolving as delivered,
+/// and the peer's read still fails the same way. Panics otherwise.
+pub async fn delivered_after_an_abort_fails<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened
+        .send
+        .write_all(b"cut short")
+        .await
+        .expect("write before the abort");
+    opened.send.abort();
+
+    let delivered = tokio::time::timeout(DELIVERY_BOUND, opened.send.delivered())
+        .await
+        .expect("delivered on an aborted half must end, not hang");
+    assert_eq!(
+        delivered.map_err(|err| err.kind()),
+        Err(tokio::io::ErrorKind::ConnectionReset),
+        "an aborted half is never delivered"
+    );
+    assert_eq!(
+        read_kind(&mut opened.peer_recv).await,
+        Some(tokio::io::ErrorKind::ConnectionReset),
+        "the peer's read still fails with ConnectionReset"
+    );
+    sender.close().await;
+}
+
+/// `delivered` on a half that was never shut down ends the stream itself: the peer reads every byte,
+/// then a clean end, and `delivered` resolves. Panics otherwise.
+pub async fn delivered_finishes_an_open_stream<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened
+        .send
+        .write_all(b"whole")
+        .await
+        .expect("write without a shutdown");
+
+    let mut rest = Vec::new();
+    let (delivered, read) = tokio::time::timeout(DELIVERY_BOUND, async {
+        tokio::join!(
+            opened.send.delivered(),
+            opened.peer_recv.read_to_end(&mut rest)
+        )
+    })
+    .await
+    .expect("delivery and the peer's read must end, not hang");
+    read.expect("the peer reads a clean end, never an error");
+    assert_eq!(rest, b"whole", "the peer reads every byte");
+    delivered.expect("a stream delivered finishes and is delivered");
+    sender.close().await;
+}
+
+/// `delivered` on a stream whose peer dropped its read half unread fails with `BrokenPipe`, never
+/// resolving as delivered. Panics otherwise.
+pub async fn delivered_to_a_stopped_reader_fails<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    drop(opened.peer_recv);
+    // Sent after the drop on the same stream's other direction, so by the time the writer reads it
+    // the peer's stop has reached the writer's side.
+    opened
+        .peer_send
+        .write_all(b"stopped")
+        .await
+        .expect("the peer writes after its drop");
+    opened.peer_send.flush().await.expect("flush");
+    let mut signal = [0u8; 7];
+    tokio::time::timeout(DELIVERY_BOUND, opened.recv.read_exact(&mut signal))
+        .await
+        .expect("the peer's signal must arrive, not hang")
+        .expect("read the peer's signal");
+    // Polled only after a pause, as a caller that spawns or stores the future may: the answer must
+    // not depend on how soon the future is first polled.
+    let delivery = opened.send.delivered();
+    tokio::time::sleep(UNREAD_FOR).await;
+    let delivered = tokio::time::timeout(DELIVERY_BOUND, delivery)
+        .await
+        .expect("delivered to a stopped reader must end, not hang");
+    assert_eq!(
+        delivered.map_err(|err| err.kind()),
+        Err(tokio::io::ErrorKind::BrokenPipe),
+        "a stream its peer stopped reading is never delivered"
+    );
+    sender.close().await;
+}
+
+/// `delivered` on a stream whose session was closed first fails with `ConnectionAborted`. Panics
+/// otherwise.
+pub async fn delivered_after_a_close_fails<T, D>(sender: Node<T, D>, receiver: T)
+where
+    T: Transport,
+    D: Discovery,
+{
+    let mut opened = Opened::open(&sender, &receiver).await;
+    opened
+        .send
+        .write_all(b"never finished")
+        .await
+        .expect("write before the close");
+    opened.dialed.close();
+
+    let delivered = tokio::time::timeout(DELIVERY_BOUND, opened.send.delivered())
+        .await
+        .expect("delivered after a close must end, not hang");
+    assert_eq!(
+        delivered.map_err(|err| err.kind()),
+        Err(tokio::io::ErrorKind::ConnectionAborted),
+        "a stream its session's close cut short is never delivered"
+    );
     sender.close().await;
 }
 

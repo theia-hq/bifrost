@@ -117,11 +117,13 @@ pub trait Transport {
     async fn close(&self);
 }
 
-/// Cut a stream's write half off mid-stream so the peer learns it was cut off.
+/// The two ways a stream's write half ends: [`abort`](Self::abort) cuts it off, and
+/// [`delivered`](Self::delivered) waits until the peer holds it.
 ///
-/// Every [`Session::Write`] implements it. A write half with no abort would leave a caller unable to
-/// tell the peer a stream was cut short, so the bound makes that a compile error.
-pub trait Abort {
+/// Every [`Session::Write`] implements it, so a caller can always tell the peer a stream was cut short
+/// and learn when a close can no longer cost the peer a byte. A write half without either is a compile
+/// error.
+pub trait WriteEnd {
     /// Abort the stream's write half now.
     ///
     /// Before a successful `shutdown`, the peer's read fails with `ConnectionReset` after any bytes
@@ -132,13 +134,27 @@ pub trait Abort {
     /// Synchronous and never blocks, so it can run from a `Drop`. Calling it again does nothing. Other
     /// streams on the session are untouched.
     fn abort(&mut self);
+
+    /// End the stream cleanly if `shutdown` has not, then resolve once the peer holds every byte
+    /// written and the stream's end, so a later [`Session::close`] takes none of them from the
+    /// peer's reader.
+    ///
+    /// The peer holding the bytes is not the peer's application having read them. Fails with
+    /// `ConnectionReset` if this half was aborted, `BrokenPipe` if the peer stopped reading before it
+    /// held everything, and `ConnectionAborted` if the session ended first. A peer that stops after it
+    /// holds everything is too late to change the answer, which stays `Ok`.
+    ///
+    /// A peer that never takes the bytes leaves the future pending, and it may hold the stream and
+    /// the session open until it resolves. It takes the half, so the caller bounds it with a timeout
+    /// and, when the timeout fires, closes the session: that is the one way left to end the stream.
+    fn delivered(self) -> impl Future<Output = io::Result<()>> + Send + 'static;
 }
 
 /// A session with a peer.
 #[allow(async_fn_in_trait)]
 pub trait Session {
     /// The writable half of a stream to the peer.
-    type Write: io::AsyncWrite + Abort + Unpin + Send;
+    type Write: io::AsyncWrite + WriteEnd + Unpin + Send;
     /// The readable half of a stream from the peer.
     type Read: io::AsyncRead + Unpin + Send;
 
@@ -177,7 +193,9 @@ pub trait Session {
     /// - **Every stream ends.** A held stream's reads and writes then fail with an error, never a clean
     ///   end, so a transfer the close cut short can never pass for a complete one.
     /// - **The peer learns of it.** Its reads on the session's streams error, and its
-    ///   [`wait_closed`](Self::wait_closed) resolves.
+    ///   [`wait_closed`](Self::wait_closed) resolves. A stream whose
+    ///   [`delivered`](WriteEnd::delivered) resolved before the close is the exception: the peer still
+    ///   reads it to its clean end.
     /// - **Afterwards,** [`open_bi`](Self::open_bi) and [`accept_bi`](Self::accept_bi) fail, and the
     ///   local [`wait_closed`](Self::wait_closed) resolves.
     /// - **Idempotent,** never blocks, and never panics.

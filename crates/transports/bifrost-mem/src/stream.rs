@@ -10,16 +10,20 @@
 //! the peer's half that reads it. An abort fires only that one: the peer's read fails with
 //! `ConnectionReset` and the aborted writer's later writes with `BrokenPipe`, while the opposite
 //! direction and every other stream carry on, as a QUIC stream reset leaves them.
+//!
+//! Each direction also has a [`Reading`], moved by the peer's reader and watched by the writer's
+//! `delivered`. A close discards bytes the reader has not read, so here the peer holds a stream only
+//! once it has read it to the end, and `delivered` waits for exactly that.
 
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker, ready};
 use std::sync::Arc;
 
-use bifrost_transport::Abort;
+use bifrost_transport::WriteEnd;
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Notify;
 use tokio::sync::futures::OwnedNotified;
+use tokio::sync::{Notify, watch};
 
 /// A sticky end signal that wakes every half parked on it: one per session pair for a close, and one
 /// per stream direction for an abort.
@@ -93,6 +97,8 @@ pub struct MemRead {
     session: Watch,
     /// The peer writer's abort signal for this direction.
     stream: Watch,
+    /// How far this reader has got, for the peer writer's `delivered`.
+    reading: watch::Sender<Reading>,
 }
 
 /// The writable half of an in-process stream.
@@ -104,6 +110,19 @@ pub struct MemWrite {
     /// that has to be woken.
     stream: Arc<Severance>,
     end: End,
+    /// How far the peer's reader has got with this direction.
+    reading: watch::Receiver<Reading>,
+}
+
+/// How far a direction's reader has got. Moves once, from `Open`, and never back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reading {
+    /// Still reading, or not yet started.
+    Open,
+    /// Read the clean end: every byte written has been read.
+    ReadToEnd,
+    /// Dropped before the end, so the rest will never be read.
+    Gone,
 }
 
 /// How far a write half has got toward its end.
@@ -124,19 +143,34 @@ pub(crate) fn ends(
 ) -> ((MemWrite, MemRead), (MemWrite, MemRead)) {
     let outward = Arc::new(Severance::default());
     let inward = Arc::new(Severance::default());
+    // A watch, not a `Notify`: a writer may ask for delivery long after its reader reached the end,
+    // and a watch keeps the last state for it.
+    let (outward_read, outward_wait) = watch::channel(Reading::Open);
+    let (inward_read, inward_wait) = watch::channel(Reading::Open);
     (
-        halves(near, severance, &outward, &inward),
-        halves(far, severance, &inward, &outward),
+        halves(
+            near,
+            severance,
+            (&outward, outward_wait),
+            (&inward, inward_read),
+        ),
+        halves(
+            far,
+            severance,
+            (&inward, inward_wait),
+            (&outward, outward_read),
+        ),
     )
 }
 
-/// Split one duplex end into the two halves a session hands out: the writer fires `writes`, the
-/// reader watches `reads`, and both watch the session's `severance`.
+/// Split one duplex end into the two halves a session hands out: the writer fires `writes` and waits
+/// on its direction's reader, the reader watches `reads` and reports how far it got, and both watch
+/// the session's `severance`.
 fn halves(
     end: io::DuplexStream,
     severance: &Arc<Severance>,
-    writes: &Arc<Severance>,
-    reads: &Arc<Severance>,
+    (writes, delivery): (&Arc<Severance>, watch::Receiver<Reading>),
+    (reads, reading): (&Arc<Severance>, watch::Sender<Reading>),
 ) -> (MemWrite, MemRead) {
     let (read, write) = io::split(end);
     (
@@ -145,11 +179,13 @@ fn halves(
             session: Watch::new(Arc::clone(severance)),
             stream: Arc::clone(writes),
             end: End::Open,
+            reading: delivery,
         },
         MemRead {
             half: read,
             session: Watch::new(Arc::clone(severance)),
             stream: Watch::new(Arc::clone(reads)),
+            reading,
         },
     )
 }
@@ -180,7 +216,7 @@ impl MemWrite {
     }
 }
 
-impl Abort for MemWrite {
+impl WriteEnd for MemWrite {
     // Fires this direction's signal and nothing else: the peer's read of it fails from now on, and any
     // bytes still in the duplex are never read, the in-process form of a reset discarding them. After
     // a successful shutdown it does nothing, so the clean end stands, as on every backend.
@@ -189,6 +225,29 @@ impl Abort for MemWrite {
             return;
         }
         self.stream.sever();
+    }
+
+    // An open half is finished by its own drop, below. The reader's end is checked first, so a close
+    // or a dropped reader after the stream was read to its end cannot turn a delivery into an error.
+    fn delivered(self) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        // Only an abort before a successful shutdown fires this direction's signal.
+        let cut = self.stream.is_severed();
+        let mut reading = self.reading.clone();
+        let session = Arc::clone(&self.session.severance);
+        drop(self);
+        async move {
+            if cut {
+                return Err(reset());
+            }
+            tokio::select! {
+                biased;
+                read = reading.wait_for(|read| *read != Reading::Open) => match read.map(|read| *read) {
+                    Ok(Reading::ReadToEnd) => Ok(()),
+                    _ => Err(io::Error::new(io::ErrorKind::BrokenPipe, "peer stopped reading")),
+                },
+                () = session.severed() => Err(aborted()),
+            }
+        }
     }
 }
 
@@ -205,7 +264,34 @@ impl AsyncRead for MemRead {
         if this.stream.severed(cx) {
             return Poll::Ready(Err(reset()));
         }
-        Pin::new(&mut this.half).poll_read(cx, buf)
+        // A read with room that fills nothing is the clean end; one into a full buffer is not.
+        let before = buf.filled().len();
+        let room = buf.remaining() > 0;
+        let read = ready!(Pin::new(&mut this.half).poll_read(cx, buf));
+        if read.is_ok() && room && buf.filled().len() == before {
+            this.reading
+                .send_if_modified(|reading| reach(reading, Reading::ReadToEnd));
+        }
+        Poll::Ready(read)
+    }
+}
+
+/// Move a direction's reading on from `Open` to `to`, and report whether it moved: a later read or
+/// the reader's drop never undoes an end already read.
+fn reach(reading: &mut Reading, to: Reading) -> bool {
+    let moved = *reading == Reading::Open;
+    if moved {
+        *reading = to;
+    }
+    moved
+}
+
+// A reader dropped before the end will never read the rest, so the peer writer's `delivered` fails
+// rather than waits.
+impl Drop for MemRead {
+    fn drop(&mut self) {
+        self.reading
+            .send_if_modified(|reading| reach(reading, Reading::Gone));
     }
 }
 

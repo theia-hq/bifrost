@@ -5,10 +5,14 @@ All notable changes to bifrost, newest first.
 ## Unreleased
 
 ### Breaking
-- **Every `Session::Write` must implement `Abort`.** `Abort::abort` cuts a stream's write half off
-  mid-stream: the peer's read fails with `ConnectionReset` and never sees a clean end. After a
-  successful `shutdown` it does nothing. It is synchronous, so it can run from a `Drop`. Dropping a
-  write half still ends the stream cleanly.
+- **Every `Session::Write` must implement `WriteEnd`.** It has two methods.
+  - `abort` cuts a stream's write half off mid-stream: the peer's read fails with `ConnectionReset`
+    and never sees a clean end. After a successful `shutdown` it does nothing. It is synchronous, so
+    it can run from a `Drop`. Dropping a write half still ends the stream cleanly.
+  - `delivered` takes the half, ends the stream if `shutdown` has not, and resolves once the peer
+    holds every byte and the end, so a later `Session::close` takes none of them. A peer that never
+    takes the bytes leaves it pending: bound it with a timeout, then close the session.
+
   `bifrost-iroh` returns `IrohWrite` from `open_bi` and `accept_bi`.
 - **The `keystore` crate is no longer part of bifrost.** It is its own repository,
   [theia-hq/keystore](https://github.com/theia-hq/keystore), from v0.1.0.

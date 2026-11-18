@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use bifrost::{
-    Abort, Addr, Error, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport,
+    Addr, Error, NoDiscovery, Node, NodeId, Path, PathChanges, Session, Transport, WriteEnd,
 };
 use bifrost_conformance::{
     claimed_identity_not_attributed, identity_binding, reach_roundtrip, wrong_key_rejected,
@@ -68,13 +68,17 @@ impl Transport for Fabricator {
     async fn close(&self) {}
 }
 
-/// A write half whose abort does nothing, so a double can stand on any writer: these doubles exist for
-/// the identity cases and are never run through `an_aborted_writer_errors_the_peers_read`, which they
-/// would fail.
+/// A write half whose abort does nothing and whose delivery fails, so a double can stand on any
+/// writer: these doubles exist for the identity cases and are never run through the abort or delivery
+/// cases, which they would fail.
 struct NoAbort<W>(W);
 
-impl<W> Abort for NoAbort<W> {
+impl<W> WriteEnd for NoAbort<W> {
     fn abort(&mut self) {}
+
+    fn delivered(self) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        core::future::ready(Err(io::ErrorKind::Unsupported.into()))
+    }
 }
 
 impl<W: io::AsyncWrite + Unpin> io::AsyncWrite for NoAbort<W> {

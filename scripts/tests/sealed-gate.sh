@@ -69,7 +69,8 @@ expect_fail() {
 }
 
 every_case='use bifrost_iroh::Endpoint;
-fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); an_aborted_writer_errors_the_peers_read(a, b); }'
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); an_aborted_writer_errors_the_peers_read(a, b);
+  a_delivered_stream_survives_a_close(a, b, Delivery::Acknowledged); }'
 
 # The pass path: both listed crates implement both traits, the backend runs the required cases, and
 # the test-only backend is taken as a dev-dependency.
@@ -139,19 +140,30 @@ expect_fail 'a backend with no required cases fails' no-cases 'NO-CASES'
 
 write_crate half-identity bifrost-iroh 'impl Transport for E {}'
 write_suite half-identity 'use bifrost_iroh::Endpoint;
-fn t() { identity_binding(a, b); an_aborted_writer_errors_the_peers_read(a, b); }'
+fn t() { identity_binding(a, b); an_aborted_writer_errors_the_peers_read(a, b); a_delivered_stream_survives_a_close(a, b, Delivery::Acknowledged); }'
 expect_fail 'a backend running one identity case fails' half-identity 'NO-CASES'
 
 write_crate no-abort bifrost-iroh 'impl Transport for E {}'
 write_suite no-abort 'use bifrost_iroh::Endpoint;
-fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); }'
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); a_delivered_stream_survives_a_close(a, b, Delivery::Acknowledged); }'
 expect_fail 'a backend running no abort case fails' no-abort 'NO-CASES'
 
 write_crate abort-defined bifrost-iroh 'impl Transport for E {}'
 write_suite abort-defined 'use bifrost_iroh::Endpoint;
-fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); }
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); a_delivered_stream_survives_a_close(a, b, Delivery::Acknowledged); }
 fn an_aborted_writer_errors_the_peers_read(a: A, b: B) {}'
 expect_fail 'defining the abort case is not calling it' abort-defined 'NO-CASES'
+
+write_crate no-delivery bifrost-iroh 'impl Transport for E {}'
+write_suite no-delivery 'use bifrost_iroh::Endpoint;
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); an_aborted_writer_errors_the_peers_read(a, b); }'
+expect_fail 'a backend running no delivery case fails' no-delivery 'NO-CASES'
+
+write_crate read-delivery bifrost-iroh 'impl Transport for E {}'
+write_suite read-delivery 'use bifrost_iroh::Endpoint;
+fn t() { identity_binding(a, b); wrong_key_rejected(a, b, c); an_aborted_writer_errors_the_peers_read(a, b);
+  a_delivered_stream_survives_a_close(a, b, Delivery::ReadToEnd); }'
+expect_fail 'a backend running only the read-as-it-goes delivery fails' read-delivery 'NO-CASES'
 
 # The test-only rule: a test-only backend taken as a normal dependency fails, in either TOML form.
 write_crate not-dev bifrost-mem 'impl Transport for M {}'

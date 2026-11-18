@@ -19,7 +19,11 @@
 # `claimed_identity_not_attributed`), so they falsify a fabricator and never prove a handshake. The
 # third is the abort case, `an_aborted_writer_errors_the_peers_read(`: the trait bound makes every
 # backend implement an abort, and only this case shows the abort reaches the peer as an error rather
-# than as a clean end. And the gate checks that the calls and the name share a file, not that the
+# than as a clean end. The fourth is the delivery case, `a_delivered_stream_survives_a_close(`: a
+# close after `delivered` is safe only if the backend keeps the bytes its peer acknowledged readable
+# past the close, which no type shows and only this case checks. The file must also name
+# `Delivery::Acknowledged`, the form in which the peer reads only after the close; the read-as-it-goes
+# form would let a backend pass without that check. And the gate checks that the calls and the name share a file, not that the
 # calls run that transport.
 #
 # WHAT IT CHECKS. Every line in a crate's `src/` tree that starts an impl of either trait, named bare,
@@ -49,7 +53,9 @@ ROOT="${1:-.}"
 TRANSPORT_CRATES="bifrost-iroh bifrost-mem:test"
 
 # The conformance cases every listed backend that is not test-only must call from one `tests/` file.
-REQUIRED_CASES="identity_binding wrong_key_rejected an_aborted_writer_errors_the_peers_read"
+REQUIRED_CASES="identity_binding wrong_key_rejected an_aborted_writer_errors_the_peers_read a_delivered_stream_survives_a_close"
+# The tokens the same file must name, matched as fixed strings: which form a case runs in.
+REQUIRED_TOKENS="Delivery::Acknowledged"
 # The same names as one alternation, to drop the lines that define a case rather than call it.
 defined=$(printf '%s' "$REQUIRED_CASES" | tr ' ' '|')
 
@@ -155,6 +161,9 @@ for entry in $TRANSPORT_CRATES; do
     for case_name in $REQUIRED_CASES; do
       printf '%s\n' "$calls" | grep -Eq "(^|[^A-Za-z0-9_])$case_name[[:space:]]*\\(" || every=0
     done
+    for token in $REQUIRED_TOKENS; do
+      printf '%s\n' "$code" | grep -Fq "$token" || every=0
+    done
     [ "$every" -eq 1 ] || continue
     runs=1
     printf 'CASES       %s runs the required cases in %s\n' "$crate" "$t"
@@ -162,7 +171,7 @@ for entry in $TRANSPORT_CRATES; do
   done
   if [ "$runs" -eq 0 ]; then
     printf 'NO-CASES    listed backend %s has no tests/ file that names %s and calls every one of\n' "$crate" "$lib"
-    printf '        %s.\n' "$REQUIRED_CASES"
+    printf '        %s, naming %s.\n' "$REQUIRED_CASES" "$REQUIRED_TOKENS"
     fail=1
   fi
 done
