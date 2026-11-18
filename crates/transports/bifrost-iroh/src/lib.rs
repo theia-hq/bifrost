@@ -15,7 +15,7 @@ pub use bifrost_core::NodeId;
 use bifrost_core::{
     Addr, BoxError, ConnInfo, CryptoKind, Error, HintStream, KeyError, Path, PathChanges, Relay,
 };
-pub use bifrost_transport::{Abort, Session, Transport};
+pub use bifrost_transport::{Session, Transport, WriteEnd};
 use futures_core::Stream;
 use iroh::address_lookup::AddressLookupBuilderError;
 use iroh::endpoint::presets::Preset;
@@ -565,8 +565,10 @@ impl Session for IrohSession {
 
 /// The write half of an iroh stream.
 ///
-/// [`abort`](Abort::abort) resets the stream, so the peer's read fails with `ConnectionReset`. Dropping
-/// it, or calling `shutdown`, ends the stream cleanly.
+/// [`abort`](WriteEnd::abort) resets the stream, so the peer's read fails with `ConnectionReset`.
+/// Dropping it, or calling `shutdown`, ends the stream cleanly. [`delivered`](WriteEnd::delivered)
+/// resolves once the peer has acknowledged every byte and the end, or has stopped reading or closed
+/// the connection; until then its future holds the stream and the connection open.
 // A newtype because the orphan rule bars implementing a `bifrost-transport` trait on iroh's own
 // `SendStream`. Writes, flush and shutdown forward to its `AsyncWrite` impl, named in full because
 // `SendStream` has an inherent `poll_write` with a different error type.
@@ -585,6 +587,9 @@ enum End {
     /// acknowledged, so the peer would see a reset or a clean end by timing; from here an abort does
     /// nothing, and the clean end stands.
     Finished,
+    /// Reset by an abort. Kept, not inferred: noq reports a reset stream whose reset the peer
+    /// acknowledged the same way as a delivered one, so only this half knows which it was.
+    Aborted,
 }
 
 impl From<SendStream> for IrohWrite {
@@ -600,7 +605,7 @@ impl From<SendStream> for IrohWrite {
 /// read sees only `ConnectionReset`.
 const ABORTED: VarInt = VarInt::from_u32(0);
 
-impl Abort for IrohWrite {
+impl WriteEnd for IrohWrite {
     // A QUIC stream reset: buffered bytes are dropped and the peer's read fails with
     // `ConnectionReset`. A second call finds the stream already reset; that error is the idempotence
     // the contract asks for, so it is discarded.
@@ -609,6 +614,42 @@ impl Abort for IrohWrite {
             return;
         }
         let _already_reset = self.send.reset(ABORTED);
+        self.end = End::Aborted;
+    }
+
+    // noq's `stopped` resolves once the peer acknowledges every byte and the end, or stops the
+    // stream. The stream is held until it answers: dropping a stream the peer stopped resets it, and
+    // noq then reports the reset, once acknowledged, the same way as a delivery. The peer's read
+    // returns buffered bytes and the end before it reports a close, which is what lets a close
+    // follow; the conformance case `a_delivered_stream_survives_a_close` holds noq to it.
+    fn delivered(self) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        let Self { mut send, end } = self;
+        let ended = match end {
+            End::Aborted => Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "stream aborted",
+            )),
+            End::Finished => Ok(()),
+            // `finish` fails only on a stream already finished or reset, which an open half did not
+            // do itself, so the stream was ended under it.
+            End::Open => send.finish().map_err(|_closed| {
+                io::Error::new(io::ErrorKind::ConnectionAborted, "stream already closed")
+            }),
+        };
+        async move {
+            ended?;
+            match send.stopped().await {
+                Ok(None) => Ok(()),
+                Ok(Some(_code)) => Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "peer stopped reading",
+                )),
+                Err(_lost) => Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "session closed",
+                )),
+            }
+        }
     }
 }
 

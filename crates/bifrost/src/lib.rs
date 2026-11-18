@@ -18,6 +18,6 @@ pub use bifrost_core::{
     Layered, NoDiscovery, NodeId, NodeIdParseError, Path, PathChanges, Refusal, RefusalDetail,
     RefusalDetailError, Relay, StaticDiscovery,
 };
-pub use bifrost_transport::{Abort, Session, Transport};
+pub use bifrost_transport::{Session, Transport, WriteEnd};
 pub use bifrost_wire as wire;
 pub use node::Node;

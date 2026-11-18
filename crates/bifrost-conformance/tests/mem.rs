@@ -1,10 +1,15 @@
 use bifrost::{NoDiscovery, Node, Transport};
 use bifrost_conformance::{
-    StreamLimit, a_dropped_writer_still_ends_cleanly, a_session_carries_its_stream_floor,
-    abort_is_idempotent_and_writes_after_it_fail, abort_leaves_the_sessions_other_streams_alive,
-    abort_leaves_the_streams_read_half_open, an_abort_after_shutdown_leaves_the_clean_end,
-    an_aborted_writer_errors_the_peers_read, close_drains, close_ends_held_streams,
-    identity_binding, reach_roundtrip, unknown_conn_info, wrong_key_rejected,
+    Delivery, StreamLimit, a_close_after_a_pending_delivery_errors_the_peer,
+    a_delivered_stream_survives_a_close, a_dropped_writer_still_ends_cleanly,
+    a_session_carries_its_stream_floor, abort_is_idempotent_and_writes_after_it_fail,
+    abort_leaves_the_sessions_other_streams_alive, abort_leaves_the_streams_read_half_open,
+    an_abort_after_shutdown_leaves_the_clean_end, an_aborted_writer_errors_the_peers_read,
+    an_empty_read_is_not_the_end, close_drains, close_ends_held_streams,
+    delivered_after_a_close_fails, delivered_after_an_abort_fails,
+    delivered_finishes_an_open_stream, delivered_to_a_stopped_reader_fails,
+    delivered_waits_for_the_peers_read, identity_binding, reach_roundtrip, unknown_conn_info,
+    wrong_key_rejected,
 };
 use bifrost_mem::MemTransport;
 
@@ -130,4 +135,69 @@ async fn mem_abort_leaves_the_streams_read_half_open() {
     let receiver = MemTransport::bind();
     let sender = Node::new(MemTransport::bind(), NoDiscovery);
     abort_leaves_the_streams_read_half_open(sender, receiver).await;
+}
+
+/// A close after delivery costs the peer nothing: here `delivered` resolves only once the peer has
+/// read the end, because a close discards bytes the peer has not read.
+#[tokio::test]
+async fn mem_a_delivered_stream_survives_a_close() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    a_delivered_stream_survives_a_close(sender, receiver, Delivery::ReadToEnd).await;
+}
+
+/// `delivered` on an aborted half fails with `ConnectionReset`.
+#[tokio::test]
+async fn mem_delivered_after_an_abort_fails() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    delivered_after_an_abort_fails(sender, receiver).await;
+}
+
+/// `delivered` on a half never shut down finishes the stream, and the peer reads a clean end.
+#[tokio::test]
+async fn mem_delivered_finishes_an_open_stream() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    delivered_finishes_an_open_stream(sender, receiver).await;
+}
+
+/// `delivered` on a stream its session's close cut short fails with `ConnectionAborted`.
+#[tokio::test]
+async fn mem_delivered_after_a_close_fails() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    delivered_after_a_close_fails(sender, receiver).await;
+}
+
+/// `delivered` stays pending while the peer has not read, and resolves once it reads the end.
+#[tokio::test]
+async fn mem_delivered_waits_for_the_peers_read() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    delivered_waits_for_the_peers_read(sender, receiver).await;
+}
+
+/// `delivered` on a stream whose peer dropped its read half unread fails with `BrokenPipe`.
+#[tokio::test]
+async fn mem_delivered_to_a_stopped_reader_fails() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    delivered_to_a_stopped_reader_fails(sender, receiver).await;
+}
+
+/// A close while a delivery is still pending leaves the peer's read an error, never a clean end.
+#[tokio::test]
+async fn mem_a_close_after_a_pending_delivery_errors_the_peer() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    a_close_after_a_pending_delivery_errors_the_peer(sender, receiver, Delivery::ReadToEnd).await;
+}
+
+/// A read into an empty buffer is not the end of the stream, so it delivers nothing.
+#[tokio::test]
+async fn mem_an_empty_read_is_not_the_end() {
+    let receiver = MemTransport::bind();
+    let sender = Node::new(MemTransport::bind(), NoDiscovery);
+    an_empty_read_is_not_the_end(sender, receiver).await;
 }

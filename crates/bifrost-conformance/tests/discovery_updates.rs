@@ -22,8 +22,8 @@ use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use bifrost::{
-    Abort, Addr, AddrUpdate, Discovery, Error, HintStream, Latest, Layered, Node, NodeId, Path,
-    PathChanges, Session, StaticDiscovery, Transport,
+    Addr, AddrUpdate, Discovery, Error, HintStream, Latest, Layered, Node, NodeId, Path,
+    PathChanges, Session, StaticDiscovery, Transport, WriteEnd,
 };
 use bifrost_mem::MemTransport;
 use futures_util::stream;
@@ -590,11 +590,16 @@ impl Session for Recorded {
     }
 }
 
-/// A write half whose abort does nothing: these tests never open a stream, so there is none to abort.
+/// A write half whose abort does nothing and whose delivery fails: these tests never open a stream,
+/// so there is none to abort or deliver.
 struct NoAbort<W>(W);
 
-impl<W> Abort for NoAbort<W> {
+impl<W> WriteEnd for NoAbort<W> {
     fn abort(&mut self) {}
+
+    fn delivered(self) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        core::future::ready(Err(io::ErrorKind::Unsupported.into()))
+    }
 }
 
 impl<W: io::AsyncWrite + Unpin> io::AsyncWrite for NoAbort<W> {

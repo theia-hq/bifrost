@@ -1,10 +1,13 @@
 use bifrost::{Node, StaticDiscovery, Transport};
 use bifrost_conformance::{
-    StreamEnd, StreamLimit, a_dropped_writer_still_ends_cleanly,
+    Delivery, StreamEnd, StreamLimit, a_close_after_a_pending_delivery_errors_the_peer,
+    a_delivered_stream_survives_a_close, a_dropped_writer_still_ends_cleanly,
     a_session_carries_its_stream_floor, abort_is_idempotent_and_writes_after_it_fail,
     abort_leaves_the_sessions_other_streams_alive, abort_leaves_the_streams_read_half_open,
     an_abort_after_shutdown_leaves_the_clean_end, an_aborted_writer_errors_the_peers_read,
-    bound_sockets_are_bind_truth, close_drains, close_ends_held_streams, direct_conn_info,
+    bound_sockets_are_bind_truth, close_drains, close_ends_held_streams,
+    delivered_after_a_close_fails, delivered_after_an_abort_fails,
+    delivered_finishes_an_open_stream, delivered_to_a_stopped_reader_fails, direct_conn_info,
     identity_binding, reach_roundtrip, wildcard_bind_is_not_rewritten, wrong_key_rejected,
 };
 use bifrost_iroh::Endpoint;
@@ -163,4 +166,55 @@ async fn iroh_abort_leaves_the_streams_read_half_open() {
     let receiver = Endpoint::bind_local().await.expect("bind receiver");
     let sender = dialing(&receiver).await;
     abort_leaves_the_streams_read_half_open(sender, receiver).await;
+}
+
+/// A close right after delivery costs the peer nothing: noq keeps bytes the peer acknowledged readable
+/// after the connection closes, so a peer that starts reading only then still reads every byte and
+/// the clean end. noq's docs do not promise this; this case is what holds it.
+#[tokio::test]
+async fn iroh_a_delivered_stream_survives_a_close() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    a_delivered_stream_survives_a_close(sender, receiver, Delivery::Acknowledged).await;
+}
+
+/// `delivered` on an aborted half fails with `ConnectionReset`.
+#[tokio::test]
+async fn iroh_delivered_after_an_abort_fails() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    delivered_after_an_abort_fails(sender, receiver).await;
+}
+
+/// `delivered` on a half never shut down finishes the stream, and the peer reads a clean end.
+#[tokio::test]
+async fn iroh_delivered_finishes_an_open_stream() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    delivered_finishes_an_open_stream(sender, receiver).await;
+}
+
+/// `delivered` on a stream its session's close cut short fails with `ConnectionAborted`.
+#[tokio::test]
+async fn iroh_delivered_after_a_close_fails() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    delivered_after_a_close_fails(sender, receiver).await;
+}
+
+/// `delivered` on a stream whose peer dropped its read half unread fails with `BrokenPipe`.
+#[tokio::test]
+async fn iroh_delivered_to_a_stopped_reader_fails() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    delivered_to_a_stopped_reader_fails(sender, receiver).await;
+}
+
+/// A close while a delivery is still pending leaves the peer's read an error, never a clean end.
+#[tokio::test]
+async fn iroh_a_close_after_a_pending_delivery_errors_the_peer() {
+    let receiver = Endpoint::bind_local().await.expect("bind receiver");
+    let sender = dialing(&receiver).await;
+    a_close_after_a_pending_delivery_errors_the_peer(sender, receiver, Delivery::Acknowledged)
+        .await;
 }

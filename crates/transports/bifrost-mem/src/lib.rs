@@ -19,7 +19,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 pub use bifrost_core::NodeId;
 use bifrost_core::{Addr, Error, HintStream, Path, PathChanges};
-pub use bifrost_transport::{Abort, Session, Transport};
+pub use bifrost_transport::{Session, Transport, WriteEnd};
 use tokio::io;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
